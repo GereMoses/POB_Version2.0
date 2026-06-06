@@ -112,6 +112,10 @@ api_router.include_router(backup_router, prefix="/backup", tags=["Backup Managem
 from .hr_integration import router as hr_integration_router
 api_router.include_router(hr_integration_router, prefix="/hr-integration", tags=["HR Integration"])
 
+# Business Central Integration
+from .bc_integration import router as bc_integration_router
+api_router.include_router(bc_integration_router, prefix="/bc-integration", tags=["Business Central Integration"])
+
 # Transport Manifest & Reconciliation
 from .transport_manifest import router as transport_manifest_router
 api_router.include_router(transport_manifest_router, tags=["Transport Manifest"])

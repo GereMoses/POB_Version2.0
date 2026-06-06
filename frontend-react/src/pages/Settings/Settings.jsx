@@ -1554,6 +1554,293 @@ const HRIntegrationTab = () => {
 };
 
 
+// ════════════════════════════════════════════════════════════════════════════
+// BUSINESS CENTRAL INTEGRATION TAB
+// ════════════════════════════════════════════════════════════════════════════
+const BCIntegrationTab = () => {
+  const { message: msg } = App.useApp();
+  const queryClient = useQueryClient();
+  const [syncing,        setSyncing]        = useState(false);
+  const [testing,        setTesting]        = useState(false);
+  const [saving,         setSaving]         = useState(false);
+  const [companies,      setCompanies]      = useState([]);
+  const [secretEditing,  setSecretEditing]  = useState(false);
+  const [previewDate,    setPreviewDate]    = useState('');
+  const [previewData,    setPreviewData]    = useState(null);
+  const [form] = Form.useForm();
+
+  const token   = localStorage.getItem('token') || localStorage.getItem('authToken');
+  const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+  const { data: cfgRaw,    isLoading: cfgLoading, refetch: refetchCfg }    = useQuery({ queryKey: ['bc-config'],  queryFn: () => apiService.get('/api/v1/bc-integration/config') });
+  const { data: statusRaw, refetch: refetchStatus } = useQuery({ queryKey: ['bc-status'], queryFn: () => apiService.get('/api/v1/bc-integration/sync/status'), refetchInterval: 60_000 });
+  const { data: histRaw,   isLoading: histLoading,  refetch: refetchHist }  = useQuery({ queryKey: ['bc-history'], queryFn: () => apiService.get('/api/v1/bc-integration/sync/history?limit=30'), refetchInterval: 60_000 });
+
+  React.useEffect(() => {
+    if (cfgRaw) {
+      form.setFieldsValue({
+        tenant_id:     cfgRaw.tenant_id     || '',
+        client_id:     cfgRaw.client_id     || '',
+        client_secret: cfgRaw.configured    ? cfgRaw.client_secret_masked : '',
+        environment:   cfgRaw.environment   || 'Production',
+        company_id:    cfgRaw.company_id    || '',
+        is_enabled:    cfgRaw.is_enabled    || false,
+        sync_time:     cfgRaw.sync_time     || '01:00',
+      });
+    }
+  }, [cfgRaw, form]);
+
+  const handleTest = async () => {
+    setTesting(true);
+    try {
+      const res  = await fetch('/api/v1/bc-integration/test-connection', { method: 'POST', headers });
+      const data = await res.json();
+      if (data.success) {
+        msg.success(`✓ ${data.message}`);
+        if (data.companies?.length) setCompanies(data.companies);
+      } else {
+        msg.error(`✗ ${data.message}`);
+      }
+    } catch (e) { msg.error(e.message); }
+    finally { setTesting(false); }
+  };
+
+  const handleSave = async (values) => {
+    setSaving(true);
+    try {
+      const payload = { ...values };
+      if (cfgRaw?.configured && !secretEditing) payload.client_secret = cfgRaw.client_secret_masked;
+      const selected = companies.find(c => c.id === values.company_id);
+      if (selected) payload.company_name = selected.name;
+      const res  = await fetch('/api/v1/bc-integration/config', { method: 'PUT', headers, body: JSON.stringify(payload) });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'Save failed');
+      msg.success('Configuration saved');
+      setSecretEditing(false);
+      queryClient.invalidateQueries(['bc-config']);
+      queryClient.invalidateQueries(['bc-status']);
+    } catch (e) { msg.error(e.message); }
+    finally { setSaving(false); }
+  };
+
+  const handleSync = async (syncDate) => {
+    setSyncing(true);
+    try {
+      const res  = await fetch('/api/v1/bc-integration/sync', { method: 'POST', headers, body: JSON.stringify({ sync_date: syncDate || null }) });
+      const data = await res.json();
+      const level = data.status === 'success' ? 'success' : data.status === 'partial' ? 'warning' : 'error';
+      msg[level](data.message);
+      queryClient.invalidateQueries(['bc-history']);
+      queryClient.invalidateQueries(['bc-status']);
+    } catch (e) { msg.error(e.message); }
+    finally { setSyncing(false); }
+  };
+
+  const handlePreview = async () => {
+    if (!previewDate) return;
+    try {
+      const res  = await fetch(`/api/v1/bc-integration/preview/${previewDate}`, { headers });
+      const data = await res.json();
+      setPreviewData(data);
+    } catch (e) { msg.error(e.message); }
+  };
+
+  const status  = statusRaw  || {};
+  const history = histRaw?.history || [];
+  const STATUS_TAG = { success: 'green', partial: 'orange', failed: 'red', skipped: 'default' };
+
+  const histCols = [
+    { title: 'Date',    dataIndex: 'sync_date',       key: 'date',   width: 110, render: v => <Text style={{ fontSize: 12 }}>{v || '—'}</Text> },
+    { title: 'Status',  dataIndex: 'status',          key: 'status', width: 90,  render: s => <Tag color={STATUS_TAG[s] || 'default'}>{(s||'').toUpperCase()}</Tag> },
+    { title: 'Sent',    dataIndex: 'records_sent',    key: 'sent',   width: 70,  render: v => <Text strong style={{ color: '#52c41a' }}>{v}</Text> },
+    { title: 'Failed',  dataIndex: 'records_failed',  key: 'fail',   width: 70,  render: v => <Text strong style={{ color: v > 0 ? '#f5222d' : '#9CA3AF' }}>{v}</Text> },
+    { title: 'By',      dataIndex: 'triggered_by',    key: 'by',     width: 120, render: v => <Text style={{ fontSize: 11 }}>{v}</Text> },
+    { title: 'Message', dataIndex: 'message',         key: 'msg',               render: v => <Text type="secondary" style={{ fontSize: 11 }}>{v}</Text> },
+    { title: 'Time',    dataIndex: 'created_at',      key: 'time',   width: 145, render: v => <Text style={{ fontSize: 11 }}>{v ? dayjs(v).format('DD MMM YYYY HH:mm') : '—'}</Text> },
+  ];
+
+  const previewCols = [
+    { title: 'Employee No.',  dataIndex: 'employee_number', key: 'emp',  width: 120 },
+    { title: 'Date',          dataIndex: 'date',            key: 'date', width: 110 },
+    { title: 'Clock In',      dataIndex: 'clock_in',        key: 'in',   width: 90  },
+    { title: 'Clock Out',     dataIndex: 'clock_out',       key: 'out',  width: 90, render: v => v || '—' },
+    { title: 'Hours',         dataIndex: 'hours',           key: 'hrs',  width: 80, render: v => v != null ? <Text strong>{v}</Text> : '—' },
+  ];
+
+  return (
+    <div style={{ padding: 24 }}>
+
+      {status.configured && (
+        <Alert
+          type={status.enabled ? 'success' : 'warning'}
+          showIcon
+          message={
+            status.enabled
+              ? `Business Central sync active — ${status.company_name || ''} (${status.environment}) · runs daily at ${status.sync_time} UTC`
+              : 'Business Central integration configured but disabled'
+          }
+          description={status.last_sync
+            ? `Last sync: ${status.last_sync.status?.toUpperCase()} · ${status.last_sync.records_sent} entries sent · ${dayjs(status.last_sync.created_at).fromNow()}`
+            : 'No syncs have run yet'}
+          style={{ marginBottom: 20 }}
+          action={<Button size="small" loading={syncing} onClick={() => handleSync(null)}>Sync Yesterday</Button>}
+        />
+      )}
+      {!status.configured && (
+        <Alert type="info" showIcon
+          message="Configure your Azure AD app credentials below to enable Business Central attendance sync"
+          description="Attendance hours are posted as Time Registration Entries in BC so Finance/HR can run payroll."
+          style={{ marginBottom: 20 }}
+        />
+      )}
+
+      <Row gutter={[16, 16]}>
+        <Col xs={24} lg={14}>
+          <Card
+            title={<Space><ApiOutlined />Azure AD + Business Central Settings</Space>}
+            extra={<Button size="small" loading={testing} onClick={handleTest} disabled={!cfgRaw?.configured}>Test Connection</Button>}
+          >
+            {/* Azure AD setup guide */}
+            <Alert type="info" showIcon style={{ marginBottom: 16, fontSize: 12 }}
+              message="Azure AD App Registration required"
+              description={
+                <span>
+                  In the Azure Portal: <strong>App Registrations → New → API Permissions → Dynamics 365 BC → Financials.ReadWrite.All</strong>.
+                  Copy the Tenant ID, Client ID, and create a Client Secret.
+                </span>
+              }
+            />
+
+            <Form form={form} layout="vertical" onFinish={handleSave}>
+              <Row gutter={12}>
+                <Col span={12}>
+                  <Form.Item label="Tenant ID (Directory ID)" name="tenant_id" rules={[{ required: true }]}
+                    extra="From Azure Portal → Azure Active Directory → Overview">
+                    <Input placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" style={{ fontFamily: 'monospace', fontSize: 12 }} />
+                  </Form.Item>
+                </Col>
+                <Col span={12}>
+                  <Form.Item label="Client ID (Application ID)" name="client_id" rules={[{ required: true }]}
+                    extra="From App Registration → Overview">
+                    <Input placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" style={{ fontFamily: 'monospace', fontSize: 12 }} />
+                  </Form.Item>
+                </Col>
+              </Row>
+
+              <Form.Item
+                label={
+                  <Space>Client Secret
+                    {cfgRaw?.configured && !secretEditing && (
+                      <Button type="link" size="small" style={{ padding: 0, fontSize: 11 }}
+                        onClick={() => { setSecretEditing(true); form.setFieldValue('client_secret', ''); }}>
+                        Change
+                      </Button>
+                    )}
+                  </Space>
+                }
+                name="client_secret"
+                rules={[{ required: !cfgRaw?.configured || secretEditing }]}
+                extra="From App Registration → Certificates & Secrets">
+                <Input.Password
+                  placeholder={cfgRaw?.configured && !secretEditing ? cfgRaw.client_secret_masked : 'Enter client secret'}
+                  disabled={cfgRaw?.configured && !secretEditing}
+                />
+              </Form.Item>
+
+              <Row gutter={12}>
+                <Col span={8}>
+                  <Form.Item label="Environment" name="environment" extra="Usually 'Production' or 'Sandbox'">
+                    <Select options={[{ label: 'Production', value: 'Production' }, { label: 'Sandbox', value: 'Sandbox' }]} />
+                  </Form.Item>
+                </Col>
+                <Col span={10}>
+                  <Form.Item label="Company" name="company_id" extra="Click Test Connection first to load companies">
+                    <Select
+                      placeholder="Test connection first to load companies"
+                      options={[
+                        ...(cfgRaw?.company_id ? [{ label: cfgRaw.company_name || cfgRaw.company_id, value: cfgRaw.company_id }] : []),
+                        ...companies.filter(c => c.id !== cfgRaw?.company_id).map(c => ({ label: c.name, value: c.id })),
+                      ]}
+                      allowClear
+                    />
+                  </Form.Item>
+                </Col>
+                <Col span={6}>
+                  <Form.Item label="Sync Time (UTC)" name="sync_time" extra="Daily sync time">
+                    <Input placeholder="01:00" maxLength={5} />
+                  </Form.Item>
+                </Col>
+              </Row>
+
+              <Form.Item name="is_enabled" valuePropName="checked">
+                <Switch checkedChildren="Sync Enabled" unCheckedChildren="Sync Disabled" />
+              </Form.Item>
+
+              <Button type="primary" htmlType="submit" loading={saving}>Save Configuration</Button>
+            </Form>
+          </Card>
+        </Col>
+
+        <Col xs={24} lg={10}>
+          <Space direction="vertical" style={{ width: '100%' }} size={16}>
+            <Card title="Manual Sync" size="small">
+              <Text type="secondary" style={{ display: 'block', marginBottom: 12, fontSize: 12 }}>
+                Push time entries for a specific date to Business Central.
+              </Text>
+              <Space.Compact style={{ width: '100%' }}>
+                <Input type="date" value={previewDate} onChange={e => setPreviewDate(e.target.value)} style={{ flex: 1 }} />
+                <Button type="primary" loading={syncing} onClick={() => handleSync(previewDate || null)} disabled={!status.configured}>Sync</Button>
+              </Space.Compact>
+              <Button block style={{ marginTop: 8 }} size="small" onClick={() => handleSync(null)} loading={syncing} disabled={!status.configured}>
+                Sync Yesterday (default)
+              </Button>
+            </Card>
+
+            <Card title="Preview Entries" size="small">
+              <Space.Compact style={{ width: '100%' }}>
+                <Input type="date" value={previewDate} onChange={e => setPreviewDate(e.target.value)} />
+                <Button onClick={handlePreview} disabled={!previewDate}>Preview</Button>
+              </Space.Compact>
+              {previewData && (
+                <div style={{ marginTop: 12 }}>
+                  <Text strong style={{ fontSize: 12 }}>{previewData.total} entries for {previewData.sync_date}</Text>
+                  <Table columns={previewCols} size="small"
+                    dataSource={previewData.entries.map((r, i) => ({ ...r, key: i }))}
+                    pagination={{ pageSize: 5, size: 'small' }} style={{ marginTop: 8 }} />
+                </div>
+              )}
+            </Card>
+
+            <Card size="small" title="Payload sent to Business Central" style={{ background: '#F9FAFB' }}>
+              <pre style={{ background: '#1F2937', color: '#E5E7EB', padding: '10px 14px', borderRadius: 8, fontSize: 11, margin: 0 }}>
+{`POST /companies({id})/timeRegistrationEntries
+
+{
+  "employeeNumber": "EMP001",
+  "date":           "2026-06-06",
+  "quantity":       8.72,   // hours worked
+  "status":         "Open"
+}`}
+              </pre>
+            </Card>
+          </Space>
+        </Col>
+      </Row>
+
+      <Card title={<Space><SyncOutlined />Sync History</Space>}
+        extra={<Button size="small" icon={<ReloadOutlined />} onClick={() => { refetchHist(); refetchStatus(); }}>Refresh</Button>}
+        style={{ marginTop: 16 }}>
+        <Table columns={histCols} dataSource={history.map((h, i) => ({ ...h, key: i }))}
+          loading={histLoading} size="small"
+          pagination={{ pageSize: 10, showTotal: t => `${t} sync runs` }}
+          scroll={{ x: 800 }}
+          locale={{ emptyText: <Empty description="No sync history yet" /> }} />
+      </Card>
+    </div>
+  );
+};
+
+
 const Settings = () => {
   const [activeTab, setActiveTab] = useState('users');
 
@@ -1564,7 +1851,8 @@ const Settings = () => {
     { key: 'security',  label: <Space><ClockCircleOutlined />Security</Space>,     children: <SecurityTab /> },
     { key: 'audit-log', label: <Space><AuditOutlined />Audit Log</Space>,          children: <AuditLogTab /> },
     { key: 'backup',         label: <Space><DatabaseOutlined />Database Backup</Space>,    children: <BackupTab /> },
-    { key: 'hr-integration', label: <Space><ApiOutlined />HR Integration</Space>,             children: <HRIntegrationTab /> },
+    { key: 'hr-integration', label: <Space><ApiOutlined />HR Integration</Space>,          children: <HRIntegrationTab /> },
+    { key: 'bc-integration', label: <Space><LinkOutlined />Business Central</Space>,       children: <BCIntegrationTab /> },
   ];
 
   return (

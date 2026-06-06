@@ -501,6 +501,42 @@ async def _seamlesshr_nightly_sync_loop():
         await asyncio.sleep(60)
 
 
+async def _bc_nightly_sync_loop():
+    """Background loop: push attendance to Business Central at the configured sync time."""
+    from .services.business_central_service import get_bc_config, push_attendance as bc_push
+    from .core.database import SessionLocal
+
+    logger.info("Business Central sync scheduler started — checking every 60 s")
+    last_run_date = None
+
+    while True:
+        try:
+            now       = datetime.now(timezone.utc)
+            today_str = str(now.date())
+
+            if last_run_date != today_str:
+                db = SessionLocal()
+                try:
+                    cfg = get_bc_config(db)
+                    if cfg and cfg.get("is_enabled"):
+                        sync_h, sync_m = map(int, (cfg.get("sync_time") or "01:00").split(":"))
+                        if now.hour == sync_h and now.minute == sync_m:
+                            logger.info("Business Central: nightly sync starting...")
+                            result = await bc_push(db, triggered_by="scheduler")
+                            logger.info(f"Business Central nightly sync: {result['status']} — {result['message']}")
+                            last_run_date = today_str
+                finally:
+                    db.close()
+
+        except asyncio.CancelledError:
+            logger.info("Business Central sync scheduler stopped")
+            break
+        except Exception as e:
+            logger.error(f"Business Central sync loop error: {e}")
+
+        await asyncio.sleep(60)
+
+
 async def _drill_scheduler_loop():
     """Background loop: auto-trigger drill schedules. DB runs off the event loop."""
     logger.info("Drill scheduler started — polling every 30 s")
@@ -595,6 +631,10 @@ async def startup_event():
     # SeamlessHR nightly sync scheduler
     _background_tasks.append(asyncio.create_task(_seamlesshr_nightly_sync_loop()))
     logger.info("✅ SeamlessHR nightly sync scheduler started")
+
+    # Business Central nightly sync scheduler
+    _background_tasks.append(asyncio.create_task(_bc_nightly_sync_loop()))
+    logger.info("✅ Business Central nightly sync scheduler started")
 
     # Prometheus metrics endpoint (/metrics) — scraped by Prometheus every 15s
     try:
