@@ -11,6 +11,7 @@ import {
   CloseOutlined, SettingOutlined, ClockCircleOutlined,
   DatabaseOutlined, CloudServerOutlined, DownloadOutlined,
   CheckCircleOutlined, WarningOutlined, SyncOutlined,
+  ApiOutlined, LinkOutlined,
 } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import apiService from '../../services/api';
@@ -1194,6 +1195,365 @@ docker compose -f docker-compose.prod.yml up -d --no-deps db-backup`}
 };
 
 
+// ════════════════════════════════════════════════════════════════════════════
+// HR INTEGRATION TAB — SeamlessHR connector
+// ════════════════════════════════════════════════════════════════════════════
+const HRIntegrationTab = () => {
+  const { message: msg } = App.useApp();
+  const queryClient = useQueryClient();
+  const [syncing,     setSyncing]     = useState(false);
+  const [testing,     setTesting]     = useState(false);
+  const [saving,      setSaving]      = useState(false);
+  const [previewDate, setPreviewDate] = useState('');
+  const [previewData, setPreviewData] = useState(null);
+  const [apiKeyEditing, setApiKeyEditing] = useState(false);
+
+  const [form] = Form.useForm();
+
+  const token   = localStorage.getItem('token') || localStorage.getItem('authToken');
+  const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+  const { data: cfgRaw, isLoading: cfgLoading, refetch: refetchCfg } = useQuery({
+    queryKey: ['hr-config'],
+    queryFn:  () => apiService.get('/api/v1/hr-integration/config'),
+  });
+
+  const { data: statusRaw, refetch: refetchStatus } = useQuery({
+    queryKey: ['hr-status'],
+    queryFn:  () => apiService.get('/api/v1/hr-integration/sync/status'),
+    refetchInterval: 60_000,
+  });
+
+  const { data: histRaw, isLoading: histLoading, refetch: refetchHist } = useQuery({
+    queryKey: ['hr-history'],
+    queryFn:  () => apiService.get('/api/v1/hr-integration/sync/history?limit=30'),
+    refetchInterval: 60_000,
+  });
+
+  // Populate form when config loads
+  React.useEffect(() => {
+    if (cfgRaw) {
+      form.setFieldsValue({
+        api_base_url:        cfgRaw.api_base_url        || 'https://api.seamlesshr.com',
+        api_key:             cfgRaw.configured ? cfgRaw.api_key_masked : '',
+        org_id:              cfgRaw.org_id              || '',
+        auth_header_name:    cfgRaw.auth_header_name    || 'Authorization',
+        attendance_endpoint: cfgRaw.attendance_endpoint || '/v1/attendance/clock-records',
+        employee_endpoint:   cfgRaw.employee_endpoint   || '/v1/employees',
+        is_enabled:          cfgRaw.is_enabled           || false,
+        sync_time:           cfgRaw.sync_time            || '00:00',
+      });
+    }
+  }, [cfgRaw, form]);
+
+  const handleSave = async (values) => {
+    setSaving(true);
+    try {
+      const res = await fetch('/api/v1/hr-integration/config', {
+        method: 'PUT', headers,
+        body: JSON.stringify(values),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'Save failed');
+      msg.success('Configuration saved');
+      setApiKeyEditing(false);
+      queryClient.invalidateQueries(['hr-config']);
+      queryClient.invalidateQueries(['hr-status']);
+    } catch (e) { msg.error(e.message); }
+    finally { setSaving(false); }
+  };
+
+  const handleTest = async () => {
+    setTesting(true);
+    try {
+      const res  = await fetch('/api/v1/hr-integration/test-connection', { method: 'POST', headers });
+      const data = await res.json();
+      if (data.success) msg.success(`✓ ${data.message}`);
+      else              msg.error(`✗ ${data.message}`);
+    } catch (e) { msg.error(e.message); }
+    finally { setTesting(false); }
+  };
+
+  const handleSync = async (syncDate) => {
+    setSyncing(true);
+    try {
+      const res  = await fetch('/api/v1/hr-integration/sync', {
+        method: 'POST', headers,
+        body: JSON.stringify({ sync_date: syncDate || null }),
+      });
+      const data = await res.json();
+      const level = data.status === 'success' ? 'success' : data.status === 'partial' ? 'warning' : 'error';
+      msg[level](`${data.message}`);
+      queryClient.invalidateQueries(['hr-history']);
+      queryClient.invalidateQueries(['hr-status']);
+    } catch (e) { msg.error(e.message); }
+    finally { setSyncing(false); }
+  };
+
+  const handlePreview = async () => {
+    if (!previewDate) return;
+    try {
+      const res  = await fetch(`/api/v1/hr-integration/preview/${previewDate}`, { headers });
+      const data = await res.json();
+      setPreviewData(data);
+    } catch (e) { msg.error(e.message); }
+  };
+
+  const status  = statusRaw  || {};
+  const history = histRaw?.history || [];
+
+  const STATUS_COLOR = { success: 'success', partial: 'warning', failed: 'error', skipped: 'default' };
+  const STATUS_TAG   = { success: 'green', partial: 'orange', failed: 'red', skipped: 'default' };
+
+  const histCols = [
+    { title: 'Date', dataIndex: 'sync_date', key: 'date', width: 110,
+      render: v => <Text style={{ fontSize: 12 }}>{v || '—'}</Text> },
+    { title: 'Status', dataIndex: 'status', key: 'status', width: 90,
+      render: s => <Tag color={STATUS_TAG[s] || 'default'}>{(s || '').toUpperCase()}</Tag> },
+    { title: 'Sent', dataIndex: 'records_sent', key: 'sent', width: 70,
+      render: v => <Text strong style={{ color: '#52c41a' }}>{v}</Text> },
+    { title: 'Failed', dataIndex: 'records_failed', key: 'failed', width: 70,
+      render: v => <Text strong style={{ color: v > 0 ? '#f5222d' : '#9CA3AF' }}>{v}</Text> },
+    { title: 'Triggered by', dataIndex: 'triggered_by', key: 'by', width: 120,
+      render: v => <Text style={{ fontSize: 11 }}>{v}</Text> },
+    { title: 'Message', dataIndex: 'message', key: 'msg',
+      render: v => <Text type="secondary" style={{ fontSize: 11 }}>{v}</Text> },
+    { title: 'Time', dataIndex: 'created_at', key: 'time', width: 145,
+      render: v => <Text style={{ fontSize: 11 }}>{v ? dayjs(v).format('DD MMM YYYY HH:mm') : '—'}</Text> },
+  ];
+
+  const previewCols = [
+    { title: 'Employee ID',   dataIndex: 'employee_id',   key: 'emp', width: 120 },
+    { title: 'Date',          dataIndex: 'date',           key: 'date', width: 110 },
+    { title: 'Clock In',      dataIndex: 'clock_in',       key: 'in',  width: 90 },
+    { title: 'Clock Out',     dataIndex: 'clock_out',      key: 'out', width: 90, render: v => v || '—' },
+    { title: 'Total (mins)',  dataIndex: 'total_minutes',  key: 'mins', width: 110, render: v => v ?? '—' },
+  ];
+
+  return (
+    <div style={{ padding: 24 }}>
+
+      {/* ── Connection status banner ── */}
+      {status.configured && (
+        <Alert
+          type={status.enabled ? 'success' : 'warning'}
+          showIcon
+          message={
+            status.enabled
+              ? `SeamlessHR sync is active — runs daily at ${status.sync_time} UTC`
+              : 'SeamlessHR integration is configured but disabled — enable it below'
+          }
+          description={status.last_sync
+            ? `Last sync: ${status.last_sync.status?.toUpperCase()} · ${status.last_sync.records_sent} records sent · ${dayjs(status.last_sync.created_at).fromNow()}`
+            : 'No syncs have run yet'}
+          style={{ marginBottom: 20 }}
+          action={
+            <Button size="small" loading={syncing} onClick={() => handleSync(null)}>
+              Sync Yesterday
+            </Button>
+          }
+        />
+      )}
+
+      {!status.configured && (
+        <Alert
+          type="info" showIcon
+          message="Configure your SeamlessHR API credentials below to enable attendance sync"
+          description="Once configured, attendance records will be pushed to SeamlessHR automatically every night so HR can process payroll."
+          style={{ marginBottom: 20 }}
+        />
+      )}
+
+      <Row gutter={[16, 16]}>
+
+        {/* ── Config form ── */}
+        <Col xs={24} lg={14}>
+          <Card
+            title={<Space><ApiOutlined />SeamlessHR API Settings</Space>}
+            extra={
+              <Space>
+                <Button size="small" loading={testing} onClick={handleTest}
+                  disabled={!cfgRaw?.configured}>
+                  Test Connection
+                </Button>
+              </Space>
+            }
+          >
+            <Form form={form} layout="vertical" onFinish={handleSave}>
+
+              <Form.Item label="API Base URL" name="api_base_url"
+                rules={[{ required: true, message: 'Enter the SeamlessHR API base URL' }]}
+                extra="Obtain from SeamlessHR — typically https://api.seamlesshr.com">
+                <Input placeholder="https://api.seamlesshr.com" />
+              </Form.Item>
+
+              <Form.Item
+                label={
+                  <Space>
+                    API Key
+                    {cfgRaw?.configured && !apiKeyEditing && (
+                      <Button type="link" size="small" style={{ padding: 0, fontSize: 11 }}
+                        onClick={() => { setApiKeyEditing(true); form.setFieldValue('api_key', ''); }}>
+                        Change
+                      </Button>
+                    )}
+                  </Space>
+                }
+                name="api_key"
+                rules={[{ required: !cfgRaw?.configured || apiKeyEditing, message: 'Enter your SeamlessHR API key' }]}
+                extra="Provided by SeamlessHR when they set up your API access">
+                <Input.Password
+                  placeholder={cfgRaw?.configured && !apiKeyEditing ? cfgRaw.api_key_masked : 'Enter API key'}
+                  disabled={cfgRaw?.configured && !apiKeyEditing}
+                />
+              </Form.Item>
+
+              <Row gutter={12}>
+                <Col span={12}>
+                  <Form.Item label="Organisation ID" name="org_id"
+                    extra="Your company ID in SeamlessHR (if required)">
+                    <Input placeholder="e.g. marconi-nigeria" />
+                  </Form.Item>
+                </Col>
+                <Col span={12}>
+                  <Form.Item label="Auth Header" name="auth_header_name"
+                    extra="Usually 'Authorization' (Bearer token)">
+                    <Input placeholder="Authorization" />
+                  </Form.Item>
+                </Col>
+              </Row>
+
+              <Row gutter={12}>
+                <Col span={14}>
+                  <Form.Item label="Attendance Endpoint" name="attendance_endpoint"
+                    extra="Path to POST attendance records">
+                    <Input placeholder="/v1/attendance/clock-records" />
+                  </Form.Item>
+                </Col>
+                <Col span={10}>
+                  <Form.Item label="Daily Sync Time (UTC)" name="sync_time"
+                    extra="Time to run the nightly sync">
+                    <Input placeholder="00:00" maxLength={5} />
+                  </Form.Item>
+                </Col>
+              </Row>
+
+              <Form.Item name="is_enabled" valuePropName="checked">
+                <Switch checkedChildren="Sync Enabled" unCheckedChildren="Sync Disabled" />
+              </Form.Item>
+
+              <Form.Item style={{ marginBottom: 0 }}>
+                <Space>
+                  <Button type="primary" htmlType="submit" loading={saving}>
+                    Save Configuration
+                  </Button>
+                </Space>
+              </Form.Item>
+            </Form>
+          </Card>
+        </Col>
+
+        {/* ── Right panel: manual sync + preview ── */}
+        <Col xs={24} lg={10}>
+          <Space direction="vertical" style={{ width: '100%' }} size={16}>
+
+            <Card title="Manual Sync" size="small">
+              <Text type="secondary" style={{ display: 'block', marginBottom: 12, fontSize: 12 }}>
+                Manually push attendance records for a specific date to SeamlessHR.
+              </Text>
+              <Space.Compact style={{ width: '100%' }}>
+                <Input
+                  type="date"
+                  value={previewDate}
+                  onChange={e => setPreviewDate(e.target.value)}
+                  style={{ flex: 1 }}
+                />
+                <Button
+                  type="primary" loading={syncing}
+                  onClick={() => handleSync(previewDate || null)}
+                  disabled={!status.configured}
+                >
+                  Sync
+                </Button>
+              </Space.Compact>
+              <Button
+                block style={{ marginTop: 8 }} size="small"
+                onClick={() => handleSync(null)} loading={syncing}
+                disabled={!status.configured}
+              >
+                Sync Yesterday (default)
+              </Button>
+            </Card>
+
+            <Card title="Preview Records" size="small">
+              <Text type="secondary" style={{ display: 'block', marginBottom: 8, fontSize: 12 }}>
+                See exactly which records would be sent for a date before syncing.
+              </Text>
+              <Space.Compact style={{ width: '100%' }}>
+                <Input type="date" value={previewDate} onChange={e => setPreviewDate(e.target.value)} />
+                <Button onClick={handlePreview} disabled={!previewDate}>Preview</Button>
+              </Space.Compact>
+              {previewData && (
+                <div style={{ marginTop: 12 }}>
+                  <Text strong style={{ fontSize: 12 }}>{previewData.total} records for {previewData.sync_date}</Text>
+                  {previewData.truncated && <Text type="secondary" style={{ fontSize: 11 }}> (showing first 100)</Text>}
+                  <Table
+                    columns={previewCols} size="small"
+                    dataSource={previewData.records.map((r, i) => ({ ...r, key: i }))}
+                    pagination={{ pageSize: 5, size: 'small' }}
+                    style={{ marginTop: 8 }}
+                  />
+                </div>
+              )}
+            </Card>
+
+          </Space>
+        </Col>
+      </Row>
+
+      {/* ── Sync History ── */}
+      <Card
+        title={<Space><SyncOutlined />Sync History</Space>}
+        extra={<Button size="small" icon={<ReloadOutlined />} onClick={() => { refetchHist(); refetchStatus(); }}>Refresh</Button>}
+        style={{ marginTop: 16 }}
+      >
+        <Table
+          columns={histCols}
+          dataSource={history.map((h, i) => ({ ...h, key: i }))}
+          loading={histLoading}
+          size="small"
+          pagination={{ pageSize: 10, showTotal: t => `${t} sync runs` }}
+          scroll={{ x: 800 }}
+          locale={{ emptyText: <Empty description="No sync history yet" /> }}
+        />
+      </Card>
+
+      {/* ── Data format note ── */}
+      <Card size="small" style={{ marginTop: 16, background: '#F9FAFB' }}
+        title="Data sent to SeamlessHR (per employee per day)">
+        <pre style={{ background: '#1F2937', color: '#E5E7EB', padding: '12px 16px', borderRadius: 8, fontSize: 12, margin: 0 }}>
+{`{
+  "records": [
+    {
+      "employee_id":   "EMP001",      // same as emp_code in POB
+      "date":          "2026-06-06",
+      "clock_in":      "08:02:14",    // first biometric check-in of the day
+      "clock_out":     "17:45:00",    // last biometric check-out of the day
+      "total_minutes": 583,
+      "source":        "POB_BIOMETRIC"
+    }
+  ]
+}`}
+        </pre>
+        <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 8 }}>
+          Update the Attendance Endpoint above once SeamlessHR shares their API documentation.
+        </Text>
+      </Card>
+    </div>
+  );
+};
+
+
 const Settings = () => {
   const [activeTab, setActiveTab] = useState('users');
 
@@ -1203,7 +1563,8 @@ const Settings = () => {
     { key: 'company',   label: <Space><BankOutlined />Company</Space>,             children: <CompanyTab /> },
     { key: 'security',  label: <Space><ClockCircleOutlined />Security</Space>,     children: <SecurityTab /> },
     { key: 'audit-log', label: <Space><AuditOutlined />Audit Log</Space>,          children: <AuditLogTab /> },
-    { key: 'backup',    label: <Space><DatabaseOutlined />Database Backup</Space>, children: <BackupTab /> },
+    { key: 'backup',         label: <Space><DatabaseOutlined />Database Backup</Space>,    children: <BackupTab /> },
+    { key: 'hr-integration', label: <Space><ApiOutlined />HR Integration</Space>,             children: <HRIntegrationTab /> },
   ];
 
   return (

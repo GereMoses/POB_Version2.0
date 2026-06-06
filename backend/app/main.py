@@ -461,6 +461,46 @@ def _drill_check_one_pass(now, retry_cutoff) -> None:
         db.close()
 
 
+async def _seamlesshr_nightly_sync_loop():
+    """
+    Background loop: push yesterday's attendance to SeamlessHR at the configured
+    sync time (default midnight UTC). Checks every minute whether it's time to run.
+    """
+    from .services.seamlesshr_service import get_config, push_attendance
+    from .core.database import SessionLocal
+
+    logger.info("SeamlessHR sync scheduler started — checking every 60 s")
+    last_run_date = None
+
+    while True:
+        try:
+            now       = datetime.now(timezone.utc)
+            today_str = str(now.date())
+
+            # Only run once per calendar day, at the configured sync time
+            if last_run_date != today_str:
+                db = SessionLocal()
+                try:
+                    cfg = get_config(db)
+                    if cfg and cfg.get("is_enabled"):
+                        sync_h, sync_m = map(int, (cfg.get("sync_time") or "00:00").split(":"))
+                        if now.hour == sync_h and now.minute == sync_m:
+                            logger.info("SeamlessHR: nightly sync starting...")
+                            result = await push_attendance(db, triggered_by="scheduler")
+                            logger.info(f"SeamlessHR nightly sync: {result['status']} — {result['message']}")
+                            last_run_date = today_str
+                finally:
+                    db.close()
+
+        except asyncio.CancelledError:
+            logger.info("SeamlessHR sync scheduler stopped")
+            break
+        except Exception as e:
+            logger.error(f"SeamlessHR sync loop error: {e}")
+
+        await asyncio.sleep(60)
+
+
 async def _drill_scheduler_loop():
     """Background loop: auto-trigger drill schedules. DB runs off the event loop."""
     logger.info("Drill scheduler started — polling every 30 s")
@@ -551,6 +591,10 @@ async def startup_event():
         logger.info(f"🔌 WebSocket routes: {ws_routes}")
 
     logger.info("🚀 Application startup complete")
+
+    # SeamlessHR nightly sync scheduler
+    _background_tasks.append(asyncio.create_task(_seamlesshr_nightly_sync_loop()))
+    logger.info("✅ SeamlessHR nightly sync scheduler started")
 
     # Prometheus metrics endpoint (/metrics) — scraped by Prometheus every 15s
     try:
