@@ -37,38 +37,6 @@ def _require_admin(current_user=Depends(get_current_user)):
     return current_user
 
 
-def _ensure_tables(db: Session):
-    """Create integration tables if they don't exist (idempotent)."""
-    db.execute(text("""
-        CREATE TABLE IF NOT EXISTS hr_integration_config (
-            id                  SERIAL PRIMARY KEY,
-            api_base_url        VARCHAR(255),
-            api_key             VARCHAR(500),
-            org_id              VARCHAR(100),
-            auth_header_name    VARCHAR(100) DEFAULT 'Authorization',
-            attendance_endpoint VARCHAR(255) DEFAULT '/v1/attendance/clock-records',
-            employee_endpoint   VARCHAR(255) DEFAULT '/v1/employees',
-            is_enabled          BOOLEAN      DEFAULT FALSE,
-            sync_time           VARCHAR(10)  DEFAULT '00:00',
-            updated_at          TIMESTAMPTZ  DEFAULT NOW()
-        )
-    """))
-    db.execute(text("""
-        CREATE TABLE IF NOT EXISTS hr_sync_log (
-            id              SERIAL PRIMARY KEY,
-            sync_date       DATE,
-            triggered_by    VARCHAR(50),
-            status          VARCHAR(20),
-            records_built   INT  DEFAULT 0,
-            records_sent    INT  DEFAULT 0,
-            records_failed  INT  DEFAULT 0,
-            message         VARCHAR(500),
-            created_at      TIMESTAMPTZ DEFAULT NOW()
-        )
-    """))
-    db.commit()
-
-
 # ── Schemas ───────────────────────────────────────────────────────────────────
 
 class ConfigIn(BaseModel):
@@ -93,7 +61,7 @@ async def get_integration_config(
     db: Session = Depends(get_db),
     current_user=Depends(_require_admin),
 ):
-    _ensure_tables(db)
+
     try:
         row = db.execute(text("""
             SELECT api_base_url, api_key, org_id, auth_header_name,
@@ -139,7 +107,7 @@ async def save_integration_config(
     db: Session = Depends(get_db),
     current_user=Depends(_require_admin),
 ):
-    _ensure_tables(db)
+
 
     # If api_key is all stars (masked), keep the existing key
     existing_key = None
@@ -214,7 +182,7 @@ async def get_sync_history(
     db: Session = Depends(get_db),
     current_user=Depends(_require_admin),
 ):
-    _ensure_tables(db)
+
     try:
         rows = db.execute(text("""
             SELECT id, sync_date, triggered_by, status,
@@ -253,7 +221,7 @@ async def get_sync_status(
     db: Session = Depends(get_db),
     current_user=Depends(_require_admin),
 ):
-    _ensure_tables(db)
+
     cfg = get_config(db)
 
     last = None

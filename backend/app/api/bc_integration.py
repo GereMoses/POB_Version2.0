@@ -37,37 +37,6 @@ def _require_admin(current_user=Depends(get_current_user)):
     return current_user
 
 
-def _ensure_tables(db: Session):
-    db.execute(text("""
-        CREATE TABLE IF NOT EXISTS bc_integration_config (
-            id             SERIAL PRIMARY KEY,
-            tenant_id      VARCHAR(200),
-            client_id      VARCHAR(200),
-            client_secret  VARCHAR(500),
-            environment    VARCHAR(50)  DEFAULT 'Production',
-            company_id     VARCHAR(100),
-            company_name   VARCHAR(200),
-            is_enabled     BOOLEAN      DEFAULT FALSE,
-            sync_time      VARCHAR(10)  DEFAULT '01:00',
-            updated_at     TIMESTAMPTZ  DEFAULT NOW()
-        )
-    """))
-    db.execute(text("""
-        CREATE TABLE IF NOT EXISTS bc_sync_log (
-            id              SERIAL PRIMARY KEY,
-            sync_date       DATE,
-            triggered_by    VARCHAR(50),
-            status          VARCHAR(20),
-            records_built   INT  DEFAULT 0,
-            records_sent    INT  DEFAULT 0,
-            records_failed  INT  DEFAULT 0,
-            message         VARCHAR(500),
-            created_at      TIMESTAMPTZ DEFAULT NOW()
-        )
-    """))
-    db.commit()
-
-
 # ── Schemas ───────────────────────────────────────────────────────────────────
 
 class BCConfigIn(BaseModel):
@@ -92,7 +61,7 @@ async def get_config(
     db: Session = Depends(get_db),
     current_user=Depends(_require_admin),
 ):
-    _ensure_tables(db)
+
     try:
         row = db.execute(text("""
             SELECT tenant_id, client_id, client_secret, environment,
@@ -132,7 +101,7 @@ async def save_config(
     db: Session = Depends(get_db),
     current_user=Depends(_require_admin),
 ):
-    _ensure_tables(db)
+
 
     # Preserve existing secret if masked value is passed back
     client_secret = body.client_secret
@@ -220,7 +189,7 @@ async def get_sync_history(
     db: Session = Depends(get_db),
     current_user=Depends(_require_admin),
 ):
-    _ensure_tables(db)
+
     try:
         rows = db.execute(text("""
             SELECT id, sync_date, triggered_by, status,
@@ -257,7 +226,7 @@ async def get_sync_status(
     db: Session = Depends(get_db),
     current_user=Depends(_require_admin),
 ):
-    _ensure_tables(db)
+
     cfg = get_bc_config(db)
     last = None
     try:
