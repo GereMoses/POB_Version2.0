@@ -552,6 +552,18 @@ async def startup_event():
 
     logger.info("🚀 Application startup complete")
 
+    # Prometheus metrics endpoint (/metrics) — scraped by Prometheus every 15s
+    try:
+        from prometheus_fastapi_instrumentator import Instrumentator
+        Instrumentator(
+            should_group_status_codes=True,
+            should_ignore_untemplated=True,
+            excluded_handlers=["/health", "/metrics"],
+        ).instrument(app).expose(app, include_in_schema=False)
+        logger.info("✅ Prometheus metrics endpoint active at /metrics")
+    except ImportError:
+        logger.debug("prometheus-fastapi-instrumentator not installed — /metrics disabled")
+
 
 @app.on_event("shutdown")
 async def shutdown_event():

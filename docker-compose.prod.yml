@@ -1,16 +1,19 @@
 version: '3.8'
 
 # ─── Production Docker Compose ────────────────────────────────────────────────
+# Architecture:
+#   - Central server at HQ runs all services
+#   - Remote locations (offshore platforms, branches) have ZKTeco readers only
+#   - Readers push attendance data via ADMS to HQ server (port 80 → /iclock/)
+#   - Users access the system via HTTPS (port 443)
+#
 # Usage:
-#   docker compose -f docker-compose.prod.yml up -d
+#   First deploy:  ./scripts/deploy.sh
+#   Update:        ./scripts/deploy.sh update
 #
-# Before first deploy:
-#   1. Copy .env.prod.example → .env.prod and fill in real secrets
-#   2. Build the React frontend: cd frontend-react && npm run build
-#   3. Run: docker compose -f docker-compose.prod.yml up -d
-#
-# ZKTeco ADMS devices must be configured to push to:
-#   http://<SERVER_IP>/iclock/cdata   (port 80, proxied by nginx → backend:8000)
+# ZKTeco ADMS device configuration:
+#   Server address: http://<HQ_SERVER_IP>   (port 80, HTTP — many readers don't support HTTPS)
+#   The nginx config passes /iclock/ on port 80 directly to the backend
 # ──────────────────────────────────────────────────────────────────────────────
 
 services:
@@ -29,15 +32,18 @@ services:
       - ./database/postgresql.conf:/etc/postgresql/postgresql.conf:ro
     command: >
       postgres
-      -c max_connections=200
-      -c shared_buffers=256MB
-      -c effective_cache_size=1GB
-      -c maintenance_work_mem=64MB
+      -c max_connections=300
+      -c shared_buffers=512MB
+      -c effective_cache_size=2GB
+      -c maintenance_work_mem=128MB
       -c checkpoint_completion_target=0.9
       -c wal_buffers=16MB
       -c default_statistics_target=100
       -c random_page_cost=1.1
       -c effective_io_concurrency=200
+      -c log_min_duration_statement=1000
+      -c log_connections=on
+      -c log_disconnections=on
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DATABASE_USER} -d ${DATABASE_NAME} -q"]
       interval: 10s
@@ -47,7 +53,6 @@ services:
     networks:
       - pob_internal
     restart: unless-stopped
-    # Ports NOT exposed in production — only accessible within Docker network
 
   # ── Redis ───────────────────────────────────────────────────────────────────
   redis:
@@ -65,9 +70,8 @@ services:
     networks:
       - pob_internal
     restart: unless-stopped
-    # Port NOT exposed in production — only accessible within Docker network
 
-  # ── DB Init (runs once, exits) ──────────────────────────────────────────────
+  # ── DB Init (runs once on first deploy, then exits) ─────────────────────────
   db-init:
     image: postgres:15-alpine
     container_name: pob_db_init
@@ -103,8 +107,8 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - REDIS_HOST=redis
       - REDIS_PORT=6379
+      - ENVIRONMENT=production
     volumes:
-      # Persistent storage for user uploads and generated media — never goes away on redeploy
       - uploads_data:/app/uploads
       - media_data:/app/media
       - logs_data:/app/logs
@@ -126,7 +130,6 @@ services:
     restart: unless-stopped
 
   # ── Celery Worker ───────────────────────────────────────────────────────────
-  # Handles: report export, mustering drill notifications, visitor alerts, MTD tasks
   celery-worker:
     build:
       context: ./backend
@@ -148,14 +151,11 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      db-init:
-        condition: service_completed_successfully
     networks:
       - pob_internal
     restart: unless-stopped
 
-  # ── Celery Beat (scheduler) ─────────────────────────────────────────────────
-  # Fires periodic tasks: mustering schedule checks, MTD housekeeping, etc.
+  # ── Celery Beat (periodic task scheduler) ──────────────────────────────────
   celery-beat:
     build:
       context: ./backend
@@ -166,8 +166,6 @@ services:
     environment:
       - DATABASE_URL=postgresql://${DATABASE_USER}:${DATABASE_PASSWORD}@postgres:5432/${DATABASE_NAME}
       - REDIS_URL=redis://redis:6379/0
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
     command: ["celery", "-A", "celery_worker.app", "beat", "--loglevel=info", "--schedule=/app/celerybeat-schedule"]
     volumes:
       - celerybeat_data:/app
@@ -187,30 +185,24 @@ services:
     image: pob_frontend:latest
     container_name: pob_frontend
     volumes:
-      # Serve uploaded files (personnel photos, floor plans) through nginx
       - uploads_data:/usr/share/nginx/uploads:ro
       - media_data:/usr/share/nginx/media:ro
     depends_on:
       backend:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost/health"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost/"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 30s
     networks:
       - pob_internal
-      - pob_external
     restart: unless-stopped
 
-  # ── Nginx Reverse Proxy (SSL termination, port 80/443) ─────────────────────
-  # Sits in front of everything. Terminates TLS and routes:
-  #   /          → frontend:80
-  #   /api/      → backend:8000
-  #   /iclock/   → backend:8000  (ZKTeco ADMS device push endpoint)
-  #   /uploads/  → serves from uploads volume directly
-  #   /media/    → serves from media volume directly
+  # ── Nginx Reverse Proxy ─────────────────────────────────────────────────────
+  # Port 80:  ZKTeco ADMS push (/iclock/) + HTTP→HTTPS redirect for browsers
+  # Port 443: HTTPS for all users (frontend + API + WebSocket)
   nginx:
     image: nginx:alpine
     container_name: pob_nginx
@@ -218,11 +210,8 @@ services:
       - "80:80"
       - "443:443"
     volumes:
-      # nginx/nginx.conf is a directory (legacy); rely on built-in nginx.conf which includes conf.d/
       - ./nginx/conf.d:/etc/nginx/conf.d:ro
-      # SSL certificates — populate with Let's Encrypt or your org cert
       - ./nginx/certs:/etc/nginx/certs:ro
-      # Serve uploads/media directly without hitting the backend
       - uploads_data:/var/www/uploads:ro
       - media_data:/var/www/media:ro
       - nginx_logs:/var/log/nginx
@@ -232,6 +221,96 @@ services:
     networks:
       - pob_internal
       - pob_external
+    restart: unless-stopped
+
+  # ── Automated Database Backup ───────────────────────────────────────────────
+  # Runs pg_dump daily at 02:00. Keeps 7 daily + 4 weekly + 3 monthly backups.
+  db-backup:
+    image: postgres:15-alpine
+    container_name: pob_db_backup
+    env_file: .env.prod
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${DATABASE_NAME}
+      POSTGRES_USER: ${DATABASE_USER}
+      PGPASSWORD: ${DATABASE_PASSWORD}
+      BACKUP_RETAIN_DAYS: "7"
+      BACKUP_RETAIN_WEEKS: "4"
+      BACKUP_RETAIN_MONTHS: "3"
+    volumes:
+      - db_backups:/backups
+      - ./docker/backup.sh:/backup.sh:ro
+    entrypoint: ["/bin/sh", "-c", "echo '0 2 * * * /bin/sh /backup.sh >> /backups/backup.log 2>&1' | crontab - && crond -f -d 8"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - pob_internal
+    restart: unless-stopped
+
+  # ── Prometheus (metrics collection) ────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: pob_prometheus
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.enable-lifecycle'
+    networks:
+      - pob_internal
+    restart: unless-stopped
+
+  # ── Grafana (monitoring dashboards) ────────────────────────────────────────
+  # Access at: https://your-domain.com/monitoring
+  grafana:
+    image: grafana/grafana:latest
+    container_name: pob_grafana
+    env_file: .env.prod
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-changeme}
+      - GF_SERVER_ROOT_URL=%(protocol)s://%(domain)s/monitoring
+      - GF_SERVER_SERVE_FROM_SUB_PATH=true
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+    networks:
+      - pob_internal
+    restart: unless-stopped
+
+  # ── PostgreSQL Exporter ─────────────────────────────────────────────────────
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:latest
+    container_name: pob_postgres_exporter
+    environment:
+      DATA_SOURCE_NAME: "postgresql://${DATABASE_USER}:${DATABASE_PASSWORD}@postgres:5432/${DATABASE_NAME}?sslmode=disable"
+    depends_on:
+      - postgres
+    networks:
+      - pob_internal
+    restart: unless-stopped
+
+  # ── Redis Exporter ──────────────────────────────────────────────────────────
+  redis-exporter:
+    image: oliver006/redis_exporter:latest
+    container_name: pob_redis_exporter
+    environment:
+      REDIS_ADDR: redis://redis:6379
+    depends_on:
+      - redis
+    networks:
+      - pob_internal
     restart: unless-stopped
 
 # ── Named Volumes ─────────────────────────────────────────────────────────────
@@ -250,15 +329,19 @@ volumes:
     driver: local
   nginx_logs:
     driver: local
+  db_backups:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
 
 # ── Networks ───────────────────────────────────────────────────────────────────
 networks:
-  # Internal network — services talk to each other here; not reachable from outside
   pob_internal:
     name: pob_internal
     driver: bridge
     internal: true
-  # External network — only nginx touches this; exposes ports 80/443
   pob_external:
     name: pob_external
     driver: bridge
