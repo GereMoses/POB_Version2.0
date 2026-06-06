@@ -108,10 +108,12 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - ENVIRONMENT=production
+      - BACKUP_DIR=/backups
     volumes:
       - uploads_data:/app/uploads
       - media_data:/app/media
       - logs_data:/app/logs
+      - ${BACKUP_DIR:-db_backups}:/backups
     depends_on:
       postgres:
         condition: service_healthy
@@ -225,6 +227,11 @@ services:
 
   # ── Automated Database Backup ───────────────────────────────────────────────
   # Runs pg_dump daily at 02:00. Keeps 7 daily + 4 weekly + 3 monthly backups.
+  #
+  # NAS storage: set BACKUP_DIR in .env.prod to your NAS mount point, e.g.:
+  #   BACKUP_DIR=/mnt/nas-backups
+  # The volume below uses that path as a bind mount so backups go directly to NAS.
+  # If BACKUP_DIR is not set, backups land in the local db_backups Docker volume.
   db-backup:
     image: postgres:15-alpine
     container_name: pob_db_backup
@@ -239,7 +246,7 @@ services:
       BACKUP_RETAIN_WEEKS: "4"
       BACKUP_RETAIN_MONTHS: "3"
     volumes:
-      - db_backups:/backups
+      - ${BACKUP_DIR:-db_backups}:/backups
       - ./docker/backup.sh:/backup.sh:ro
     entrypoint: ["/bin/sh", "-c", "echo '0 2 * * * /bin/sh /backup.sh >> /backups/backup.log 2>&1' | crontab - && crond -f -d 8"]
     depends_on:
@@ -248,6 +255,9 @@ services:
     networks:
       - pob_internal
     restart: unless-stopped
+
+  # ── Backend also needs access to backup dir (for UI-triggered backups) ──────
+  # The backend's /api/v1/backup endpoints write to BACKUP_DIR via pg_dump subprocess.
 
   # ── Prometheus (metrics collection) ────────────────────────────────────────
   prometheus:

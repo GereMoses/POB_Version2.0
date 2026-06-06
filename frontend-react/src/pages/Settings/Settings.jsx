@@ -1,14 +1,16 @@
 import React, { useState, useMemo } from 'react';
 import {
   Tabs, Card, Table, Button, Space, Tag, App, Form, Modal, Drawer,
-  Input, Select, Switch, Row, Col, Divider, Badge,
-  Checkbox, Popconfirm, Typography, Statistic, Tooltip, Empty,
+  Input, Select, Switch, Row, Col, Divider, Badge, Alert,
+  Checkbox, Popconfirm, Typography, Statistic, Tooltip, Empty, Spin, Progress,
 } from 'antd';
 import {
   UserOutlined, TeamOutlined, LockOutlined, AuditOutlined,
   PlusOutlined, EditOutlined, DeleteOutlined, KeyOutlined,
   SafetyOutlined, BankOutlined, ReloadOutlined, CheckOutlined,
   CloseOutlined, SettingOutlined, ClockCircleOutlined,
+  DatabaseOutlined, CloudServerOutlined, DownloadOutlined,
+  CheckCircleOutlined, WarningOutlined, SyncOutlined,
 } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import apiService from '../../services/api';
@@ -941,6 +943,257 @@ const SecurityTab = () => {
 };
 
 
+// ════════════════════════════════════════════════════════════════════════════
+// BACKUP TAB
+// ════════════════════════════════════════════════════════════════════════════
+const BackupTab = () => {
+  const { message: msg } = App.useApp();
+  const queryClient = useQueryClient();
+  const [triggering, setTriggering] = useState(false);
+
+  const token = localStorage.getItem('token') || localStorage.getItem('authToken');
+  const headers = { Authorization: `Bearer ${token}` };
+
+  const { data: statusRaw, isLoading: statusLoading, refetch: refetchStatus } = useQuery({
+    queryKey: ['backup-status'],
+    queryFn:  () => apiService.get('/api/v1/backup/status'),
+    refetchInterval: 30_000,
+  });
+
+  const { data: listRaw, isLoading: listLoading, refetch: refetchList } = useQuery({
+    queryKey: ['backup-list'],
+    queryFn:  () => apiService.get('/api/v1/backup/list'),
+    refetchInterval: 60_000,
+  });
+
+  const status  = statusRaw  || {};
+  const backups = listRaw?.backups || [];
+
+  const handleTrigger = async () => {
+    setTriggering(true);
+    try {
+      const res = await fetch('/api/v1/backup/trigger', { method: 'POST', headers });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'Backup failed');
+      msg.success(`Backup completed: ${data.filename} (${data.size})`);
+      queryClient.invalidateQueries(['backup-list']);
+      queryClient.invalidateQueries(['backup-status']);
+    } catch (e) {
+      msg.error(e.message);
+    } finally {
+      setTriggering(false);
+    }
+  };
+
+  const handleDownload = async (filename) => {
+    try {
+      const res = await fetch(`/api/v1/backup/download/${encodeURIComponent(filename)}`, { headers });
+      if (!res.ok) throw new Error('Download failed');
+      const blob = await res.blob();
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement('a');
+      a.href = url; a.download = filename; a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      msg.error(e.message);
+    }
+  };
+
+  const deleteMutation = useMutation({
+    mutationFn: (filename) =>
+      fetch(`/api/v1/backup/${encodeURIComponent(filename)}`, { method: 'DELETE', headers })
+        .then(r => r.json()),
+    onSuccess: () => {
+      msg.success('Backup deleted');
+      queryClient.invalidateQueries(['backup-list']);
+      queryClient.invalidateQueries(['backup-status']);
+    },
+    onError: (e) => msg.error(e.message),
+  });
+
+  const TYPE_COLOR = { manual: 'blue', daily: 'green', weekly: 'orange', monthly: 'purple' };
+
+  const cols = [
+    {
+      title: 'Filename', dataIndex: 'filename', key: 'filename',
+      render: (v, r) => (
+        <Space>
+          <DatabaseOutlined style={{ color: '#6B7A8D' }} />
+          <Text style={{ fontFamily: 'monospace', fontSize: 12 }}>{v}</Text>
+          <Tag color={TYPE_COLOR[r.type] || 'default'} style={{ fontSize: 10 }}>{r.type}</Tag>
+        </Space>
+      ),
+    },
+    {
+      title: 'Size', dataIndex: 'size_human', key: 'size', width: 90,
+      render: v => <Text strong>{v}</Text>,
+    },
+    {
+      title: 'Created', dataIndex: 'created_at', key: 'created', width: 170,
+      render: v => <Text style={{ fontSize: 12 }}>{dayjs(v).format('DD MMM YYYY HH:mm')}</Text>,
+      sorter: (a, b) => new Date(b.created_at) - new Date(a.created_at),
+      defaultSortOrder: 'ascend',
+    },
+    {
+      title: 'Actions', key: 'actions', width: 130, fixed: 'right',
+      render: (_, r) => (
+        <Space>
+          <Tooltip title="Download">
+            <Button
+              size="small" icon={<DownloadOutlined />} type="link"
+              onClick={() => handleDownload(r.filename)}
+            />
+          </Tooltip>
+          <Popconfirm
+            title="Delete this backup?"
+            description="This cannot be undone."
+            onConfirm={() => deleteMutation.mutate(r.filename)}
+            okText="Delete" okButtonProps={{ danger: true }}
+          >
+            <Tooltip title="Delete">
+              <Button size="small" icon={<DeleteOutlined />} type="link" danger />
+            </Tooltip>
+          </Popconfirm>
+        </Space>
+      ),
+    },
+  ];
+
+  return (
+    <div style={{ padding: 24 }}>
+      {/* ── Status cards ── */}
+      <Row gutter={[16, 16]} style={{ marginBottom: 24 }}>
+        <Col xs={24} sm={12} md={6}>
+          <Card size="small">
+            <Statistic
+              title="NAS / Storage"
+              value={status.nas_connected ? 'Connected' : 'Not connected'}
+              prefix={status.nas_connected
+                ? <CheckCircleOutlined style={{ color: '#52c41a' }} />
+                : <WarningOutlined    style={{ color: '#faad14' }} />}
+              valueStyle={{ color: status.nas_connected ? '#52c41a' : '#faad14', fontSize: 16 }}
+            />
+            <Text type="secondary" style={{ fontSize: 11 }}>{status.backup_directory}</Text>
+          </Card>
+        </Col>
+        <Col xs={24} sm={12} md={6}>
+          <Card size="small">
+            <Statistic
+              title="Total Backups"
+              value={status.total_backups || 0}
+              prefix={<DatabaseOutlined />}
+            />
+            <Text type="secondary" style={{ fontSize: 11 }}>{status.total_size || '0 B'} used</Text>
+          </Card>
+        </Col>
+        <Col xs={24} sm={12} md={6}>
+          <Card size="small">
+            <Statistic
+              title="Last Backup"
+              value={status.last_backup ? dayjs(status.last_backup.created_at).fromNow() : 'Never'}
+              prefix={<ClockCircleOutlined />}
+              valueStyle={{ fontSize: 14 }}
+            />
+            <Text type="secondary" style={{ fontSize: 11 }}>
+              {status.last_backup ? dayjs(status.last_backup.created_at).format('DD MMM YYYY HH:mm') : '—'}
+            </Text>
+          </Card>
+        </Col>
+        <Col xs={24} sm={12} md={6}>
+          <Card size="small">
+            <Statistic
+              title="Schedule"
+              value="Daily 02:00 UTC"
+              prefix={<SyncOutlined />}
+              valueStyle={{ fontSize: 14 }}
+            />
+            <Text type="secondary" style={{ fontSize: 11 }}>
+              {status.daily_count || 0} daily · {status.manual_count || 0} manual
+            </Text>
+          </Card>
+        </Col>
+      </Row>
+
+      {/* ── NAS warning ── */}
+      {!status.nas_connected && !statusLoading && (
+        <Alert
+          type="warning"
+          showIcon
+          icon={<CloudServerOutlined />}
+          message="NAS storage not connected"
+          description="Backups are stored on the local server disk. Connect a NAS drive and set BACKUP_DIR in .env.prod to point to the NAS mount path for off-server backup storage."
+          style={{ marginBottom: 16 }}
+        />
+      )}
+
+      {/* ── Actions row ── */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+        <div>
+          <Text strong>Backup Files</Text>
+          <Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>
+            {backups.length} files · {listRaw?.total_size || '0 B'} total
+          </Text>
+        </div>
+        <Space>
+          <Button icon={<ReloadOutlined />} onClick={() => { refetchStatus(); refetchList(); }}>
+            Refresh
+          </Button>
+          <Button
+            type="primary"
+            icon={triggering ? <SyncOutlined spin /> : <DatabaseOutlined />}
+            loading={triggering}
+            onClick={handleTrigger}
+          >
+            Backup Now
+          </Button>
+        </Space>
+      </div>
+
+      {/* ── Backup table ── */}
+      <Table
+        columns={cols}
+        dataSource={backups.map((b, i) => ({ ...b, key: i }))}
+        loading={listLoading}
+        size="small"
+        pagination={{ pageSize: 15, showSizeChanger: true, showTotal: t => `${t} backups` }}
+        scroll={{ x: 700 }}
+        locale={{ emptyText: <Empty description="No backups yet — click 'Backup Now' to create the first one" /> }}
+      />
+
+      {/* ── NAS setup guide ── */}
+      <Divider />
+      <Card size="small" title={<Space><CloudServerOutlined />NAS Configuration Guide</Space>} style={{ background: '#FAFAFA' }}>
+        <Text type="secondary" style={{ display: 'block', marginBottom: 8 }}>
+          To store backups on a NAS drive, mount it on the host server and set the path in your environment file:
+        </Text>
+        <pre style={{ background: '#1F2937', color: '#E5E7EB', padding: '12px 16px', borderRadius: 8, fontSize: 12, overflow: 'auto' }}>
+{`# 1. Mount your NAS on the host server (run on the server, not in Docker):
+#    NFS:
+sudo mount -t nfs 192.168.1.100:/nas/pob-backups /mnt/nas-backups
+
+#    SMB/CIFS (Windows NAS / Synology):
+sudo mount -t cifs //192.168.1.100/pob-backups /mnt/nas-backups \\
+  -o username=nasuser,password=naspass,uid=1000
+
+# 2. Make it permanent — add to /etc/fstab:
+192.168.1.100:/nas/pob-backups  /mnt/nas-backups  nfs  defaults,_netdev  0 0
+
+# 3. Set the backup path in .env.prod:
+BACKUP_DIR=/mnt/nas-backups
+
+# 4. In docker-compose.prod.yml, change the db-backup volume to a bind mount:
+#    volumes:
+#      - \${BACKUP_DIR:-/backups}:/backups
+
+# 5. Restart the backup container:
+docker compose -f docker-compose.prod.yml up -d --no-deps db-backup`}
+        </pre>
+      </Card>
+    </div>
+  );
+};
+
+
 const Settings = () => {
   const [activeTab, setActiveTab] = useState('users');
 
@@ -950,6 +1203,7 @@ const Settings = () => {
     { key: 'company',   label: <Space><BankOutlined />Company</Space>,             children: <CompanyTab /> },
     { key: 'security',  label: <Space><ClockCircleOutlined />Security</Space>,     children: <SecurityTab /> },
     { key: 'audit-log', label: <Space><AuditOutlined />Audit Log</Space>,          children: <AuditLogTab /> },
+    { key: 'backup',    label: <Space><DatabaseOutlined />Database Backup</Space>, children: <BackupTab /> },
   ];
 
   return (
