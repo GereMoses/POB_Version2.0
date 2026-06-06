@@ -1,0 +1,2060 @@
+"""
+ADMS Protocol — BioTime-parity implementation
+Handles /iclock/cdata, /iclock/getrequest, /iclock/devicecmd
+
+Key improvements over the original:
+  • Batch record parsing — tab-delimited multi-record bodies (devices buffer 100s offline)
+  • Record-type routing — ATTLOG / USERINFO / OPERLOG / FINGERTMP / FACETMP
+  • Stamp watermark — device only re-uploads records newer than last seen stamp
+  • Full BioTime-compatible options block response
+  • Device approval workflow — state=0 (pending) must be approved before attendance is processed
+  • OPERLOG handler — door events, alarms, tamper written to iclock_operlog
+  • USERINFO handler — employee data pushed by device synced to personnel_employee
+  • FINGERTMP / FACETMP handler — templates stored in iclock_bio_template
+  • pushver-aware responses
+  • Full device capability fields stored (UserCount, FpCount, FaceCount, etc.)
+  • Per-device heartbeat interval (Delay= in options block)
+  • Command builders: USERINFO, FINGERTMP, FACETMP, SET TIMEZONE, USERATT, QUERY ATTLOG
+"""
+
+import re
+import time
+import asyncio
+import logging
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import PlainTextResponse
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
+from sqlalchemy import text
+
+from ..core.database import get_db, SessionLocal
+from ..core.config import settings
+from ..models.biotime_models import (
+    IClockTerminal, IClockTransaction, IClockDevcmd,
+    IClockOperLog, IClockBioTemplate,
+    PersonnelEmployee, AccDoor,
+    AccLevel, AccUserAuthorize,
+    AttShift, AttTimetable,
+)
+from ..models.personnel import Personnel, PersonnelStatus
+from ..services.mustering_service import MusteringService
+from ..core.websocket import broadcast_zone_update
+
+router = APIRouter()
+logger = logging.getLogger(__name__)
+
+# ── Auto-calculation trigger ─────────────────────────────────────────────────
+# handle_attlog (sync) writes (emp_code, date_str) pairs here.
+# _async_recalculate (async task) drains and processes them.
+_pending_recalc: Set[Tuple[str, str]] = set()
+
+
+async def _async_recalculate(emp_codes: Set[str], date_strs: Set[str]) -> None:
+    """Background asyncio task: recalculate att_report for affected employees/dates."""
+    from ..services.attendance_calculation_service import attendance_calculation_service
+    db = SessionLocal()
+    try:
+        if not date_strs:
+            return
+        min_date = min(date_strs)
+        max_date = max(date_strs)
+
+        # Resolve personnel IDs for the affected emp_codes
+        codes_list = list(emp_codes)
+        placeholders = ",".join([f":c{i}" for i in range(len(codes_list))])
+        params = {f"c{i}": c for i, c in enumerate(codes_list)}
+        rows = db.execute(
+            text(f"SELECT id FROM personnel WHERE emp_code IN ({placeholders}) AND is_active = true"),
+            params,
+        ).fetchall()
+        emp_ids = [r.id for r in rows] if rows else None
+
+        result = await attendance_calculation_service.calculate_attendance(
+            emp_ids=emp_ids,
+            start_date=min_date,
+            end_date=max_date,
+            db=db,
+        )
+        logger.info(
+            f"Auto-calc triggered by device punch: {result.get('processed',0)} employees "
+            f"updated for {min_date}–{max_date}"
+        )
+    except Exception as exc:
+        logger.error(f"Auto-calc background task error: {exc}")
+    finally:
+        db.close()
+
+# ── Constants ────────────────────────────────────────────────────────────────
+
+ADMS_OK    = "OK"
+ADMS_NONE  = "NONE"
+ADMS_ERROR = "ERROR="
+
+# state values on iclock_terminal
+STATE_PENDING  = 0
+STATE_APPROVED = 1
+STATE_REJECTED = 2
+STATE_OFFLINE  = 3
+
+# OPERLOG event codes
+OPER_EVENT_LABELS = {
+    0:   "Door Normal",
+    1:   "Door Alarm",
+    2:   "Tamper",
+    3:   "Anti-Passback",
+    4:   "Duress",
+    5:   "Fire Unlock",
+    6:   "Emergency Lock",
+    8:   "Door Open Too Long",
+    9:   "Door Open Too Long Cleared",
+    200: "Admin Operation",
+    255: "Unknown",
+}
+
+_SN_RE = re.compile(r'^[A-Za-z0-9\-]{4,30}$')
+
+# ── Pydantic schemas ─────────────────────────────────────────────────────────
+
+class CommandRequest(BaseModel):
+    sn: str
+    cmd_content: str
+
+class ApproveRequest(BaseModel):
+    sn: str
+    action: str   # "approve" | "reject"
+
+class PushUsersRequest(BaseModel):
+    sn: str
+    emp_codes: Optional[List[str]] = None  # None = all employees
+
+class PushTemplatesRequest(BaseModel):
+    sn: str
+    emp_codes: Optional[List[str]] = None
+
+class PushTimezonesRequest(BaseModel):
+    sn: str
+    shift_ids: Optional[List[int]] = None  # None = all shifts
+
+class PushAccessLevelsRequest(BaseModel):
+    sn: str
+    level_ids: Optional[List[int]] = None  # None = all levels
+
+# ── Validation ───────────────────────────────────────────────────────────────
+
+def _valid_sn(sn: str) -> bool:
+    return bool(sn and _SN_RE.match(sn))
+
+# ── Body parser ──────────────────────────────────────────────────────────────
+
+def parse_adms_body(body: str) -> List[Tuple[str, Dict[str, str]]]:
+    """
+    Parse an ADMS POST body and return a list of (record_type, field_dict) tuples.
+
+    Handles three wire formats ZKTeco devices actually send:
+
+    Format A — legacy key=value, one record per body (pushver 1.x):
+        PIN=001\\nTime=2024-01-15 14:30:25\\nStatus=0\\nVerify=1
+
+    Format B — inline prefix, one record per line (most common, pushver 2.x):
+        ATTLOG\\tSN=BKMD203\\tUserID=001\\tLogTime=2024-01-15 14:30:25\\tVerifyMode=1\\tInOutStatus=0
+        ATTLOG\\tSN=BKMD203\\tUserID=002\\tLogTime=2024-01-15 14:31:00\\tVerifyMode=1\\tInOutStatus=1
+
+    Format C — section header then tab-delimited rows (some firmware variants):
+        ATTLOG
+        SN=BKMD203\\tUserID=001\\tLogTime=2024-01-15 14:30:25\\tVerifyMode=1\\tInOutStatus=0
+    """
+    if not body or not body.strip():
+        return []
+
+    lines = [l.rstrip('\r') for l in body.strip().split('\n') if l.strip()]
+    records: List[Tuple[str, Dict[str, str]]] = []
+
+    KNOWN_TYPES = {"ATTLOG", "OPERLOG", "USERINFO", "FINGERTMP", "FACETMP",
+                   "ATTPHOTO", "ENROLL_FP", "FACE", "BIODATA"}
+
+    # Detect Format A (legacy key=value): no tab chars, contains '='
+    if '\t' not in body and '=' in body:
+        fields = _parse_kv_lines(lines)
+        if fields:
+            # Determine record type from fields
+            rtype = "ATTLOG" if ("PIN" in fields or "UserID" in fields) else "UNKNOWN"
+            records.append((rtype, fields))
+        return records
+
+    # Format B / C
+    current_type: Optional[str] = None
+    for line in lines:
+        parts = line.split('\t')
+        first = parts[0].strip().upper()
+
+        if first in KNOWN_TYPES:
+            if len(parts) == 1:
+                # Format C: section header only — subsequent lines belong to this type
+                current_type = first
+                continue
+            else:
+                # Format B: inline prefix with fields on same line
+                fields = _parse_tab_fields(parts[1:])
+                records.append((first, fields))
+        elif current_type:
+            # Format C continuation row
+            fields = _parse_tab_fields(parts)
+            if fields:
+                records.append((current_type, fields))
+        else:
+            # Fallback: try key=value
+            fields = _parse_kv_lines([line])
+            if fields:
+                rtype = "ATTLOG" if ("PIN" in fields or "UserID" in fields) else "UNKNOWN"
+                records.append((rtype, fields))
+
+    return records
+
+
+def _parse_tab_fields(parts: List[str]) -> Dict[str, str]:
+    """Parse tab-separated key=value pairs OR positional fields."""
+    fields: Dict[str, str] = {}
+    for part in parts:
+        part = part.strip()
+        if '=' in part:
+            k, v = part.split('=', 1)
+            fields[k.strip()] = v.strip()
+    return fields
+
+
+def _parse_kv_lines(lines: List[str]) -> Dict[str, str]:
+    """Parse newline-separated key=value pairs."""
+    fields: Dict[str, str] = {}
+    for line in lines:
+        line = line.strip()
+        if '=' in line:
+            k, v = line.split('=', 1)
+            fields[k.strip()] = v.strip()
+    return fields
+
+
+def parse_device_options(options: str) -> Dict[str, Any]:
+    """Parse the ADMS 'options' query-string: UserCount=50,FpCount=100,FW=Ver6.60,..."""
+    info: Dict[str, Any] = {}
+    if not options:
+        return info
+    for pair in options.split(','):
+        if '=' not in pair:
+            continue
+        k, v = pair.split('=', 1)
+        k, v = k.strip(), v.strip()
+        if k in ('UserCount', 'FpCount', 'FaceCount', 'PalmCount', 'LogCount'):
+            try:
+                info[k] = int(v)
+            except ValueError:
+                info[k] = 0
+        elif k == 'FW':
+            info['fw_version'] = v
+        elif k in ('DeviceName', '~DeviceName'):
+            info['device_name'] = v
+        elif k == 'OEMVendor':
+            info['oem_vendor'] = v
+        elif k == 'Platform':
+            info['platform'] = v
+        elif k == 'Language':
+            info['language'] = v
+        elif k == 'MAC':
+            info['mac_address'] = v
+        else:
+            info[k] = v
+    return info
+
+# ── Options block builder ────────────────────────────────────────────────────
+
+def build_options_block(terminal: IClockTerminal, pushver: str) -> str:
+    """
+    Return the full BioTime-compatible options block sent in response to a heartbeat.
+    The Stamp values tell the device which records it has already successfully delivered —
+    it will only re-upload records newer than these.
+
+    DateTime= is included on every response so the device clock is continuously
+    kept in sync with the server — no manual intervention required.
+    """
+    stamp      = terminal.att_stamp  or 0
+    op_stamp   = terminal.op_stamp   or 0
+    user_stamp = terminal.user_stamp or 0
+    delay      = terminal.heartbeat_interval or 10
+
+    # Server local time — the device will set its display clock to match.
+    # Ensure the server OS timezone matches the site's physical timezone.
+    server_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    lines = [
+        "GET OPTION FROM THE SERVER",
+        f"Stamp={stamp}",
+        f"OpStamp={op_stamp}",
+        f"ATTLOGStamp={stamp}",
+        f"OPERLOGStamp={op_stamp}",
+        f"ATTPHOTOStamp=0",
+        f"UserStamp={user_stamp}",
+        "ErrorDelay=30",
+        f"Delay={delay}",
+        "TransTimes=00:00;14:05",
+        "TransInterval=1",
+        "TimeZone=0",
+        f"DateTime={server_time}",
+        "SetTime=1",          # Force device to apply DateTime= on every heartbeat
+        f"ServerVer={pushver}",
+        "PushProtVer=2.3.1",
+        "PushOptionsFlag=1",
+    ]
+    return "\n".join(lines)
+
+# ── Record handlers ──────────────────────────────────────────────────────────
+
+def _parse_punch_time(time_str: str) -> Optional[datetime]:
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S.%f"):
+        try:
+            return datetime.strptime(time_str, fmt).replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            continue
+    return None
+
+
+def handle_attlog(records: List[Dict], sn: str, db: Session) -> Tuple[int, int, Dict[int, int]]:
+    """
+    Process a batch of ATTLOG records.
+    Routes each punch based on the terminal's reader_purpose:
+      ATTENDANCE   → write iclock_transaction (T&A)
+      ACCESS_ENTRY → zone entry tracking + access_logs (no T&A record)
+      ACCESS_EXIT  → zone exit tracking + access_logs (no T&A record)
+    Returns (saved_count, latest_stamp, zone_updates) where zone_updates
+    is Dict[zone_id → new_occupancy_count] for broadcasting.
+    """
+    saved = 0
+    latest_ts = 0
+    affected_codes: Set[str] = set()
+    affected_dates: Set[str] = set()
+    zone_updates: Dict[int, int] = {}
+
+    # Look up terminal once — determines routing for entire batch
+    terminal = db.query(IClockTerminal).filter(IClockTerminal.sn == sn).first()
+    reader_purpose = (terminal.reader_purpose if terminal and terminal.reader_purpose
+                      else 'ATTENDANCE')
+
+    # Check mustering mode for this device once
+    acc_door = db.query(AccDoor).filter(AccDoor.terminal_sn == sn).first()
+    mustering_mode = acc_door and getattr(acc_door, 'mustering_mode', False)
+
+    for rec in records:
+        emp_code = rec.get('PIN') or rec.get('UserID') or rec.get('USERID')
+        time_str = rec.get('Time') or rec.get('LogTime') or rec.get('LOGTIME')
+        if not emp_code or not time_str:
+            continue
+
+        punch_time = _parse_punch_time(time_str)
+        if not punch_time:
+            logger.warning(f"ADMS ATTLOG bad timestamp from {sn}: {time_str!r}")
+            continue
+
+        ts_int = int(punch_time.timestamp())
+        if ts_int > latest_ts:
+            latest_ts = ts_int
+
+        # ── ACCESS_ENTRY / ACCESS_EXIT readers ───────────────────────────────
+        # Zone tracking is handled first; then fall through to also write a T&A
+        # record to iclock_transaction so attendance calculation still works.
+        # punch_state is forced to 0 (check-in) for ENTRY and 1 (check-out) for EXIT
+        # so the calculation engine classifies the direction correctly without
+        # relying on the device's Status field (which may be 0 for both on some models).
+        if reader_purpose in ('ACCESS_ENTRY', 'ACCESS_EXIT'):
+            direction = 'ENTRY' if reader_purpose == 'ACCESS_ENTRY' else 'EXIT'
+            try:
+                updates = _handle_zone_access(emp_code, sn, punch_time, terminal, direction, db)
+                zone_updates.update(updates)
+                logger.debug(f"Zone access {direction}: {emp_code}@{sn} zone={terminal.zone_id}")
+            except Exception as e:
+                logger.error(f"Zone access error {emp_code}@{sn}: {e}")
+            # Force punch direction so T&A calculation is unambiguous
+            forced_state = 0 if reader_purpose == 'ACCESS_ENTRY' else 1
+            try:
+                txn = IClockTransaction(
+                    emp_code=emp_code,
+                    punch_time=punch_time,
+                    punch_state=forced_state,
+                    verify_type=0,
+                    work_code=0,
+                    terminal_sn=sn,
+                    area_alias='',
+                    upload_time=datetime.now(timezone.utc),
+                )
+                db.add(txn)
+                db.flush()
+                saved += 1
+                affected_codes.add(emp_code)
+                affected_dates.add(punch_time.strftime('%Y-%m-%d'))
+            except Exception as e:
+                logger.error(f"ATTLOG (access reader) T&A save error {emp_code}@{sn}: {e}")
+                db.rollback()
+
+            # Write to acc_event so every door swipe appears in the access control log.
+            # Prefer the door whose name matches the direction; fall back to nearest id.
+            try:
+                in_out_val = 0 if direction == 'ENTRY' else 1
+                door_row = db.execute(text("""
+                    SELECT id, name FROM acc_door WHERE terminal_sn = :sn
+                    ORDER BY (CASE
+                        WHEN :is_entry AND (lower(name) LIKE '%entrance%' OR lower(name) LIKE '%entry%') THEN 0
+                        WHEN NOT :is_entry AND lower(name) LIKE '%exit%' THEN 0
+                        ELSE 1 END), id
+                    LIMIT 1
+                """), {'sn': sn, 'is_entry': (direction == 'ENTRY')}).fetchone()
+
+                emp_row = db.execute(text(
+                    "SELECT first_name || ' ' || last_name AS full_name "
+                    "FROM personnel_employee WHERE emp_code = :code LIMIT 1"
+                ), {'code': emp_code}).fetchone()
+
+                db.execute(text("""
+                    INSERT INTO acc_event
+                        (event_time, terminal_sn, door_id, emp_code, emp_name,
+                         event_type, in_out, description)
+                    VALUES
+                        (:et, :sn, :did, :ec, :en, 0, :io, :desc)
+                """), {
+                    'et':   punch_time,
+                    'sn':   sn,
+                    'did':  door_row.id if door_row else None,
+                    'ec':   emp_code,
+                    'en':   emp_row.full_name if emp_row else '',
+                    'io':   in_out_val,
+                    'desc': f'{"Entry" if direction == "ENTRY" else "Exit"} — {terminal.alias or sn}',
+                })
+                db.flush()
+            except Exception as e:
+                logger.error(f"acc_event write error {emp_code}@{sn}: {e}")
+            continue
+
+        # ── ATTENDANCE reader (default) ───────────────────────────────────────
+        raw_state = rec.get('Status') or rec.get('InOutStatus') or rec.get('INOUTSTATUS') or '0'
+        try:
+            punch_state = int(raw_state)
+        except (ValueError, TypeError):
+            punch_state = 0
+
+        verify_raw = rec.get('Verify') or rec.get('VerifyMode') or rec.get('VERIFYMODE') or '0'
+        try:
+            verify_type = int(verify_raw)
+        except (ValueError, TypeError):
+            verify_type = 0
+
+        work_raw = rec.get('WorkCode') or rec.get('WORKCODE') or '0'
+        try:
+            work_code = int(work_raw)
+        except (ValueError, TypeError):
+            work_code = 0
+
+        area_alias = rec.get('Area') or rec.get('AreaAlias') or ''
+
+        if mustering_mode:
+            try:
+                mustering_service = MusteringService(db)
+                mustering_service.process_mustering_punch(
+                    emp_code=emp_code, device_sn=sn, check_time=punch_time
+                )
+                saved += 1
+            except Exception as e:
+                logger.error(f"Mustering punch error for {emp_code}@{sn}: {e}")
+            continue
+
+        try:
+            txn = IClockTransaction(
+                emp_code=emp_code,
+                punch_time=punch_time,
+                punch_state=punch_state,
+                verify_type=verify_type,
+                work_code=work_code,
+                terminal_sn=sn,
+                area_alias=area_alias,
+                upload_time=datetime.now(timezone.utc),
+            )
+            db.add(txn)
+            db.flush()
+            saved += 1
+            affected_codes.add(emp_code)
+            affected_dates.add(punch_time.strftime('%Y-%m-%d'))
+
+            try:
+                _update_zone_personnel_count(emp_code, sn, punch_state, punch_time, db)
+            except Exception as ze:
+                logger.warning(f"Zone tracking non-fatal error: {ze}")
+
+        except Exception as e:
+            logger.error(f"ATTLOG save error {emp_code}@{sn}: {e}")
+            db.rollback()
+            continue
+
+    try:
+        db.commit()
+    except Exception as e:
+        logger.error(f"ATTLOG batch commit error for {sn}: {e}")
+        db.rollback()
+
+    logger.info(f"ATTLOG {sn}: saved {saved}/{len(records)} records, latest_stamp={latest_ts}")
+
+    # ── Time-drift detection ─────────────────────────────────────────────────
+    # Compare the most recent punch's LogTime to the server's upload_time.
+    # A large gap means the device clock is wrong.  Auto-queue SET DATE TIME
+    # to correct it immediately (belt-and-suspenders — DateTime= in the options
+    # block already corrects drift on every heartbeat, but this fires a
+    # dedicated command for devices whose firmware ignores DateTime=).
+    if saved > 0 and affected_codes:
+        try:
+            server_now  = datetime.now(timezone.utc)
+            # latest_ts is the Unix timestamp of the newest punch from the device
+            if latest_ts > 0:
+                device_time = datetime.fromtimestamp(latest_ts, tz=timezone.utc)
+                drift_secs  = abs((server_now - device_time).total_seconds())
+                # Ignore drift < 60 s (network latency + normal skew)
+                # and > 86400 s (likely a date error, not a clock drift)
+                if 60 < drift_secs < 86400:
+                    logger.warning(
+                        f"ADMS {sn}: clock drift detected — {drift_secs:.0f}s off server time. "
+                        f"Queuing SET DATE TIME correction."
+                    )
+                    # Queue a SET DATE TIME command so the device corrects itself
+                    # as soon as it next polls /iclock/getrequest.
+                    correct_time = server_now.strftime('%Y-%m-%d %H:%M:%S')
+                    try:
+                        queue_command(sn, f"DATE TIME {correct_time}", db)
+                    except Exception as qe:
+                        logger.error(f"Failed to queue DATE TIME for {sn}: {qe}")
+        except Exception as de:
+            logger.warning(f"Drift detection non-fatal error for {sn}: {de}")
+
+    # Fire background recalculation for affected employees so att_report
+    # is updated within seconds of each punch — no manual trigger needed.
+    if saved > 0 and affected_codes:
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.create_task(_async_recalculate(affected_codes, affected_dates))
+        except RuntimeError:
+            pass  # no event loop in test context — safe to skip
+
+    return saved, latest_ts, zone_updates
+
+
+def handle_operlog(records: List[Dict], sn: str, db: Session) -> Tuple[int, int]:
+    """Process a batch of OPERLOG records → iclock_operlog table."""
+    saved = 0
+    latest_ts = 0
+
+    for rec in records:
+        event_code_raw = rec.get('OperEvent') or rec.get('OPEREVENT') or '255'
+        time_str       = rec.get('Time') or rec.get('LogTime') or rec.get('EventTime') or ''
+        admin_id       = rec.get('AdminID') or rec.get('UserID') or None
+        obj            = rec.get('Object') or rec.get('OBJECT') or None
+        param1         = rec.get('Param1') or rec.get('PARAM1') or None
+        param2         = rec.get('Param2') or rec.get('PARAM2') or None
+
+        event_time = _parse_punch_time(time_str)
+        if not event_time:
+            continue
+
+        ts_int = int(event_time.timestamp())
+        if ts_int > latest_ts:
+            latest_ts = ts_int
+
+        try:
+            event_code = int(event_code_raw)
+        except (ValueError, TypeError):
+            event_code = 255
+
+        try:
+            log = IClockOperLog(
+                terminal_sn  = sn,
+                oper_event   = event_code,
+                event_time   = event_time,
+                admin_id     = admin_id,
+                object_name  = obj,
+                param1       = param1,
+                param2       = param2,
+                raw_data     = str(rec),
+            )
+            db.add(log)
+            saved += 1
+        except Exception as e:
+            logger.error(f"OPERLOG save error {sn}: {e}")
+
+    try:
+        db.commit()
+    except Exception as e:
+        logger.error(f"OPERLOG batch commit error {sn}: {e}")
+        db.rollback()
+
+    logger.info(f"OPERLOG {sn}: saved {saved}/{len(records)} records")
+    return saved, latest_ts
+
+
+def handle_userinfo(records: List[Dict], sn: str, db: Session) -> int:
+    """
+    Sync employee data pushed by device → personnel_employee.
+    Updates existing employees (card_no, name) and creates new ones for
+    unrecognised emp_codes so that "Get Users from Device" works fully
+    on PushVer 2.x firmware.
+    """
+    updated = 0
+    created = 0
+    # Track emp_codes added this batch to avoid duplicates within the same upload
+    seen_this_batch: set = set()
+
+    for rec in records:
+        emp_code = str(rec.get('PIN') or rec.get('UserID') or rec.get('USERID') or '').strip()
+        name     = str(rec.get('Name') or rec.get('NAME') or '').strip()
+        card     = str(rec.get('Card') or rec.get('CardNo') or rec.get('CARDNO') or '').strip()
+
+        if not emp_code or emp_code in seen_this_batch:
+            continue
+        seen_this_batch.add(emp_code)
+
+        try:
+            employee = db.query(PersonnelEmployee).filter(
+                PersonnelEmployee.emp_code == emp_code
+            ).first()
+
+            if employee:
+                if card:
+                    employee.card_no = card
+                if name and not employee.first_name:
+                    parts = name.split()
+                    employee.first_name = parts[0]
+                    employee.last_name  = " ".join(parts[1:]) if len(parts) > 1 else employee.last_name
+                db.flush()
+                updated += 1
+                logger.debug(f"USERINFO updated emp_code={emp_code} card={card}")
+            else:
+                parts      = name.split() if name else [emp_code]
+                first_name = parts[0]
+                last_name  = " ".join(parts[1:]) if len(parts) > 1 else ""
+                new_emp = PersonnelEmployee(
+                    emp_code   = emp_code,
+                    first_name = first_name,
+                    last_name  = last_name,
+                    card_no    = card or None,
+                    status     = 0,
+                )
+                db.add(new_emp)
+                db.flush()
+                created += 1
+                logger.debug(f"USERINFO created emp_code={emp_code} name={name!r}")
+
+        except Exception as e:
+            db.rollback()
+            logger.error(f"USERINFO sync error emp_code={emp_code}: {e}")
+
+    try:
+        db.commit()
+    except Exception as e:
+        logger.error(f"USERINFO batch commit error {sn}: {e}")
+        db.rollback()
+
+    # Mark user_stamp > 0 so the options block stops sending UserStamp=0
+    # and the device won't re-upload on every heartbeat
+    db.execute(text(
+        "UPDATE iclock_terminal SET user_stamp = 1 WHERE sn = :sn AND user_stamp = 0"
+    ), {'sn': sn})
+    db.commit()
+
+    logger.info(f"USERINFO {sn}: updated={updated} created={created} total={len(records)}")
+    return updated + created
+
+
+def handle_fingertmp(records: List[Dict], sn: str, db: Session) -> int:
+    """Store fingerprint templates uploaded by device → iclock_bio_template."""
+    saved = 0
+    for rec in records:
+        emp_code  = rec.get('PIN') or rec.get('UserID') or ''
+        finger_id = rec.get('FingerID') or rec.get('FINGERID') or '0'
+        size      = rec.get('Size') or rec.get('SIZE') or '0'
+        valid     = rec.get('Valid') or rec.get('VALID') or '1'
+        tmp_data  = rec.get('TmpData') or rec.get('TMPDATA') or ''
+        if not emp_code or not tmp_data:
+            continue
+        try:
+            finger_idx = int(finger_id)
+            tpl_size   = int(size) if size else None
+            is_valid   = str(valid) not in ('0', 'false', 'False')
+        except (ValueError, TypeError):
+            finger_idx = 0; tpl_size = None; is_valid = True
+
+        try:
+            existing = db.query(IClockBioTemplate).filter(
+                IClockBioTemplate.emp_code  == emp_code,
+                IClockBioTemplate.finger_id == finger_idx,
+            ).first()
+            if existing:
+                existing.template_data  = tmp_data
+                existing.template_size  = tpl_size
+                existing.valid          = is_valid
+                existing.source_sn      = sn
+                existing.updated_at     = datetime.now(timezone.utc)
+            else:
+                db.add(IClockBioTemplate(
+                    emp_code=emp_code, finger_id=finger_idx,
+                    template_size=tpl_size, valid=is_valid,
+                    template_data=tmp_data, source_sn=sn,
+                ))
+            saved += 1
+        except Exception as e:
+            logger.error(f"FINGERTMP save error {emp_code}#{finger_idx}: {e}")
+
+    try:
+        db.commit()
+    except Exception as e:
+        logger.error(f"FINGERTMP batch commit error {sn}: {e}")
+        db.rollback()
+
+    logger.info(f"FINGERTMP {sn}: upserted {saved}/{len(records)} templates")
+    return saved
+
+
+def handle_facetmp(records: List[Dict], sn: str, db: Session) -> int:
+    """Store face templates — finger_id = -1 convention."""
+    face_records = [{**r, 'FingerID': '-1'} for r in records]
+    return handle_fingertmp(face_records, sn, db)
+
+# ── Terminal management ──────────────────────────────────────────────────────
+
+# Known Docker-internal gateway IPs that are never real device addresses.
+# Docker Desktop (Mac) rewrites all source IPs to 192.168.65.1.
+# Docker Linux default bridge gateway is 172.17.0.1.
+# We guard only these specific IPs — NOT the entire 172.x.x.x range,
+# which is a legitimate RFC-1918 private address space used by many devices.
+_DOCKER_GATEWAY_IPS: frozenset = frozenset({
+    '192.168.65.1',   # Docker Desktop (Mac/Win)
+    '172.17.0.1',     # Docker Linux default bridge
+    '172.18.0.1',     # Docker custom bridge (common)
+    '172.19.0.1',
+    '172.20.0.1',
+})
+
+
+def upsert_terminal(
+    sn: str, client_ip: str, device_info: Dict[str, Any],
+    pushver: str, db: Session
+) -> Optional[IClockTerminal]:
+    """
+    Update an existing terminal's heartbeat fields, OR auto-register a new one
+    in STATE_PENDING if ZKTECO_AUTO_REGISTER_DEVICES is enabled.
+    Returns None if device is rejected.
+    """
+    terminal = db.query(IClockTerminal).filter(IClockTerminal.sn == sn).first()
+
+    if terminal:
+        if terminal.state == STATE_REJECTED:
+            logger.info(f"Rejected device {sn} attempted connection — ignored")
+            return None
+
+        # Always update heartbeat fields regardless of approval state
+        terminal.last_activity = datetime.now(timezone.utc)
+        # Only skip the IP update if the incoming address is a known Docker-internal
+        # gateway (never a real device IP) and the terminal already has a real IP stored.
+        # Preserving the old IP is correct here because the gateway IP is an artefact of
+        # Docker Desktop's NAT, not the device's actual address.
+        _is_docker_gateway = client_ip in _DOCKER_GATEWAY_IPS
+        if not _is_docker_gateway or not terminal.ip_address:
+            if terminal.ip_address != client_ip:
+                logger.info(f"ADMS {sn}: IP updated {terminal.ip_address!r} → {client_ip!r}")
+            terminal.ip_address = client_ip
+        terminal.pushver       = pushver
+        if terminal.state == STATE_OFFLINE:
+            terminal.state = STATE_APPROVED  # reconnected
+        if device_info.get('fw_version'):
+            terminal.fw_ver = device_info['fw_version']
+        for field in ('UserCount','FpCount','FaceCount','PalmCount','LogCount'):
+            if field in device_info:
+                col = field.lower().replace('count', '_count')
+                if hasattr(terminal, col):
+                    setattr(terminal, col, device_info[field])
+        for src_key, attr in (('device_name','device_name'), ('oem_vendor','oem_vendor'),
+                               ('platform','platform'), ('mac_address','mac_address')):
+            if device_info.get(src_key):
+                setattr(terminal, attr, device_info[src_key])
+        db.commit()
+        return terminal
+
+    # New device
+    if not settings.ZKTECO_AUTO_REGISTER_DEVICES:
+        logger.info(f"New device {sn} rejected — auto-registration disabled")
+        return None
+
+    new_terminal = IClockTerminal(
+        sn            = sn,
+        alias         = device_info.get('device_name') or f"Terminal-{sn}",
+        ip_address    = client_ip,
+        state         = STATE_PENDING,   # requires admin approval
+        pushver       = pushver,
+        last_activity = datetime.now(timezone.utc),
+        fw_ver        = device_info.get('fw_version', ''),
+        device_name   = device_info.get('device_name'),
+        platform      = device_info.get('platform'),
+        mac_address   = device_info.get('mac_address'),
+        oem_vendor    = device_info.get('oem_vendor'),
+        user_count    = device_info.get('UserCount', 0),
+        fp_count      = device_info.get('FpCount', 0),
+        face_count    = device_info.get('FaceCount', 0),
+        palm_count    = device_info.get('PalmCount', 0),
+        log_count     = device_info.get('LogCount', 0),
+        att_stamp     = 0,
+        op_stamp      = 0,
+        heartbeat_interval = 10,
+    )
+    db.add(new_terminal)
+    db.commit()
+    db.refresh(new_terminal)
+    logger.info(f"Auto-registered new terminal {sn} from {client_ip} — PENDING approval")
+    return new_terminal
+
+
+def get_pending_commands(sn: str, db: Session) -> List[Dict[str, Any]]:
+    result = db.execute(text("""
+        SELECT id, cmd_content
+        FROM iclock_devcmd
+        WHERE sn = :sn AND status = 0
+        ORDER BY cmd_commit_time ASC
+        LIMIT 10
+    """), {'sn': sn}).fetchall()
+    return [{'id': r.id, 'cmd_content': r.cmd_content} for r in result]
+
+
+def mark_commands_sent(cmd_ids: List[int], db: Session):
+    if cmd_ids:
+        db.execute(text("""
+            UPDATE iclock_devcmd
+            SET status = 1, cmd_trans_time = :now
+            WHERE id = ANY(:ids)
+        """), {'now': datetime.now(timezone.utc), 'ids': cmd_ids})
+        db.commit()
+
+
+def _emp_to_zk_pin(emp_code: str) -> int:
+    """Extract a numeric ZKTeco PIN from an employee code.
+    'EMP001' → 1, 'EMP0010' → 10, 'EMP034' → 34, '42' → 42.
+    Falls back to absolute hash mod 65534 if no numeric portion found.
+    """
+    import re
+    m = re.search(r'(\d+)$', emp_code or '')
+    if m:
+        n = int(m.group(1))
+        return max(1, min(n, 65534))
+    return (abs(hash(emp_code)) % 65534) + 1
+
+
+def queue_command(sn: str, cmd: str, db: Session, created_by: Optional[int] = None) -> int:
+    row = db.execute(text("""
+        INSERT INTO iclock_devcmd (sn, cmd_content, status, cmd_commit_time)
+        VALUES (:sn, :cmd, 0, :now)
+        RETURNING id
+    """), {'sn': sn, 'cmd': cmd, 'now': datetime.now(timezone.utc)}).fetchone()
+    db.commit()
+    return row.id
+
+
+def _get_direct_device(sn: str, db: Session) -> Optional[Any]:
+    """Return the devices row for sn if it has an IP and is in direct/both mode, else None."""
+    return db.execute(text("""
+        SELECT ip_address, port, connection_mode
+        FROM devices
+        WHERE serial_number = :sn AND ip_address IS NOT NULL
+        LIMIT 1
+    """), {'sn': sn}).fetchone()
+
+
+async def _direct_sync_time(ip: str, port: int) -> Dict[str, Any]:
+    """Call zkteco_direct.sync_time and return its result dict."""
+    from ..services.zkteco.direct_connection import zkteco_direct
+    return await zkteco_direct.sync_time(ip=ip, port=port or 4370)
+
+# ── Zone tracking (unchanged logic, extracted) ───────────────────────────────
+
+def _handle_zone_access(
+    emp_code: str, device_sn: str, punch_time: datetime,
+    terminal: "IClockTerminal", direction: str, db: Session
+) -> Dict[int, int]:
+    """
+    Route an access-control punch to zone tracking.
+    direction = 'ENTRY' | 'EXIT'
+
+    ENTRY:
+      - Auto-exits the person from their previous zone (self-corrects missed exits)
+      - Creates a CLOCK_IN record in zone_personnel_tracking
+      - Sets personnel.current_zone_id
+
+    EXIT:
+      - Creates a CLOCK_OUT record in zone_personnel_tracking
+      - Clears personnel.current_zone_id
+
+    Returns Dict[zone_id → new_count] for all zones whose occupancy changed.
+    """
+    zone_id = terminal.zone_id if terminal else None
+    if not zone_id:
+        logger.warning(f"Access control reader {device_sn} has no zone_id — punch ignored")
+        return {}
+
+    # Look up the person
+    person_row = db.execute(text("""
+        SELECT id, current_zone_id FROM personnel
+        WHERE emp_code = :ec OR badge_id = :ec
+        LIMIT 1
+    """), {"ec": emp_code}).fetchone()
+
+    personnel_id    = person_row.id            if person_row else None
+    current_zone_id = person_row.current_zone_id if person_row else None
+
+    zone_updates: Dict[int, int] = {}
+
+    if direction == 'ENTRY':
+        # Auto-exit from previous zone if different
+        if current_zone_id and current_zone_id != zone_id:
+            db.execute(text("""
+                INSERT INTO zone_personnel_tracking
+                    (zone_id, emp_code, device_sn, event_type, punch_time, previous_zone_id)
+                VALUES (:zid, :ec, :sn, 'CLOCK_OUT', :pt, :pzid)
+            """), {"zid": current_zone_id, "ec": emp_code, "sn": device_sn,
+                   "pt": punch_time, "pzid": current_zone_id})
+            zone_updates[current_zone_id] = _recalc_zone_occupancy(current_zone_id, db)
+            logger.debug(f"Auto-exit from zone {current_zone_id} for {emp_code}")
+
+        # Create entry record
+        db.execute(text("""
+            INSERT INTO zone_personnel_tracking
+                (zone_id, emp_code, device_sn, event_type, punch_time, previous_zone_id)
+            VALUES (:zid, :ec, :sn, 'CLOCK_IN', :pt, :pzid)
+        """), {"zid": zone_id, "ec": emp_code, "sn": device_sn,
+               "pt": punch_time, "pzid": current_zone_id})
+        zone_updates[zone_id] = _recalc_zone_occupancy(zone_id, db)
+
+        # Update personnel current zone
+        if personnel_id:
+            db.execute(text(
+                "UPDATE personnel SET current_zone_id = :zid WHERE id = :id"
+            ), {"zid": zone_id, "id": personnel_id})
+
+        # Write access log
+        db.execute(text("""
+            INSERT INTO access_logs
+                (personnel_id, event_type, access_granted, timestamp, zone_id, direction)
+            VALUES (:pid, 'ACCESS_ENTRY', true, :pt, :zid, 'ENTRY')
+        """), {"pid": personnel_id, "pt": punch_time, "zid": zone_id})
+
+    elif direction == 'EXIT':
+        # Create exit record
+        db.execute(text("""
+            INSERT INTO zone_personnel_tracking
+                (zone_id, emp_code, device_sn, event_type, punch_time, previous_zone_id)
+            VALUES (:zid, :ec, :sn, 'CLOCK_OUT', :pt, :pzid)
+        """), {"zid": zone_id, "ec": emp_code, "sn": device_sn,
+               "pt": punch_time, "pzid": zone_id})
+        zone_updates[zone_id] = _recalc_zone_occupancy(zone_id, db)
+
+        # Clear current zone
+        if personnel_id:
+            db.execute(text(
+                "UPDATE personnel SET current_zone_id = NULL WHERE id = :id"
+            ), {"id": personnel_id})
+
+        # Write access log
+        db.execute(text("""
+            INSERT INTO access_logs
+                (personnel_id, event_type, access_granted, timestamp, zone_id, direction)
+            VALUES (:pid, 'ACCESS_EXIT', true, :pt, :zid, 'EXIT')
+        """), {"pid": personnel_id, "pt": punch_time, "zid": zone_id})
+
+    db.commit()
+    return zone_updates
+
+
+def _recalc_zone_occupancy(zone_id: int, db: Session) -> int:
+    """
+    Recount current occupancy for a zone from zone_personnel_tracking.
+    A person is 'in' the zone when their most recent event_type is CLOCK_IN.
+    Returns the new count so callers can broadcast it.
+    """
+    row = db.execute(text("""
+        SELECT COUNT(DISTINCT emp_code) AS cnt FROM (
+            SELECT DISTINCT ON (emp_code) emp_code, event_type
+            FROM zone_personnel_tracking
+            WHERE zone_id = :zid
+            ORDER BY emp_code, punch_time DESC
+        ) last WHERE last.event_type = 'CLOCK_IN'
+    """), {"zid": zone_id}).fetchone()
+    cnt = int(row.cnt) if row else 0
+    db.execute(text("""
+        UPDATE zones SET current_occupancy = :cnt, current_personnel_count = :cnt,
+            updated_at = NOW() WHERE id = :zid
+    """), {"cnt": cnt, "zid": zone_id})
+    return cnt
+
+
+def _update_zone_personnel_count(
+    emp_code: str, device_sn: str, punch_state: int, punch_time: datetime, db: Session
+) -> None:
+    zone_row = db.execute(text("""
+        SELECT zra.zone_id
+        FROM zone_reader_assignments zra
+        JOIN devices d ON d.id = zra.reader_id
+        WHERE d.serial_number = :sn AND zra.status = 'active'
+        LIMIT 1
+    """), {"sn": device_sn}).fetchone()
+
+    if not zone_row:
+        zone_row = db.execute(text(
+            "SELECT zone_id FROM iclock_terminal WHERE sn = :sn LIMIT 1"
+        ), {"sn": device_sn}).fetchone()
+        if not zone_row or not zone_row.zone_id:
+            return
+
+    zone_id  = zone_row.zone_id
+    is_entry = punch_state in (0, 4)
+    event_type = "CLOCK_IN" if is_entry else "CLOCK_OUT"
+
+    prev_row = db.execute(text("""
+        SELECT zone_id FROM zone_personnel_tracking
+        WHERE emp_code = :emp_code ORDER BY punch_time DESC LIMIT 1
+    """), {"emp_code": emp_code}).fetchone()
+    previous_zone_id = prev_row.zone_id if prev_row else None
+
+    db.execute(text("""
+        INSERT INTO zone_personnel_tracking
+            (zone_id, emp_code, device_sn, event_type, punch_time, previous_zone_id)
+        VALUES (:zone_id, :emp_code, :device_sn, :event_type, :punch_time, :prev_zone_id)
+    """), {
+        "zone_id": zone_id, "emp_code": emp_code, "device_sn": device_sn,
+        "event_type": event_type, "punch_time": punch_time, "prev_zone_id": previous_zone_id,
+    })
+
+    _recalc_zone_occupancy(zone_id, db)
+
+    if previous_zone_id and previous_zone_id != zone_id and is_entry:
+        _recalc_zone_occupancy(previous_zone_id, db)
+
+    db.commit()
+    logger.debug(f"Zone {zone_id} updated after {event_type} by {emp_code}")
+
+# ── Core ADMS endpoint ────────────────────────────────────────────────────────
+
+def _real_client_ip(request: Request) -> str:
+    """
+    Return the real device IP, respecting X-Forwarded-For / X-Real-IP headers
+    set by nginx or other reverse proxies sitting in front of the server.
+    Falls back to the direct TCP connection address when no proxy headers exist.
+    """
+    xff = request.headers.get('X-Forwarded-For', '').split(',')[0].strip()
+    if xff:
+        return xff
+    xri = request.headers.get('X-Real-IP', '').strip()
+    if xri:
+        return xri
+    return request.client.host if request.client else ''
+
+
+async def _handle_cdata(request: Request, db: Session) -> PlainTextResponse:
+    sn      = request.query_params.get('SN', '')
+    options = request.query_params.get('options', '')
+    pushver = request.query_params.get('pushver', '1.0')
+
+    if not _valid_sn(sn):
+        logger.warning(f"ADMS bad SN {sn!r} from {_real_client_ip(request)}")
+        return PlainTextResponse(f"{ADMS_ERROR}Invalid SN")
+
+    device_info = parse_device_options(options)
+    client_ip   = _real_client_ip(request)
+
+    terminal = upsert_terminal(sn, client_ip, device_info, pushver, db)
+    if terminal is None:
+        return PlainTextResponse(f"{ADMS_ERROR}Device not registered")
+
+    # Rejected devices get an error so they stop trying
+    if terminal.state == STATE_REJECTED:
+        return PlainTextResponse(f"{ADMS_ERROR}Device rejected")
+
+    # Parse and route the POST body
+    body_bytes = await request.body()
+    body_str   = body_bytes.decode('utf-8', errors='replace') if body_bytes else ""
+
+    if body_str.strip():
+        parsed_records = parse_adms_body(body_str)
+        logger.info(f"ADMS {sn}: {len(parsed_records)} records in body")
+
+        # Group by record type for batch processing
+        by_type: Dict[str, List[Dict]] = {}
+        for rtype, fields in parsed_records:
+            by_type.setdefault(rtype, []).append(fields)
+
+        # Only process attendance/operlog if device is approved
+        if terminal.state == STATE_APPROVED:
+            if 'ATTLOG' in by_type:
+                saved, latest_ts, zone_updates = handle_attlog(by_type['ATTLOG'], sn, db)
+                if latest_ts > (terminal.att_stamp or 0):
+                    terminal.att_stamp = latest_ts
+                    db.commit()
+                # Broadcast live zone occupancy to all connected POB dashboards
+                if zone_updates:
+                    zone_names = {}
+                    try:
+                        rows = db.execute(text(
+                            "SELECT id, name FROM zones WHERE id = ANY(:ids)"
+                        ), {"ids": list(zone_updates.keys())}).fetchall()
+                        zone_names = {r.id: r.name for r in rows}
+                    except Exception:
+                        pass
+                    for zid, cnt in zone_updates.items():
+                        asyncio.create_task(
+                            broadcast_zone_update(zid, cnt, zone_names.get(zid, ""))
+                        )
+
+            if 'OPERLOG' in by_type:
+                _, latest_op = handle_operlog(by_type['OPERLOG'], sn, db)
+                if latest_op > (terminal.op_stamp or 0):
+                    terminal.op_stamp = latest_op
+                    db.commit()
+
+        # USERINFO, FINGERTMP, FACETMP processed regardless of approval state
+        # so device-enrolled biometrics aren't lost while pending review
+        if 'USERINFO' in by_type:
+            handle_userinfo(by_type['USERINFO'], sn, db)
+
+        if 'FINGERTMP' in by_type:
+            handle_fingertmp(by_type['FINGERTMP'], sn, db)
+
+        if 'FACETMP' in by_type:
+            handle_facetmp(by_type['FACETMP'], sn, db)
+
+    # Build response: options block + any queued commands
+    options_block = build_options_block(terminal, pushver)
+
+    _recover_stale_commands(sn, db)
+    pending = get_pending_commands(sn, db)
+    if pending:
+        cmd_ids   = [c['id'] for c in pending]
+        cmd_lines = [f"C:{c['id']}:{c['cmd_content']}" for c in pending]
+        mark_commands_sent(cmd_ids, db)
+        logger.info(f"ADMS {sn}: delivered {len(cmd_lines)} commands")
+        return PlainTextResponse(options_block + "\n" + "\n".join(cmd_lines))
+
+    return PlainTextResponse(options_block)
+
+
+@router.get("/iclock/cdata", response_class=PlainTextResponse)
+async def adms_cdata_get(request: Request, db: Session = Depends(get_db)):
+    return await _handle_cdata(request, db)
+
+
+@router.post("/iclock/cdata", response_class=PlainTextResponse)
+async def adms_cdata_post(request: Request, db: Session = Depends(get_db)):
+    return await _handle_cdata(request, db)
+
+
+def _recover_stale_commands(sn: str, db: Session) -> None:
+    """
+    Reset commands stuck at status=1 (sent but never acked) after 3 minutes.
+    REBOOT/SHUTDOWN/SYNCTIME will never ack because the device restarts — mark them done.
+    All other commands reset to status=0 so they're re-delivered on the next poll.
+    """
+    # Commands that will never send an ack: REBOOT (restarts device), DATE TIME (some firmware
+    # executes silently), SYNCTIME label. Mark them completed. Everything else reset to pending.
+    db.execute(text("""
+        UPDATE iclock_devcmd
+        SET status = CASE
+            WHEN UPPER(TRIM(cmd_content)) ~ '^(REBOOT|SHUTDOWN|SYNCTIME|DATE TIME)' THEN 2
+            ELSE 0
+        END,
+        cmd_return = CASE
+            WHEN UPPER(TRIM(cmd_content)) ~ '^(REBOOT|SHUTDOWN|SYNCTIME|DATE TIME)'
+            THEN 'Auto-completed (no ack expected)'
+            ELSE NULL
+        END,
+        cmd_return_time = CASE
+            WHEN UPPER(TRIM(cmd_content)) ~ '^(REBOOT|SHUTDOWN|SYNCTIME|DATE TIME)'
+            THEN NOW()
+            ELSE NULL
+        END
+        WHERE sn = :sn
+          AND status = 1
+          AND cmd_trans_time < NOW() - INTERVAL '3 minutes'
+    """), {'sn': sn})
+    db.commit()
+
+
+@router.get("/iclock/getrequest", response_class=PlainTextResponse)
+async def adms_getrequest(request: Request, db: Session = Depends(get_db)):
+    sn = request.query_params.get('SN', '')
+    if not _valid_sn(sn):
+        return PlainTextResponse(f"{ADMS_ERROR}Invalid SN")
+
+    # Update last_activity
+    db.execute(text(
+        "UPDATE iclock_terminal SET last_activity = :now WHERE sn = :sn"
+    ), {'now': datetime.now(timezone.utc), 'sn': sn})
+    db.commit()
+
+    # Recover commands stuck at "sent" for > 3 minutes (device rebooted / never acked)
+    _recover_stale_commands(sn, db)
+
+    pending = get_pending_commands(sn, db)
+    if not pending:
+        return PlainTextResponse(ADMS_NONE)
+
+    cmd_ids   = [c['id'] for c in pending]
+    cmd_lines = [f"C:{c['id']}:{c['cmd_content']}" for c in pending]
+    mark_commands_sent(cmd_ids, db)
+    logger.info(f"ADMS getrequest {sn}: delivered {len(cmd_lines)} commands")
+    return PlainTextResponse("\n".join(cmd_lines))
+
+
+@router.post("/iclock/devicecmd", response_class=PlainTextResponse)
+async def adms_devicecmd(request: Request, db: Session = Depends(get_db)):
+    sn = request.query_params.get('SN', '')
+    if not _valid_sn(sn):
+        return PlainTextResponse(f"{ADMS_ERROR}Invalid SN")
+
+    body     = await request.body()
+    data_str = body.decode('utf-8', errors='replace') if body else ""
+    if not data_str.strip():
+        return PlainTextResponse(ADMS_OK)
+
+    from urllib.parse import parse_qs
+    raw = data_str.strip()
+    logger.debug(f"devicecmd body from {sn}: {raw[:200]}")
+
+    # ZKTeco devices batch multiple command acks in one POST, one per line.
+    # Each line is URL-encoded: ID=123&Return=0&CMD=REBOOT
+    # Some older firmware sends newline-separated key=value instead.
+    # We handle both by splitting on \n and URL-parsing each non-empty line.
+    now = datetime.now(timezone.utc)
+    for line in raw.split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+
+        if '&' in line:
+            parsed = parse_qs(line, keep_blank_values=True)
+            fields: Dict[str, str] = {k: v[0] for k, v in parsed.items()}
+        else:
+            fields = _parse_kv_lines([line])
+
+        cmd_id_str  = fields.get('ID')
+        return_code = fields.get('Return', '0')
+        cmd_name    = fields.get('CMD', '')
+
+        if not cmd_id_str:
+            continue
+        try:
+            cmd_id = int(cmd_id_str)
+            success = return_code.strip() in ('0', 'OK', 'ok', 'Success', 'success')
+            final_status = 2 if success else 3
+            db.execute(text("""
+                UPDATE iclock_devcmd
+                SET status = :status, cmd_return_time = :now,
+                    cmd_return = :ret
+                WHERE id = :id AND status != 2
+            """), {
+                'status': final_status,
+                'now':    now,
+                'ret':    f"Return={return_code}&CMD={cmd_name}",
+                'id':     cmd_id,
+            })
+            logger.info(f"devicecmd {sn} cmd={cmd_id} return={return_code!r} → status={final_status}")
+        except ValueError:
+            logger.warning(f"devicecmd non-numeric ID from {sn}: {cmd_id_str!r}")
+        except Exception as e:
+            logger.error(f"devicecmd update error for {sn} cmd={cmd_id_str}: {e}")
+
+    db.commit()
+    return PlainTextResponse(ADMS_OK)
+
+# ── Admin API endpoints ────────────────────────────────────────────────────────
+
+@router.get("/iclock/test")
+async def adms_test():
+    return {
+        "protocol": "ADMS",
+        "version":  "2.3",
+        "endpoints": {
+            "cdata":     "/iclock/cdata",
+            "getrequest":"/iclock/getrequest",
+            "devicecmd": "/iclock/devicecmd",
+        },
+        "features": [
+            "batch_record_parsing", "record_type_routing", "stamp_watermark",
+            "device_approval_workflow", "operlog_handler", "userinfo_handler",
+            "biometric_template_handler", "command_builders",
+        ],
+        "status": "operational",
+    }
+
+
+@router.get("/iclock/pending-devices")
+async def get_pending_devices(db: Session = Depends(get_db)):
+    """Return all devices awaiting admin approval (state=0)."""
+    rows = db.query(IClockTerminal).filter(
+        IClockTerminal.state == STATE_PENDING
+    ).order_by(IClockTerminal.created_at.desc()).all()
+    return [
+        {
+            "id":           r.id,
+            "sn":           r.sn,
+            "alias":        r.alias,
+            "ip_address":   r.ip_address,
+            "fw_ver":       r.fw_ver,
+            "pushver":      r.pushver,
+            "user_count":   r.user_count,
+            "fp_count":     r.fp_count,
+            "face_count":   r.face_count,
+            "first_seen":   r.created_at.isoformat() if r.created_at else None,
+            "last_activity":r.last_activity.isoformat() if r.last_activity else None,
+        }
+        for r in rows
+    ]
+
+
+@router.post("/iclock/approve-device")
+async def approve_device(body: ApproveRequest, db: Session = Depends(get_db)):
+    """Approve or reject a pending device. On approval, auto-queues full user sync."""
+    terminal = db.query(IClockTerminal).filter(IClockTerminal.sn == body.sn).first()
+    if not terminal:
+        raise HTTPException(404, "Device not found")
+    if body.action == "approve":
+        terminal.state = STATE_APPROVED
+        db.commit()
+        msg = await _sync_users_to_terminal(terminal, db)
+    elif body.action == "reject":
+        terminal.state = STATE_REJECTED
+        db.commit()
+        msg = f"Device {body.sn} rejected"
+    else:
+        raise HTTPException(400, "action must be 'approve' or 'reject'")
+    logger.info(msg)
+    return {"detail": msg, "sn": body.sn, "state": terminal.state}
+
+
+async def _sync_users_to_terminal(terminal: IClockTerminal, db) -> str:
+    """
+    Push all employees to a terminal.  Strategy depends on ADMS PushVer:
+      - PushVer 2.x: queue DATA UPDATE USERINFO commands (device processes on next poll)
+      - PushVer 1.x or unknown: use ZKLib direct TCP if IP available; ADMS otherwise
+    """
+    employees = db.query(PersonnelEmployee).all()
+    if not employees:
+        return f"Device {terminal.sn} approved — no employees to sync"
+
+    pushver = (terminal.pushver or "").strip()
+    use_adms = pushver.startswith("2")
+
+    if use_adms:
+        queued = 0
+        for emp in employees:
+            name = f"{emp.first_name or ''} {emp.last_name or ''}".strip()
+            card = getattr(emp, 'card_no', '') or ''
+            cmd = (
+                f"DATA UPDATE USERINFO\tPin={emp.emp_code}\t"
+                f"Name={name}\tCard={card}\tPrivilege=0\t"
+                f"Password=\tGroup=1\tTimeZone=0\tVerify=0"
+            )
+            queue_command(terminal.sn, cmd, db)
+            queued += 1
+        return f"Device {terminal.sn} approved — {queued} user sync commands queued (ADMS)"
+
+    # PushVer 1.x: DATA UPDATE USERINFO not supported; use ZKLib if IP available
+    ip = terminal.ip_address
+    if not ip:
+        return (
+            f"Device {terminal.sn} approved — user sync skipped "
+            f"(PushVer {pushver or '1.0'} does not support remote user push and no IP stored)"
+        )
+
+    try:
+        from ..services.zkteco.direct_connection import zkteco_direct
+        # Get existing users to avoid UID conflicts
+        # Build emp_code→uid map from device (use emp_code as user_id for proper attendance matching)
+        existing = await zkteco_direct.get_users(ip=ip, port=4370)
+        code_to_uid: dict = {}
+        max_uid = 0
+        if existing.get("success"):
+            for u in existing.get("users", []):
+                uid_val = u.get("uid", 0)
+                uid_str = str(u.get("user_id", ""))
+                if uid_str:
+                    code_to_uid[uid_str] = uid_val
+                if uid_val > max_uid:
+                    max_uid = uid_val
+
+        synced = 0
+        errors = []
+        for emp in employees:
+            name    = f"{emp.first_name or ''} {emp.last_name or ''}".strip() or emp.emp_code
+            uid     = code_to_uid.get(emp.emp_code)
+            if uid is None:
+                max_uid += 1
+                uid = max_uid
+            card_str = getattr(emp, 'card_no', '') or ''
+            card_int = int(card_str) if card_str.isdigit() else 0
+            result  = await zkteco_direct.set_user(
+                ip=ip, uid=uid, name=name[:24],
+                user_id=emp.emp_code, card=card_int, port=4370
+            )
+            if result.get("success"):
+                synced += 1
+            else:
+                errors.append(f"{emp.emp_code}: {result.get('error')}")
+
+        parts = [f"Device {terminal.sn} approved — {synced}/{len(employees)} employees pushed via ZKLib"]
+        if errors:
+            parts.append(f"errors: {'; '.join(errors[:3])}")
+        return " — ".join(parts)
+
+    except Exception as e:
+        logger.error(f"ZKLib user sync failed for {terminal.sn}: {e}")
+        return (
+            f"Device {terminal.sn} approved — ZKLib user sync failed ({e}). "
+            "Users can be synced manually via the Sync button."
+        )
+
+
+@router.get("/iclock/operlog")
+async def get_operlog(
+    sn: Optional[str] = None,
+    event_type: Optional[int] = None,
+    limit: int = 200,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+):
+    """Return OPERLOG events with optional filters."""
+    q = db.query(IClockOperLog)
+    if sn:
+        q = q.filter(IClockOperLog.terminal_sn == sn)
+    if event_type is not None:
+        q = q.filter(IClockOperLog.oper_event == event_type)
+    total = q.count()
+    rows  = q.order_by(IClockOperLog.event_time.desc()).offset(offset).limit(limit).all()
+    return {
+        "total": total,
+        "results": [
+            {
+                "id":           r.id,
+                "terminal_sn":  r.terminal_sn,
+                "oper_event":   r.oper_event,
+                "event_label":  OPER_EVENT_LABELS.get(r.oper_event, "Unknown"),
+                "event_time":   r.event_time.isoformat() if r.event_time else None,
+                "admin_id":     r.admin_id,
+                "door_id":      r.door_id,
+                "object_name":  r.object_name,
+                "param1":       r.param1,
+                "param2":       r.param2,
+            }
+            for r in rows
+        ],
+    }
+
+
+@router.get("/iclock/bio-templates")
+async def get_bio_templates(
+    emp_code: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """Return stored biometric templates, optionally filtered by employee."""
+    q = db.query(IClockBioTemplate)
+    if emp_code:
+        q = q.filter(IClockBioTemplate.emp_code == emp_code)
+    rows = q.order_by(IClockBioTemplate.emp_code, IClockBioTemplate.finger_id).all()
+    return [
+        {
+            "id":            r.id,
+            "emp_code":      r.emp_code,
+            "finger_id":     r.finger_id,
+            "type":          "face" if r.finger_id == -1 else "fingerprint",
+            "template_size": r.template_size,
+            "valid":         r.valid,
+            "source_sn":     r.source_sn,
+            "updated_at":    r.updated_at.isoformat() if r.updated_at else None,
+        }
+        for r in rows
+    ]
+
+# ── Command builder endpoints ─────────────────────────────────────────────────
+
+@router.post("/iclock/cmd/push-users")
+async def cmd_push_users(body: PushUsersRequest, db: Session = Depends(get_db)):
+    """
+    Push employee records to a device.
+    PushVer 2.x: queues ADMS DATA UPDATE USERINFO commands.
+    PushVer 1.x: uses ZKLib direct TCP (port 4370) if device IP is available.
+    """
+    terminal = db.query(IClockTerminal).filter(IClockTerminal.sn == body.sn).first()
+    if not terminal:
+        raise HTTPException(404, "Device not found")
+
+    pushver = (terminal.pushver or "").strip()
+
+    if pushver.startswith("2"):
+        # ADMS DATA UPDATE USERINFO (v2.x firmware)
+        q = db.query(PersonnelEmployee)
+        if body.emp_codes:
+            q = q.filter(PersonnelEmployee.emp_code.in_(body.emp_codes))
+        employees = q.all()
+        queued = 0
+        for emp in employees:
+            name  = f"{emp.first_name or ''} {emp.last_name or ''}".strip()
+            card  = getattr(emp, 'card_no', '') or ''
+            cmd   = (
+                f"DATA UPDATE USERINFO\tPin={emp.emp_code}\t"
+                f"Name={name}\tCard={card}\tPrivilege=0\t"
+                f"Password=\tGroup=1\tTimeZone=0\tVerify=0"
+            )
+            queue_command(body.sn, cmd, db)
+            queued += 1
+        return {"detail": f"Queued {queued} USERINFO commands to {body.sn}"}
+
+    # PushVer 1.x — use ZKLib direct TCP
+    ip = terminal.ip_address
+    if not ip:
+        return {
+            "detail": (
+                f"User sync not available: device {body.sn} uses PushVer {pushver or '1.0'} "
+                "which does not support remote user push, and no IP address is stored. "
+                "Enroll users directly on the device."
+            )
+        }
+
+    try:
+        from ..services.zkteco.direct_connection import zkteco_direct
+        q = db.query(PersonnelEmployee)
+        if body.emp_codes:
+            q = q.filter(PersonnelEmployee.emp_code.in_(body.emp_codes))
+        employees = q.all()
+
+        # Build emp_code→uid map from device
+        existing = await zkteco_direct.get_users(ip=ip, port=4370)
+        code_to_uid: dict = {}
+        max_uid = 0
+        if existing.get("success"):
+            for u in existing.get("users", []):
+                uid_val = u.get("uid", 0)
+                uid_str = str(u.get("user_id", ""))
+                if uid_str:
+                    code_to_uid[uid_str] = uid_val
+                if uid_val > max_uid:
+                    max_uid = uid_val
+
+        synced = 0
+        errors = []
+        for emp in employees:
+            name    = f"{emp.first_name or ''} {emp.last_name or ''}".strip() or emp.emp_code
+            uid     = code_to_uid.get(emp.emp_code)
+            if uid is None:
+                max_uid += 1
+                uid = max_uid
+            card_str = getattr(emp, 'card_no', '') or ''
+            card_int = int(card_str) if card_str.isdigit() else 0
+            result  = await zkteco_direct.set_user(
+                ip=ip, uid=uid, name=name[:24],
+                user_id=emp.emp_code, card=card_int, port=4370
+            )
+            if result.get("success"):
+                synced += 1
+            else:
+                errors.append(f"{emp.emp_code}: {result.get('error')}")
+
+        msg = f"Pushed {synced}/{len(employees)} employees to {body.sn} via ZKLib"
+        if errors:
+            msg += f" — errors: {'; '.join(errors[:3])}"
+        return {"detail": msg, "synced": synced, "errors": errors}
+
+    except Exception as e:
+        logger.error(f"ZKLib push-users failed for {body.sn}: {e}")
+        return {"detail": f"ZKLib user sync failed: {e}", "synced": 0, "errors": [str(e)]}
+
+
+@router.post("/iclock/cmd/push-templates")
+async def cmd_push_templates(body: PushTemplatesRequest, db: Session = Depends(get_db)):
+    """
+    Queue DATA UPDATE FINGERTMP / FACETMP commands to push biometric templates to a device.
+    """
+    terminal = db.query(IClockTerminal).filter(IClockTerminal.sn == body.sn).first()
+    if not terminal:
+        raise HTTPException(404, "Device not found")
+
+    q = db.query(IClockBioTemplate).filter(IClockBioTemplate.valid == True)
+    if body.emp_codes:
+        q = q.filter(IClockBioTemplate.emp_code.in_(body.emp_codes))
+    templates = q.all()
+
+    queued = 0
+    for tpl in templates:
+        if tpl.finger_id == -1:
+            cmd = (
+                f"DATA UPDATE FACETMP\tPin={tpl.emp_code}\t"
+                f"Size={tpl.template_size or 0}\tValid={1 if tpl.valid else 0}\t"
+                f"TmpData={tpl.template_data or ''}"
+            )
+        else:
+            cmd = (
+                f"DATA UPDATE FINGERTMP\tPin={tpl.emp_code}\t"
+                f"FingerID={tpl.finger_id}\t"
+                f"Size={tpl.template_size or 0}\tValid={1 if tpl.valid else 0}\t"
+                f"TmpData={tpl.template_data or ''}"
+            )
+        queue_command(body.sn, cmd, db)
+        queued += 1
+
+    return {"detail": f"Queued {queued} template commands to {body.sn}"}
+
+
+@router.post("/iclock/cmd/push-timezones")
+async def cmd_push_timezones(body: PushTimezonesRequest, db: Session = Depends(get_db)):
+    """
+    Queue SET TIMEZONE commands to push shift time rules to a device.
+    ZKTeco TIMEZONE format:  ID\tSunTime1\tMonTime1\t...\tSatTime1
+    Each time slot is encoded as HHMM (0000=disabled).
+    """
+    terminal = db.query(IClockTerminal).filter(IClockTerminal.sn == body.sn).first()
+    if not terminal:
+        raise HTTPException(404, "Device not found")
+
+    q = db.query(AttTimetable)
+    if body.shift_ids:
+        q = q.filter(AttTimetable.id.in_(body.shift_ids))
+    timetables = q.limit(50).all()  # ZKTeco devices support up to 50 timezones
+
+    queued = 0
+    for idx, tt in enumerate(timetables, start=1):
+        # Format: HHMM from time objects, 0000 = disabled
+        def fmt(t):
+            return f"{t.hour:02d}{t.minute:02d}" if t else "0000"
+        start = fmt(tt.start_time)
+        end   = fmt(tt.end_time)
+        # Apply same time to all 7 days (Mon-Sun) as default
+        time_slots = "\t".join([f"{start}{end}"] * 7)
+        cmd = f"SET TIMEZONE\t{idx}\t{time_slots}"
+        queue_command(body.sn, cmd, db)
+        queued += 1
+
+    return {"detail": f"Queued {queued} TIMEZONE commands to {body.sn}"}
+
+
+@router.post("/iclock/cmd/push-access-levels")
+async def cmd_push_access_levels(body: PushAccessLevelsRequest, db: Session = Depends(get_db)):
+    """
+    Queue DATA UPDATE USERATT commands to push access level assignments to a device.
+    USERATT format: UserID=001\tTimeZoneID=1\tDoorID=1\tBooleanValue=1
+    """
+    terminal = db.query(IClockTerminal).filter(IClockTerminal.sn == body.sn).first()
+    if not terminal:
+        raise HTTPException(404, "Device not found")
+
+    q = db.query(AccUserAuthorize)
+    if body.level_ids:
+        q = q.filter(AccUserAuthorize.level_id.in_(body.level_ids))
+    assignments = q.all()
+
+    queued = 0
+    for assn in assignments:
+        emp_code = assn.emp_code
+        level_id = assn.level_id
+        cmd = (
+            f"DATA UPDATE USERATT\tPin={emp_code}\t"
+            f"TimeZoneID={level_id}\tDoorID=1\tBooleanValue=1"
+        )
+        queue_command(body.sn, cmd, db)
+        queued += 1
+
+    return {"detail": f"Queued {queued} USERATT commands to {body.sn}"}
+
+
+@router.post("/iclock/cmd/query-attlog")
+async def cmd_query_attlog(body: CommandRequest, db: Session = Depends(get_db)):
+    """
+    Queue a QUERY ATTLOG command so the device re-uploads its full attendance buffer.
+    Use this after a data gap (network dropout, device replacement, etc.).
+    stamp=0 means 'send everything'.
+    """
+    terminal = db.query(IClockTerminal).filter(IClockTerminal.sn == body.sn).first()
+    if not terminal:
+        raise HTTPException(404, "Device not found")
+
+    # Reset att_stamp so the options block will send Stamp=0 on next heartbeat,
+    # which is the signal for the device to re-upload from the beginning
+    terminal.att_stamp = 0
+    db.commit()
+
+    cmd_id = queue_command(body.sn, "QUERY ATTLOG", db)
+    return {"detail": f"QUERY ATTLOG queued (id={cmd_id}) — att_stamp reset to 0", "cmd_id": cmd_id}
+
+
+class _SNRequest(BaseModel):
+    sn: str
+
+@router.post("/iclock/cmd/pull-users")
+async def cmd_pull_users(body: _SNRequest, db: Session = Depends(get_db)):
+    """
+    Pull all users stored on the device into personnel_employee.
+
+    PushVer 2.x: resets UserStamp=0; device uploads on next heartbeat (~30s).
+    PushVer 1.x: fetches directly via ZKLib and upserts employees immediately.
+
+    New users (not in DB) are created as pending employees.
+    Existing employees get their card_no updated if the device has one.
+    """
+    terminal = db.query(IClockTerminal).filter(IClockTerminal.sn == body.sn).first()
+    if not terminal:
+        raise HTTPException(404, "Device not found")
+
+    pushver = (terminal.pushver or "").strip()
+
+    if pushver.startswith("2"):
+        # PushVer 2.x: use ADMS UserStamp mechanism
+        terminal.user_stamp = 0
+        db.commit()
+        return {
+            "detail": (
+                f"UserStamp reset to 0 for {body.sn} — "
+                "device will upload its full user list on next heartbeat (~30s)"
+            )
+        }
+
+    # PushVer 1.x: pull directly via ZKLib
+    ip = terminal.ip_address
+    if not ip:
+        return {
+            "detail": (
+                f"Cannot pull users from {body.sn}: PushVer {pushver or '1.0'} "
+                "does not support remote user pull via ADMS and no IP is stored."
+            )
+        }
+
+    try:
+        from ..services.zkteco.direct_connection import zkteco_direct
+        result = await zkteco_direct.get_users(ip=ip, port=4370)
+        if not result.get("success"):
+            raise HTTPException(502, f"ZKLib get_users failed: {result.get('error')}")
+
+        raw_users = result.get("users", [])
+
+        # Deduplicate by user_id — device can occasionally report the same user twice,
+        # which causes a UniqueViolation when both get staged in the same session.
+        seen_ids: set = set()
+        device_users = []
+        for u in raw_users:
+            uid = str(u.get("user_id", "")).strip()
+            if uid and uid.isprintable() and uid not in seen_ids:
+                seen_ids.add(uid)
+                device_users.append(u)
+
+        created = 0
+        updated = 0
+
+        for u in device_users:
+            raw_id = str(u.get("user_id", "")).strip()
+            name   = (u.get("name") or "").strip()
+            card   = u.get("card", 0)
+
+            emp = db.query(Personnel).filter(
+                Personnel.emp_code == raw_id
+            ).first()
+
+            if emp:
+                # Only fill in blanks — never overwrite existing data
+                if name and not emp.first_name:
+                    parts = name.split()
+                    emp.first_name = parts[0]
+                    emp.last_name  = " ".join(parts[1:]) if len(parts) > 1 else (emp.last_name or "")
+                if card and not emp.card_number:
+                    emp.card_number = int(card)
+                updated += 1
+            else:
+                parts      = name.split() if name else [raw_id]
+                first_name = parts[0]
+                last_name  = " ".join(parts[1:]) if len(parts) > 1 else ""
+                new_emp = Personnel(
+                    emp_code    = raw_id,
+                    first_name  = first_name,
+                    last_name   = last_name,
+                    card_number = int(card) if card else None,
+                    status      = PersonnelStatus.INACTIVE,
+                )
+                db.add(new_emp)
+                created += 1
+
+        db.commit()
+        skipped = len(raw_users) - len(device_users)
+        summary = (
+            f"Pulled {len(raw_users)} users from {body.sn} via ZKLib — "
+            f"{created} new employees created, {updated} existing updated, "
+            f"{skipped} skipped (duplicate / blank ids)"
+        )
+        now = datetime.utcnow()
+        db.execute(text("""
+            INSERT INTO iclock_devcmd (sn, cmd_content, cmd_commit_time, cmd_trans_time, cmd_return_time, status)
+            VALUES (:sn, :cmd, :now, :now, :now, 2)
+        """), {"sn": body.sn, "cmd": f"PULL USERS ({created} created, {updated} updated, {skipped} skipped)", "now": now})
+        db.commit()
+        return {
+            "detail": summary,
+            "total": len(raw_users),
+            "created": created,
+            "updated": updated,
+            "skipped": skipped,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"ZKLib pull-users failed for {body.sn}: {e}")
+        raise HTTPException(500, f"ZKLib pull-users failed: {e}")
+
+
+@router.patch("/iclock/terminals/{sn}/heartbeat-interval")
+async def set_heartbeat_interval(
+    sn: str, interval: int, db: Session = Depends(get_db)
+):
+    """Update per-device heartbeat interval (seconds). Returned as Delay= in options block."""
+    if interval < 10 or interval > 3600:
+        raise HTTPException(400, "interval must be 10–3600 seconds")
+    terminal = db.query(IClockTerminal).filter(IClockTerminal.sn == sn).first()
+    if not terminal:
+        raise HTTPException(404, "Device not found")
+    terminal.heartbeat_interval = interval
+    db.commit()
+    return {"sn": sn, "heartbeat_interval": interval}
+
+
+# ── Time synchronisation endpoints ───────────────────────────────────────────
+
+class TimeSyncRequest(BaseModel):
+    sn: str
+
+@router.post("/iclock/cmd/sync-time")
+async def cmd_sync_time(body: TimeSyncRequest, db: Session = Depends(get_db)):
+    """
+    Sync a single device clock to server time.
+
+    For direct-IP devices (connection_mode = 'direct'/'both'): connects via
+    ZKLib TCP and sets the clock immediately.
+    For ADMS push devices: queues a DATE TIME command; the device applies it
+    on its next /iclock/getrequest poll.
+    """
+    terminal = db.query(IClockTerminal).filter(IClockTerminal.sn == body.sn).first()
+    if not terminal:
+        raise HTTPException(404, "Device not found")
+    if terminal.state != STATE_APPROVED:
+        raise HTTPException(400, "Device is not approved — sync not allowed")
+
+    correct_time = datetime.now()
+    correct_time_str = correct_time.strftime('%Y-%m-%d %H:%M:%S')
+
+    # Prefer direct TCP sync when the device has an IP and is in direct/both mode
+    dev = _get_direct_device(body.sn, db)
+    if dev and (dev.connection_mode or '').lower() in ('direct', 'both'):
+        try:
+            result = await _direct_sync_time(dev.ip_address, dev.port)
+            if result.get('success'):
+                logger.info(f"Direct time sync OK for {body.sn}: device reports {result.get('device_reports')}")
+                return {
+                    "success": True,
+                    "sn": body.sn,
+                    "server_time": correct_time_str,
+                    "device_reports": result.get('device_reports'),
+                    "method": "direct",
+                    "message": "Clock synchronized via direct ZKLib connection",
+                }
+            logger.warning(f"Direct sync failed for {body.sn}: {result.get('error')} — falling back to ADMS queue")
+        except Exception as exc:
+            logger.warning(f"Direct sync exception for {body.sn}: {exc} — falling back to ADMS queue")
+
+    # ADMS command queue fallback
+    cmd_id = queue_command(body.sn, f"DATE TIME {correct_time_str}", db)
+    logger.info(f"ADMS time sync queued for {body.sn}: {correct_time_str} (cmd_id={cmd_id})")
+    return {
+        "success":     True,
+        "sn":          body.sn,
+        "server_time": correct_time_str,
+        "cmd_id":      cmd_id,
+        "method":      "adms",
+        "message":     "DATE TIME queued — device will sync on next heartbeat poll",
+    }
+
+
+@router.post("/iclock/cmd/sync-time-all")
+async def cmd_sync_time_all(db: Session = Depends(get_db)):
+    """
+    Sync ALL approved readers to server time.
+
+    Direct-IP devices (connection_mode 'direct'/'both') are synced immediately
+    via ZKLib TCP.  ADMS push devices receive a DATE TIME command on their next
+    heartbeat poll.  Direct sync falls back to ADMS queue on connection failure.
+    """
+    terminals = db.query(IClockTerminal).filter(
+        IClockTerminal.state == STATE_APPROVED
+    ).all()
+
+    if not terminals:
+        return {"success": True, "queued": 0, "message": "No approved devices found"}
+
+    # Fetch all direct-IP devices in one query
+    sn_list = [t.sn for t in terminals]
+    sn_csv  = ",".join(f"'{s}'" for s in sn_list)          # safe: SNs are regex-validated
+    dev_rows = db.execute(text(f"""
+        SELECT serial_number, ip_address, port, connection_mode
+        FROM devices
+        WHERE serial_number IN ({sn_csv}) AND ip_address IS NOT NULL
+    """)).fetchall()
+    dev_map = {r.serial_number: r for r in dev_rows}
+
+    correct_time = datetime.now()
+    correct_time_str = correct_time.strftime('%Y-%m-%d %H:%M:%S')
+    results = []
+    queued  = 0
+
+    for t in terminals:
+        dev = dev_map.get(t.sn)
+        if dev and (dev.connection_mode or '').lower() in ('direct', 'both'):
+            try:
+                result = await _direct_sync_time(dev.ip_address, dev.port)
+                if result.get('success'):
+                    results.append({
+                        "sn": t.sn, "alias": t.alias or t.sn,
+                        "method": "direct", "status": "ok",
+                        "device_reports": result.get('device_reports'),
+                    })
+                    queued += 1
+                    continue
+                logger.warning(f"Direct sync failed for {t.sn}: {result.get('error')} — using ADMS queue")
+            except Exception as exc:
+                logger.warning(f"Direct sync exception for {t.sn}: {exc} — using ADMS queue")
+
+        # ADMS queue (primary for push devices, fallback for direct)
+        try:
+            cmd_id = queue_command(t.sn, f"DATE TIME {correct_time_str}", db)
+            results.append({
+                "sn": t.sn, "alias": t.alias or t.sn,
+                "method": "adms", "status": "queued", "cmd_id": cmd_id,
+            })
+            queued += 1
+        except Exception as e:
+            logger.error(f"Failed to queue time sync for {t.sn}: {e}")
+            results.append({"sn": t.sn, "alias": t.alias or t.sn, "error": str(e)})
+
+    logger.info(f"Bulk time sync: synced/queued {queued}/{len(terminals)} devices at {correct_time_str}")
+    return {
+        "success":     True,
+        "server_time": correct_time_str,
+        "queued":      queued,
+        "total":       len(terminals),
+        "devices":     results,
+    }
+
+
+@router.get("/iclock/terminals/time-drift")
+async def get_time_drift(db: Session = Depends(get_db)):
+    """
+    Return real-time clock drift for each approved device.
+
+    Direct-IP devices: queries the device clock live via ZKLib TCP so drift is
+    always accurate and up-to-date regardless of historical punch data quality.
+
+    ADMS push-only devices: estimates drift from recent punches (uploaded within
+    the last 24 hours and with a <2h punch-to-upload lag so corrupted/batched
+    records do not skew the result).  Reports 'no_recent_data' when no suitable
+    punch exists.
+    """
+    from ..services.zkteco.direct_connection import zkteco_direct
+
+    terminals = db.execute(text("""
+        SELECT t.sn, t.alias, t.last_activity,
+               d.ip_address, d.port, d.connection_mode
+        FROM iclock_terminal t
+        LEFT JOIN devices d ON d.serial_number = t.sn
+        WHERE t.state = :approved
+    """), {"approved": STATE_APPROVED}).fetchall()
+
+    server_now = datetime.now()
+    devices    = []
+
+    for r in terminals:
+        drift       = None
+        method      = "none"
+        detail      = None
+        is_direct   = r.ip_address and (r.connection_mode or '').lower() in ('direct', 'both')
+
+        # ── Direct-IP devices: live clock query ──────────────────────────
+        if is_direct:
+            try:
+                res = await zkteco_direct.get_time(ip=r.ip_address, port=r.port or 4370)
+                if res.get('success') and res.get('device_time'):
+                    raw = str(res['device_time'])[:19]
+                    device_dt = None
+                    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+                        try:
+                            device_dt = datetime.strptime(raw, fmt)
+                            break
+                        except ValueError:
+                            continue
+                    if device_dt:
+                        drift  = int((server_now - device_dt).total_seconds())
+                        method = "live"
+                    else:
+                        detail = f"Could not parse device time: {raw}"
+                        method = "live_parse_error"
+                else:
+                    detail = res.get('error', 'unreachable')
+                    method = "live_failed"
+            except Exception as exc:
+                detail = str(exc)
+                method = "live_failed"
+
+        # ── ADMS push devices (or fallback): recent punch estimate ───────
+        if drift is None:
+            recent = db.execute(text("""
+                SELECT punch_time, upload_time
+                FROM iclock_transaction
+                WHERE terminal_sn = :sn
+                  AND upload_time >= NOW() - INTERVAL '24 hours'
+                  AND ABS(EXTRACT(EPOCH FROM (upload_time - punch_time))) < 7200
+                ORDER BY upload_time DESC
+                LIMIT 1
+            """), {'sn': r.sn}).fetchone()
+
+            if recent:
+                pt = recent.punch_time.replace(tzinfo=None) if recent.punch_time else None
+                ut = recent.upload_time.replace(tzinfo=None) if recent.upload_time else None
+                if pt and ut:
+                    drift  = int((ut - pt).total_seconds())
+                    method = "recent_punch"
+            else:
+                method = "no_recent_data"
+
+        # ── Status ───────────────────────────────────────────────────────
+        if drift is None:
+            drift_status = "unknown"
+        elif abs(drift) <= 60:
+            drift_status = "ok"
+        elif abs(drift) <= 300:
+            drift_status = "warning"
+        else:
+            drift_status = "critical"
+
+        devices.append({
+            "sn":            r.sn,
+            "alias":         r.alias or r.sn,
+            "last_activity": r.last_activity.isoformat() if r.last_activity else None,
+            "drift_seconds": drift,
+            "drift_status":  drift_status,
+            "method":        method,
+            "detail":        detail,
+        })
+
+    # Sort: critical first, then warning, then ok/unknown
+    _order = {"critical": 0, "warning": 1, "ok": 2, "unknown": 3}
+    devices.sort(key=lambda d: _order.get(d["drift_status"], 3))
+
+    return {"success": True, "data": devices, "server_time": server_now.isoformat()}

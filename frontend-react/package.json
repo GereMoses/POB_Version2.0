@@ -1,0 +1,94 @@
+{
+  "name": "biotime-pob-frontend",
+  "version": "2.0.0",
+  "description": "BioTime 9.5 Compatible POB System Frontend",
+  "private": true,
+  "dependencies": {
+    "@ant-design/charts": "^2.0.2",
+    "@ant-design/icons": "^5.2.6",
+    "@ant-design/plots": "^2.0.2",
+    "@tanstack/react-query": "^5.100.9",
+    "@tanstack/react-query-devtools": "^5.100.9",
+    "@testing-library/jest-dom": "^5.16.4",
+    "@testing-library/react": "^13.4.0",
+    "@testing-library/user-event": "^13.5.0",
+    "ag-grid-community": "^31.0.0",
+    "ag-grid-react": "^31.0.0",
+    "antd": "^5.12.8",
+    "axios": "^1.6.2",
+    "core-js-pure": "^3.35.0",
+    "dayjs": "^1.11.10",
+    "html2canvas": "^1.4.1",
+    "is-number": "^7.0.0",
+    "jspdf": "^4.2.1",
+    "leaflet": "^1.9.4",
+    "lucide-react": "^0.263.1",
+    "qrcode.react": "^4.2.0",
+    "react": "^18.2.0",
+    "react-dnd": "^16.0.1",
+    "react-dnd-html5-backend": "^16.0.1",
+    "react-dom": "^18.2.0",
+    "react-leaflet": "^4.2.1",
+    "react-router-dom": "^6.6.1",
+    "react-scripts": "5.0.1",
+    "recharts": "^2.8.0",
+    "web-vitals": "^2.1.4",
+    "zustand": "^4.4.7"
+  },
+  "scripts": {
+    "start": "react-scripts start --fast-refresh",
+    "build": "craco build",
+    "build:analyze": "ANALYZE=true craco build",
+    "test": "react-scripts test",
+    "eject": "react-scripts eject",
+    "build:prod": "NODE_ENV=production craco build"
+  },
+  "eslintConfig": {
+    "extends": [
+      "react-app",
+      "react-app/jest"
+    ],
+    "rules": {
+      "react-hooks/exhaustive-deps": "warn",
+      "no-unused-vars": [
+        "warn",
+        {
+          "vars": "all",
+          "args": "after-used",
+          "ignoreRestSiblings": true
+        }
+      ]
+    },
+    "globals": {
+      "React": true,
+      "ReactDOM": true,
+      "QueryClient": true
+    }
+  },
+  "browserslist": {
+    "production": [
+      ">0.2%",
+      "not dead",
+      "not op_mini all"
+    ],
+    "development": [
+      "last 1 chrome version",
+      "last 1 firefox version",
+      "last 1 safari version"
+    ]
+  },
+  "devDependencies": {
+    "@craco/craco": "^7.0.0",
+    "@types/react": "^18.2.37",
+    "@types/react-dom": "^18.2.15",
+    "compression-webpack-plugin": "^10.0.0",
+    "customize-cra": "^1.0.0",
+    "image-webpack-loader": "^8.1.0",
+    "react-app-rewired": "^2.2.1",
+    "terser-webpack-plugin": "^5.3.9",
+    "webpack-bundle-analyzer": "^4.9.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

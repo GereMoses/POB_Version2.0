@@ -1,0 +1,26 @@
+.self-service-dashboard {
+  padding: 24px;
+  background: #f0f2f5;
+  min-height: 100vh;
+}
+
+.self-service-dashboard h1 {
+  margin-bottom: 24px;
+  color: #1890ff;
+}
+
+.self-service-dashboard .ant-card {
+  border-radius: 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.self-service-dashboard .ant-statistic-title {
+  color: #8c8c8c;
+  font-size: 14px;
+}
+
+.self-service-dashboard .ant-statistic-content {
+  color: #262626;
+  font-size: 24px;
+  font-weight: 600;
+}

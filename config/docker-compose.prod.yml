@@ -1,0 +1,187 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database - Production Optimized
+  postgres:
+    image: postgres:15-alpine
+    container_name: pob_postgres_prod
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-pob_system}
+      POSTGRES_USER: ${POSTGRES_USER:-pob_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      # PostgreSQL performance tuning for production
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --lc-collate=C --lc-ctype=C"
+      POSTGRES_MAX_CONNECTIONS: "200"
+      POSTGRES_SHARED_BUFFERS: "512MB"
+      POSTGRES_EFFECTIVE_CACHE_SIZE: "2GB"
+      POSTGRES_MAINTENANCE_WORK_MEM: "128MB"
+      POSTGRES_CHECKPOINT_COMPLETION_TARGET: "0.9"
+      POSTGRES_WAL_BUFFERS: "32MB"
+      POSTGRES_DEFAULT_STATISTICS_TARGET: "100"
+      POSTGRES_RANDOM_PAGE_COST: "1.1"
+      POSTGRES_EFFECTIVE_IO_CONCURRENCY: "200"
+    volumes:
+      - postgres_data_prod:/var/lib/postgresql/data
+      - ./database/postgresql.prod.conf:/etc/postgresql/postgresql.conf:ro
+      - ./backups:/backups
+    command: >
+      postgres
+      -c max_connections=200
+      -c shared_buffers=512MB
+      -c effective_cache_size=2GB
+      -c maintenance_work_mem=128MB
+      -c checkpoint_completion_target=0.9
+      -c wal_buffers=32MB
+      -c default_statistics_target=100
+      -c random_page_cost=1.1
+      -c effective_io_concurrency=200
+      -c fsync=on
+      -c synchronous_commit=off
+      -c wal_sync_method=fsync
+      -c full_page_writes=on
+      -c wal_compression=on
+      -c log_min_duration_statement=1000
+      -c log_checkpoints=on
+      -c log_connections=on
+      -c log_disconnections=on
+      -c log_lock_waits=on
+      -c log_temp_files=on
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-pob_user} -d ${POSTGRES_DB:-pob_system} -q"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - pob_network
+
+  # Redis Cache - Production Optimized
+  redis:
+    image: redis:7-alpine
+    container_name: pob_redis_prod
+    command: >
+      redis-server
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --save 900 1
+      --save 300 10
+      --save 60 10000
+      --appendonly yes
+      --protected-mode no
+    volumes:
+      - redis_data_prod:/data
+      - ./redis/redis.prod.conf:/usr/local/etc/redis/redis.conf:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - pob_network
+
+  # Backend API - Production
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.prod
+    container_name: pob_backend_prod
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+      - ./logs:/app/logs
+      - ./uploads:/app/uploads
+      - ./backups:/app/backups
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-pob_user}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-pob_system}
+      - REDIS_URL=redis://redis:6379/0
+      - DEBUG=false
+      - ENVIRONMENT=production
+      - LOG_LEVEL=INFO
+      - SECRET_KEY=${SECRET_KEY}
+      # SSL Configuration
+      - SSL_CERT_PATH=/app/ssl/cert.pem
+      - SSL_KEY_PATH=/app/ssl/key.pem
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - pob_network
+
+  # Frontend - Production
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.prod
+    container_name: pob_frontend_prod
+    ports:
+      - "443:443"
+      - "80:80"
+    volumes:
+      - ./frontend/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+      - ./logs/nginx:/var/log/nginx
+    environment:
+      - VITE_API_BASE_URL=https://${DOMAIN:-localhost}/api
+      - VITE_SSL_CERT_PATH=/etc/ssl/cert.pem
+      - VITE_SSL_KEY_PATH=/etc/ssl/key.pem
+    depends_on:
+      - backend
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - pob_network
+
+  # Nginx Reverse Proxy - Production
+  nginx:
+    image: nginx:alpine
+    container_name: pob_nginx_prod
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.prod.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+      - ./logs/nginx:/var/log/nginx
+      - ./frontend/dist:/usr/share/nginx/html
+    depends_on:
+      - frontend
+      - backend
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - pob_network
+
+volumes:
+  postgres_data_prod:
+    driver: local
+  redis_data_prod:
+    driver: local
+
+networks:
+  pob_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

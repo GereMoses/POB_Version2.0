@@ -1,0 +1,72 @@
+# ── Node / Frontend ──────────────────────────────────────────────────────────
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm
+.yarn-integrity
+frontend-react/build/
+frontend-react/dist/
+
+# ── Python / Backend ─────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.so
+*.dylib
+
+# ── Logs ─────────────────────────────────────────────────────────────────────
+*.log
+logs/
+backend/app.log
+
+# ── Environment & Secrets ────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+backend/.env
+
+# ── OS ───────────────────────────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+
+# ── IDEs ─────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*.iml
+
+# ── Testing & Coverage ───────────────────────────────────────────────────────
+coverage/
+.nyc_output/
+.pytest_cache/
+.tox/
+htmlcov/
+*.cover
+.hypothesis/
+
+# ── Docker ───────────────────────────────────────────────────────────────────
+.docker/
+
+# ── Uploads / Media (runtime generated) ─────────────────────────────────────
+backend/uploads/
+backend/media/
+
+# ── Misc ─────────────────────────────────────────────────────────────────────
+*.tmp
+*.temp
+*.bak
+*.orig

@@ -1,0 +1,210 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database - Optimized for ZKTeco ADMS concurrent connections
+  postgres:
+    image: postgres:15-alpine
+    container_name: pob_postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-pob_system}
+      POSTGRES_USER: ${POSTGRES_USER:-pob_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pob_password}
+      # PostgreSQL performance tuning for ZKTeco ADMS
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --lc-collate=C --lc-ctype=C"
+      # Connection limits for high-concurrency ZKTeco devices
+      POSTGRES_MAX_CONNECTIONS: "200"
+      POSTGRES_SHARED_BUFFERS: "256MB"
+      POSTGRES_EFFECTIVE_CACHE_SIZE: "1GB"
+      POSTGRES_MAINTENANCE_WORK_MEM: "64MB"
+      POSTGRES_CHECKPOINT_COMPLETION_TARGET: "0.9"
+      POSTGRES_WAL_BUFFERS: "16MB"
+      POSTGRES_DEFAULT_STATISTICS_TARGET: "100"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # PostgreSQL configuration for ZKTeco ADMS
+      - ./database/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+    command: >
+      postgres
+      -c max_connections=200
+      -c shared_buffers=256MB
+      -c effective_cache_size=1GB
+      -c maintenance_work_mem=64MB
+      -c checkpoint_completion_target=0.9
+      -c wal_buffers=16MB
+      -c default_statistics_target=100
+      -c random_page_cost=1.1
+      -c effective_io_concurrency=200
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pob_user -d pob_system -q"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: pob_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Backend API
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: pob_backend
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount source code for hot reload (dev only — production uses baked image)
+      - ./backend:/app
+      - /app/__pycache__  # Exclude pycache
+      - /app/.pytest_cache  # Exclude pytest cache
+      # Persistent upload/media dirs so file uploads survive container restarts in dev
+      - uploads_dev:/app/uploads
+      - media_dev:/app/media
+      - logs_dev:/app/logs
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-pob_user}:${POSTGRES_PASSWORD:-pob_password}@postgres:5432/${POSTGRES_DB:-pob_system}
+      - REDIS_URL=redis://redis:6379/0
+      - REDIS_HOST=redis
+      - SECRET_KEY=${SECRET_KEY:-pob-system-production-secret-key-2024-secure-jwt-auth}
+      - BACKEND_CORS_ORIGINS=${BACKEND_CORS_ORIGINS:-http://localhost:3000,http://localhost:3001}
+      - DEBUG=False
+      - LOG_LEVEL=INFO
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--timeout-graceful-shutdown", "3"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "-s", "--max-time", "5", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+
+  # Celery Worker — handles report export, visitor notifications, MTD tasks
+  celery-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.celery
+    container_name: pob_celery_worker
+    volumes:
+      # Hot reload: source changes apply immediately (worker auto-restarts via watchdog)
+      - ./backend:/app
+      - /app/__pycache__
+      - uploads_dev:/app/uploads
+      - media_dev:/app/media
+      - logs_dev:/app/logs
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-pob_user}:${POSTGRES_PASSWORD:-pob_password}@postgres:5432/${POSTGRES_DB:-pob_system}
+      - REDIS_URL=redis://redis:6379/0
+      - REDIS_HOST=redis
+      - SECRET_KEY=${SECRET_KEY:-pob-system-production-secret-key-2024-secure-jwt-auth}
+      - BACKEND_CORS_ORIGINS=${BACKEND_CORS_ORIGINS:-http://localhost:3000,http://localhost:3001}
+      - DEBUG=False
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A celery_app inspect ping -d celery@$$HOSTNAME || exit 1"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+
+  # React Frontend (Production) - Nginx served with production backend
+  frontend:
+    build:
+      context: ./frontend-react
+      dockerfile: Dockerfile
+    container_name: pob_frontend
+    ports:
+      - "3000:80"
+    volumes:
+      # Mount built files for updates
+      - ./frontend-react/build:/usr/share/nginx/html:ro
+    environment:
+      - REACT_APP_API_BASE_URL=http://pob_backend:8000/api/v1
+    depends_on:
+      - backend
+      - redis
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # React Frontend (Development - Hot Reload)
+  frontend-dev:
+    build:
+      context: ./frontend-react
+      dockerfile: Dockerfile.dev
+    container_name: pob_frontend_dev
+    ports:
+      - "3001:3000"
+    volumes:
+      # Mount source code for hot reload
+      - ./frontend-react:/app
+      - /app/node_modules  # Exclude node_modules to avoid conflicts
+      - /app/dist  # Exclude build output
+    environment:
+      - BACKEND_URL=http://pob_backend:8000
+      - NODE_ENV=development
+      - CHOKIDAR_USEPOLLING=true
+      - WDS_SOCKET_PORT=3001
+      - WDS_SOCKET_HOST=localhost
+      - DANGEROUSLY_DISABLE_HOST_CHECK=true
+    depends_on:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:3000/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+    # Enable stdin for interactive debugging
+    stdin_open: true
+    # Keep container running
+    tty: true
+    profiles:
+      - development
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  uploads_dev:
+    driver: local
+  media_dev:
+    driver: local
+  logs_dev:
+    driver: local
+
+networks:
+  default:
+    name: pob_network

@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mustering System Test</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+            padding-bottom: 20px;
+            border-bottom: 1px solid #e8e8e8;
+        }
+        .test-section {
+            margin-bottom: 30px;
+            padding: 20px;
+            border: 1px solid #d9d9d9;
+            border-radius: 6px;
+            background-color: #fafafa;
+        }
+        .button {
+            background: #1890ff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 5px;
+            font-size: 14px;
+        }
+        .button:hover {
+            background: #40a9ff;
+        }
+        .button.danger {
+            background: #ff4d4f;
+        }
+        .button.danger:hover {
+            background: #ff7875;
+        }
+        .result {
+            margin-top: 15px;
+            padding: 15px;
+            border-radius: 4px;
+            font-family: monospace;
+            white-space: pre-wrap;
+        }
+        .success {
+            background-color: #f6ffed;
+            border: 1px solid #b7eb8f;
+            color: #52c41a;
+        }
+        .error {
+            background-color: #fff2f0;
+            border: 1px solid #ffccc7;
+            color: #ff4d4f;
+        }
+        .info {
+            background-color: #e6f7ff;
+            border: 1px solid #91d5ff;
+            color: #1890ff;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        .stat-card {
+            background: white;
+            padding: 20px;
+            border-radius: 6px;
+            border: 1px solid #e8e8e8;
+            text-align: center;
+        }
+        .stat-number {
+            font-size: 32px;
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+        .stat-label {
+            color: #666;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🚨 Mustering System Test</h1>
+            <p>Complete mustering functionality test for POB v2.0</p>
+        </div>
+
+        <div class="test-section">
+            <h3>1. Test Zone Management</h3>
+            <button class="button" onclick="testZones()">Test Zones API</button>
+            <div id="zone-result" class="result" style="display:none;"></div>
+        </div>
+
+        <div class="test-section">
+            <h3>2. Test Event Management</h3>
+            <div class="grid">
+                <div>
+                    <h4>Start Event</h4>
+                    <button class="button" onclick="startEvent()">Start Drill Event</button>
+                </div>
+                <div>
+                    <h4>End Event</h4>
+                    <button class="button danger" onclick="endEvent()">End Active Event</button>
+                </div>
+            </div>
+            <div id="event-result" class="result" style="display:none;"></div>
+        </div>
+
+        <div class="test-section">
+            <h3>3. Real-time Headcount</h3>
+            <div class="stats" id="headcount-stats" style="display:none;">
+                <div class="stat-card">
+                    <div class="stat-number" id="total-expected">0</div>
+                    <div class="stat-label">Total Expected</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-number" id="total-safe" style="color: #52c41a;">0</div>
+                    <div class="stat-label">Safe</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-number" id="total-missing" style="color: #ff4d4f;">0</div>
+                    <div class="stat-label">Missing</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-number" id="completion-percent">0%</div>
+                    <div class="stat-label">Completion</div>
+                </div>
+            </div>
+            <button class="button" onclick="getHeadcount()">Get Headcount</button>
+            <button class="button" onclick="getLogs()">Get Event Logs</button>
+            <div id="headcount-result" class="result" style="display:none;"></div>
+        </div>
+
+        <div class="test-section">
+            <h3>4. Test Manual Status Updates</h3>
+            <div class="grid">
+                <div>
+                    <input type="text" id="emp-code" placeholder="Employee Code" style="padding: 8px; margin-right: 10px;">
+                    <button class="button" onclick="markSafe()">Mark Safe</button>
+                </div>
+                <div>
+                    <button class="button" onclick="markInjured()">Mark Injured</button>
+                </div>
+            </div>
+            <div id="mark-result" class="result" style="display:none;"></div>
+        </div>
+
+        <div class="test-section">
+            <h3>5. WebSocket Connection Test</h3>
+            <button class="button" onclick="testWebSocket()">Test WebSocket</button>
+            <div id="ws-status" class="result" style="display:none;"></div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = 'http://localhost:8000';
+        let activeEventId = null;
+        let websocket = null;
+
+        // Get auth token (you'll need to set this)
+        const getToken = () => {
+            return localStorage.getItem('token') || 'your-test-token-here';
+        };
+
+        const showResult = (elementId, message, type = 'info') => {
+            const element = document.getElementById(elementId);
+            element.style.display = 'block';
+            element.className = `result ${type}`;
+            element.textContent = message;
+        };
+
+        // Test Zones API
+        async function testZones() {
+            try {
+                showResult('zone-result', 'Testing zones API...', 'info');
+                
+                const response = await fetch(`${API_BASE}/api/mustering/zones/`, {
+                    headers: {
+                        'Authorization': `Bearer ${getToken()}`
+                    }
+                });
+                
+                const data = await response.json();
+                if (data.success) {
+                    showResult('zone-result', `✅ Zones API working!\nFound ${data.data.length} zones:\n${JSON.stringify(data.data, null, 2)}`, 'success');
+                } else {
+                    showResult('zone-result', `❌ Zones API failed: ${JSON.stringify(data)}`, 'error');
+                }
+            } catch (error) {
+                showResult('zone-result', `❌ Error testing zones: ${error.message}`, 'error');
+            }
+        }
+
+        // Start Event
+        async function startEvent() {
+            try {
+                showResult('event-result', 'Starting mustering event...', 'info');
+                
+                const eventData = {
+                    zone_id: 1, // Assuming zone 1 exists
+                    event_type: 1, // Drill
+                    notify_sms: false,
+                    notify_email: false,
+                    notify_whatsapp: false,
+                    notify_siren: false,
+                    notes: 'Test drill event from web interface'
+                };
+                
+                const response = await fetch(`${API_BASE}/api/mustering/events/start/`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${getToken()}`
+                    },
+                    body: JSON.stringify(eventData)
+                });
+                
+                const data = await response.json();
+                if (data.success) {
+                    activeEventId = data.data.event_id;
+                    showResult('event-result', `✅ Event started successfully!\nEvent ID: ${activeEventId}\n${JSON.stringify(data.data, null, 2)}`, 'success');
+                } else {
+                    showResult('event-result', `❌ Failed to start event: ${JSON.stringify(data)}`, 'error');
+                }
+            } catch (error) {
+                showResult('event-result', `❌ Error starting event: ${error.message}`, 'error');
+            }
+        }
+
+        // End Event
+        async function endEvent() {
+            if (!activeEventId) {
+                showResult('event-result', '❌ No active event to end', 'error');
+                return;
+            }
+            
+            try {
+                showResult('event-result', 'Ending mustering event...', 'info');
+                
+                const endData = {
+                    reason: 'Test completed from web interface'
+                };
+                
+                const response = await fetch(`${API_BASE}/api/mustering/events/${activeEventId}/end/`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${getToken()}`
+                    },
+                    body: JSON.stringify(endData)
+                });
+                
+                const data = await response.json();
+                if (data.success) {
+                    showResult('event-result', `✅ Event ended successfully!\n${JSON.stringify(data.data, null, 2)}`, 'success');
+                    activeEventId = null;
+                    document.getElementById('headcount-stats').style.display = 'none';
+                } else {
+                    showResult('event-result', `❌ Failed to end event: ${JSON.stringify(data)}`, 'error');
+                }
+            } catch (error) {
+                showResult('event-result', `❌ Error ending event: ${error.message}`, 'error');
+            }
+        }
+
+        // Get Headcount
+        async function getHeadcount() {
+            if (!activeEventId) {
+                showResult('headcount-result', '❌ No active event', 'error');
+                return;
+            }
+            
+            try {
+                const response = await fetch(`${API_BASE}/api/mustering/events/${activeEventId}/headcount/`, {
+                    headers: {
+                        'Authorization': `Bearer ${getToken()}`
+                    }
+                });
+                
+                const data = await response.json();
+                if (data.success) {
+                    const headcount = data.data;
+                    document.getElementById('headcount-stats').style.display = 'grid';
+                    document.getElementById('total-expected').textContent = headcount.total_expected;
+                    document.getElementById('total-safe').textContent = headcount.total_safe;
+                    document.getElementById('total-missing').textContent = headcount.total_missing;
+                    document.getElementById('completion-percent').textContent = `${headcount.completion_percentage}%`;
+                    
+                    showResult('headcount-result', `✅ Headcount retrieved successfully!\n${JSON.stringify(headcount, null, 2)}`, 'success');
+                } else {
+                    showResult('headcount-result', `❌ Failed to get headcount: ${JSON.stringify(data)}`, 'error');
+                }
+            } catch (error) {
+                showResult('headcount-result', `❌ Error getting headcount: ${error.message}`, 'error');
+            }
+        }
+
+        // Get Event Logs
+        async function getLogs() {
+            if (!activeEventId) {
+                showResult('headcount-result', '❌ No active event', 'error');
+                return;
+            }
+            
+            try {
+                const response = await fetch(`${API_BASE}/api/mustering/events/${activeEventId}/logs/`, {
+                    headers: {
+                        'Authorization': `Bearer ${getToken()}`
+                    }
+                });
+                
+                const data = await response.json();
+                if (data.success) {
+                    const logs = data.data.logs;
+                    showResult('headcount-result', `✅ Event logs retrieved!\nFound ${logs.length} logs:\n${JSON.stringify(logs, null, 2)}`, 'success');
+                } else {
+                    showResult('headcount-result', `❌ Failed to get logs: ${JSON.stringify(data)}`, 'error');
+                }
+            } catch (error) {
+                showResult('headcount-result', `❌ Error getting logs: ${error.message}`, 'error');
+            }
+        }
+
+        // Mark Person Safe
+        async function markSafe() {
+            await markPersonStatus(1); // Safe
+        }
+
+        // Mark Person Injured
+        async function markInjured() {
+            await markPersonStatus(2); // Injured
+        }
+
+        // Mark Person Status
+        async function markPersonStatus(status) {
+            if (!activeEventId) {
+                showResult('mark-result', '❌ No active event', 'error');
+                return;
+            }
+            
+            const empCode = document.getElementById('emp-code').value;
+            if (!empCode) {
+                showResult('mark-result', '❌ Please enter employee code', 'error');
+                return;
+            }
+            
+            try {
+                const markData = {
+                    emp_code: empCode,
+                    status: status
+                };
+                
+                const response = await fetch(`${API_BASE}/api/mustering/events/${activeEventId}/mark/`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${getToken()}`
+                    },
+                    body: JSON.stringify(markData)
+                });
+                
+                const data = await response.json();
+                if (data.success) {
+                    const statusText = status === 1 ? 'Safe' : 'Injured';
+                    showResult('mark-result', `✅ Person marked as ${statusText}!\n${JSON.stringify(data.data, null, 2)}`, 'success');
+                    document.getElementById('emp-code').value = '';
+                } else {
+                    showResult('mark-result', `❌ Failed to mark person: ${JSON.stringify(data)}`, 'error');
+                }
+            } catch (error) {
+                showResult('mark-result', `❌ Error marking person: ${error.message}`, 'error');
+            }
+        }
+
+        // Test WebSocket
+        function testWebSocket() {
+            if (!activeEventId) {
+                showResult('ws-status', '❌ No active event for WebSocket connection', 'error');
+                return;
+            }
+            
+            try {
+                showResult('ws-status', 'Connecting to WebSocket...', 'info');
+                
+                websocket = new WebSocket(`ws://localhost:8000/ws/mustering/events/${activeEventId}`);
+                
+                websocket.onopen = () => {
+                    showResult('ws-status', '✅ WebSocket connected successfully!', 'success');
+                };
+                
+                websocket.onmessage = (event) => {
+                    const data = JSON.parse(event.data);
+                    showResult('ws-status', `📨 WebSocket message received:\n${JSON.stringify(data, null, 2)}`, 'info');
+                    
+                    // Auto-update headcount if it's a headcount update
+                    if (data.type === 'headcount_update') {
+                        const headcount = data.data;
+                        document.getElementById('total-expected').textContent = headcount.total_expected;
+                        document.getElementById('total-safe').textContent = headcount.total_safe;
+                        document.getElementById('total-missing').textContent = headcount.total_missing;
+                        document.getElementById('completion-percent').textContent = `${headcount.completion_percentage}%`;
+                    }
+                };
+                
+                websocket.onerror = (error) => {
+                    showResult('ws-status', `❌ WebSocket error: ${error}`, 'error');
+                };
+                
+                websocket.onclose = () => {
+                    showResult('ws-status', '🔌 WebSocket connection closed', 'info');
+                };
+                
+            } catch (error) {
+                showResult('ws-status', `❌ WebSocket connection error: ${error.message}`, 'error');
+            }
+        }
+
+        // Auto-refresh headcount every 10 seconds if event is active
+        setInterval(() => {
+            if (activeEventId) {
+                getHeadcount();
+            }
+        }, 10000);
+
+        // Instructions
+        console.log(`
+🚨 Mustering System Test Instructions:
+
+1. Make sure backend is running on http://localhost:8000
+2. Set auth token in localStorage: localStorage.setItem('token', 'your-real-token')
+3. Test zones first to ensure connectivity
+4. Start an event, then test headcount and logs
+5. Use WebSocket for real-time updates
+6. Test manual status updates
+
+Expected Behavior:
+- Zones API should return list of mustering zones
+- Event start should create active event with expected personnel
+- Headcount should show real-time statistics
+- Logs should show personnel muster status
+- WebSocket should provide live updates
+- Manual marking should update person status
+        `);
+    </script>
+</body>
+</html>

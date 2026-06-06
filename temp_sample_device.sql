@@ -1,0 +1,2 @@
+INSERT INTO biometric_devices (device_serial, device_name, device_type, manufacturer, model, firmware_version, ip_address, port, communication_key, supported_templates, max_templates_per_user, enrollment_quality_threshold, configuration) VALUES 
+('ZKTECO_FP001', 'ZKTeco Fingerprint Scanner', 'FINGERPRINT', 'ZKTeco', 'MB560', '1.8.0', '192.168.1.100', 4370, '0', '["FINGERPRINT", "FACE"]', 10, 70.0, '{"auto_capture": true, "timeout_seconds": 30}');

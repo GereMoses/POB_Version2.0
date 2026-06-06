@@ -1,0 +1,31 @@
+# Hot-reload enabled frontend with production base configuration
+FROM node:18-alpine
+
+WORKDIR /app
+
+# Copy package files first for better caching
+COPY package.json package-lock.json* ./
+
+# Set npm registry for faster downloads
+RUN npm config set registry https://registry.npmjs.org/
+
+# Clean npm cache and install dependencies
+RUN npm cache clean --force && \
+    npm install --verbose --no-audit --no-fund
+
+# Copy source code
+COPY . .
+
+# Set environment variables for development with production backend
+ENV NODE_ENV=development
+ENV REACT_APP_API_BASE_URL=http://localhost:8000/api/v1
+ENV CHOKIDAR_USEPOLLING=true
+ENV FAST_REFRESH=true
+ENV PORT=3000
+ENV BROWSER=none
+
+# Expose port 3000
+EXPOSE 3000
+
+# Start React development server with hot reload
+CMD ["sh", "-c", "npm start"]

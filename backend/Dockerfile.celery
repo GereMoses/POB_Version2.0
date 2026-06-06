@@ -1,0 +1,20 @@
+FROM python:3.10-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y \
+    gcc \
+    postgresql-client \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+RUN mkdir -p logs uploads/personnel_photos uploads/meeting_qr media/mtd \
+    media/custom-attributes media/onboardings media/resignations
+
+# Celery worker — concurrency 4, prefetch 1 for long-running tasks
+CMD ["celery", "-A", "celery_worker.app", "worker", "--loglevel=info", "--concurrency=4", "--prefetch-multiplier=1"]

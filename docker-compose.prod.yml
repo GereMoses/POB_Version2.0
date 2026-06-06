@@ -1,0 +1,264 @@
+version: '3.8'
+
+# ─── Production Docker Compose ────────────────────────────────────────────────
+# Usage:
+#   docker compose -f docker-compose.prod.yml up -d
+#
+# Before first deploy:
+#   1. Copy .env.prod.example → .env.prod and fill in real secrets
+#   2. Build the React frontend: cd frontend-react && npm run build
+#   3. Run: docker compose -f docker-compose.prod.yml up -d
+#
+# ZKTeco ADMS devices must be configured to push to:
+#   http://<SERVER_IP>/iclock/cdata   (port 80, proxied by nginx → backend:8000)
+# ──────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── PostgreSQL ──────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:15-alpine
+    container_name: pob_postgres
+    env_file: .env.prod
+    environment:
+      POSTGRES_DB: ${DATABASE_NAME}
+      POSTGRES_USER: ${DATABASE_USER}
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+    command: >
+      postgres
+      -c max_connections=200
+      -c shared_buffers=256MB
+      -c effective_cache_size=1GB
+      -c maintenance_work_mem=64MB
+      -c checkpoint_completion_target=0.9
+      -c wal_buffers=16MB
+      -c default_statistics_target=100
+      -c random_page_cost=1.1
+      -c effective_io_concurrency=200
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DATABASE_USER} -d ${DATABASE_NAME} -q"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - pob_internal
+    restart: unless-stopped
+    # Ports NOT exposed in production — only accessible within Docker network
+
+  # ── Redis ───────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: pob_redis
+    command: redis-server /etc/redis/redis.conf
+    volumes:
+      - redis_data:/data
+      - ./docker/redis.conf:/etc/redis/redis.conf:ro
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - pob_internal
+    restart: unless-stopped
+    # Port NOT exposed in production — only accessible within Docker network
+
+  # ── DB Init (runs once, exits) ──────────────────────────────────────────────
+  db-init:
+    image: postgres:15-alpine
+    container_name: pob_db_init
+    env_file: .env.prod
+    environment:
+      DATABASE_HOST: postgres
+      DATABASE_PORT: 5432
+      DATABASE_NAME: ${DATABASE_NAME}
+      DATABASE_USER: ${DATABASE_USER}
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD}
+    volumes:
+      - ./docker/db-init.sh:/db-init.sh:ro
+      - ./database/init/complete_database_setup.sql:/migrations/complete_database_setup.sql:ro
+      - ./database/init/fix_zones_final.sql:/migrations/fix_zones_final.sql:ro
+    entrypoint: ["/bin/bash", "/db-init.sh"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - pob_internal
+    restart: "no"
+
+  # ── Backend API ─────────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: pob_backend:latest
+    container_name: pob_backend
+    env_file: .env.prod
+    environment:
+      - DATABASE_URL=postgresql://${DATABASE_USER}:${DATABASE_PASSWORD}@postgres:5432/${DATABASE_NAME}
+      - REDIS_URL=redis://redis:6379/0
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    volumes:
+      # Persistent storage for user uploads and generated media — never goes away on redeploy
+      - uploads_data:/app/uploads
+      - media_data:/app/media
+      - logs_data:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      db-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - pob_internal
+    restart: unless-stopped
+
+  # ── Celery Worker ───────────────────────────────────────────────────────────
+  # Handles: report export, mustering drill notifications, visitor alerts, MTD tasks
+  celery-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.celery
+    image: pob_celery:latest
+    container_name: pob_celery_worker
+    env_file: .env.prod
+    environment:
+      - DATABASE_URL=postgresql://${DATABASE_USER}:${DATABASE_PASSWORD}@postgres:5432/${DATABASE_NAME}
+      - REDIS_URL=redis://redis:6379/0
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    volumes:
+      - uploads_data:/app/uploads
+      - media_data:/app/media
+      - logs_data:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      db-init:
+        condition: service_completed_successfully
+    networks:
+      - pob_internal
+    restart: unless-stopped
+
+  # ── Celery Beat (scheduler) ─────────────────────────────────────────────────
+  # Fires periodic tasks: mustering schedule checks, MTD housekeeping, etc.
+  celery-beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.celery
+    image: pob_celery:latest
+    container_name: pob_celery_beat
+    env_file: .env.prod
+    environment:
+      - DATABASE_URL=postgresql://${DATABASE_USER}:${DATABASE_PASSWORD}@postgres:5432/${DATABASE_NAME}
+      - REDIS_URL=redis://redis:6379/0
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    command: ["celery", "-A", "celery_worker.app", "beat", "--loglevel=info", "--schedule=/app/celerybeat-schedule"]
+    volumes:
+      - celerybeat_data:/app
+      - logs_data:/app/logs
+    depends_on:
+      - redis
+      - celery-worker
+    networks:
+      - pob_internal
+    restart: unless-stopped
+
+  # ── Frontend (nginx + built React) ─────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend-react
+      dockerfile: Dockerfile
+    image: pob_frontend:latest
+    container_name: pob_frontend
+    volumes:
+      # Serve uploaded files (personnel photos, floor plans) through nginx
+      - uploads_data:/usr/share/nginx/uploads:ro
+      - media_data:/usr/share/nginx/media:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - pob_internal
+      - pob_external
+    restart: unless-stopped
+
+  # ── Nginx Reverse Proxy (SSL termination, port 80/443) ─────────────────────
+  # Sits in front of everything. Terminates TLS and routes:
+  #   /          → frontend:80
+  #   /api/      → backend:8000
+  #   /iclock/   → backend:8000  (ZKTeco ADMS device push endpoint)
+  #   /uploads/  → serves from uploads volume directly
+  #   /media/    → serves from media volume directly
+  nginx:
+    image: nginx:alpine
+    container_name: pob_nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      # nginx/nginx.conf is a directory (legacy); rely on built-in nginx.conf which includes conf.d/
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      # SSL certificates — populate with Let's Encrypt or your org cert
+      - ./nginx/certs:/etc/nginx/certs:ro
+      # Serve uploads/media directly without hitting the backend
+      - uploads_data:/var/www/uploads:ro
+      - media_data:/var/www/media:ro
+      - nginx_logs:/var/log/nginx
+    depends_on:
+      - frontend
+      - backend
+    networks:
+      - pob_internal
+      - pob_external
+    restart: unless-stopped
+
+# ── Named Volumes ─────────────────────────────────────────────────────────────
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  uploads_data:
+    driver: local
+  media_data:
+    driver: local
+  logs_data:
+    driver: local
+  celerybeat_data:
+    driver: local
+  nginx_logs:
+    driver: local
+
+# ── Networks ───────────────────────────────────────────────────────────────────
+networks:
+  # Internal network — services talk to each other here; not reachable from outside
+  pob_internal:
+    name: pob_internal
+    driver: bridge
+    internal: true
+  # External network — only nginx touches this; exposes ports 80/443
+  pob_external:
+    name: pob_external
+    driver: bridge

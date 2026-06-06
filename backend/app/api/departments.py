@@ -1,0 +1,555 @@
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.orm import Session
+from typing import List, Optional, Any
+from pydantic import BaseModel, Field
+from datetime import datetime
+
+from ..core.database import get_db
+from ..core.dependencies import get_current_user
+from ..models.department import Department, DepartmentPersonnel
+from ..models.personnel import Personnel
+from ..models.user import User
+from ..models.biotime_models import PersonnelDepartment as BioTimeDept, AttShift
+from ..models.zone import Zone
+
+router = APIRouter(prefix="/departments", tags=["Departments"])
+
+
+# ── Schemas ───────────────────────────────────────────────────────────────────
+
+DEPT_TYPES = [
+    "operations", "maintenance", "safety", "security", "administration",
+    "logistics", "technical", "medical", "training", "contractor", "management", "support",
+]
+
+DEPT_STATUSES = ["active", "inactive", "temporary", "under_review"]
+
+
+class DepartmentCreate(BaseModel):
+    name:            str            = Field(..., min_length=1, max_length=100)
+    code:            str            = Field(..., min_length=1, max_length=20)
+    description:     Optional[str]  = None
+    department_type: Optional[str]  = None
+    parent_id:       Optional[int]  = None
+    level:           Optional[int]  = 1
+    sort_order:      Optional[int]  = 0
+    zone_id:         Optional[int]  = None
+    manager_id:      Optional[int]  = None
+    contact_person:  Optional[str]  = Field(None, max_length=100)
+    contact_email:   Optional[str]  = Field(None, max_length=100)
+    contact_phone:   Optional[str]  = Field(None, max_length=20)
+    max_personnel:   Optional[int]  = None
+    budget_allocated: Optional[float] = None
+    safety_critical:             Optional[bool] = False
+    security_clearance_required: Optional[bool] = False
+    required_certifications:     Optional[Any]  = None
+    safety_protocols:            Optional[Any]  = None
+    access_levels:               Optional[Any]  = None
+    zkteco_sync_enabled:         Optional[bool] = True
+
+
+class DepartmentUpdate(BaseModel):
+    name:            Optional[str]  = Field(None, max_length=100)
+    description:     Optional[str]  = None
+    department_type: Optional[str]  = None
+    status:          Optional[str]  = None
+    parent_id:       Optional[int]  = None
+    zone_id:         Optional[int]  = None
+    manager_id:      Optional[int]  = None
+    zone_id:         Optional[int]  = None
+    contact_person:  Optional[str]  = Field(None, max_length=100)
+    contact_email:   Optional[str]  = Field(None, max_length=100)
+    contact_phone:   Optional[str]  = Field(None, max_length=20)
+    max_personnel:   Optional[int]  = None
+    budget_allocated: Optional[float] = None
+    budget_used:      Optional[float] = None
+    safety_critical:             Optional[bool] = None
+    security_clearance_required: Optional[bool] = None
+    required_certifications:     Optional[Any]  = None
+    safety_protocols:            Optional[Any]  = None
+    access_levels:               Optional[Any]  = None
+    zkteco_department_id: Optional[int]  = None
+    zkteco_sync_enabled:  Optional[bool] = None
+    is_active:            Optional[bool] = None
+    default_shift_id:     Optional[int]  = None
+
+
+class PersonnelAssignCreate(BaseModel):
+    personnel_id: int
+    role:         str            = Field(..., max_length=100)
+    position:     Optional[str] = Field(None, max_length=100)
+    is_primary:   Optional[bool] = False
+    is_manager:   Optional[bool] = False
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _zkteco_status(dept: Department) -> str:
+    if not dept.zkteco_sync_enabled:
+        return "disabled"
+    if not dept.zkteco_department_id:
+        return "not_configured"
+    if dept.last_sync_at:
+        return "synced"
+    return "pending"
+
+
+def _to_dict(dept: Department, db: Session) -> dict:
+    personnel_count = (
+        db.query(DepartmentPersonnel)
+        .filter(DepartmentPersonnel.department_id == dept.id, DepartmentPersonnel.status == "active")
+        .count()
+    )
+    sub_dept_count = (
+        db.query(Department)
+        .filter(Department.parent_id == dept.id, Department.is_active == True)
+        .count()
+    )
+    budget_alloc = float(dept.budget_allocated or 0)
+    budget_used  = float(dept.budget_used or 0)
+    utilization  = round(budget_used / budget_alloc * 100, 1) if budget_alloc > 0 else 0.0
+
+    parent_name = None
+    if dept.parent_id:
+        p = db.query(Department).filter(Department.id == dept.parent_id).first()
+        parent_name = p.name if p else None
+
+    manager_name = None
+    if dept.manager_id:
+        m = db.query(Personnel).filter(Personnel.id == dept.manager_id).first()
+        if m:
+            manager_name = (f"{m.first_name or ''} {m.last_name or ''}".strip()) or m.full_name or None
+
+    zone_name = None
+    if dept.zone_id:
+        z = db.query(Zone).filter(Zone.id == dept.zone_id).first()
+        zone_name = z.name if z else None
+
+    default_shift_name = None
+    if dept.default_shift_id:
+        s = db.query(AttShift).filter(AttShift.id == dept.default_shift_id).first()
+        default_shift_name = s.name if s else None
+
+    return {
+        "id":               dept.id,
+        "name":             dept.name,
+        "code":             dept.code,
+        "description":      dept.description,
+        "department_type":  dept.department_type.lower() if dept.department_type else None,
+        "status":           (dept.status or "active").lower(),
+        "is_active":        dept.is_active,
+        "parent_id":        dept.parent_id,
+        "parent_name":      parent_name,
+        "level":            dept.level,
+        "sort_order":       dept.sort_order,
+        "zone_id":          dept.zone_id,
+        "zone_name":        zone_name,
+        "manager_id":       dept.manager_id,
+        "manager_name":     manager_name,
+        "contact_person":   dept.contact_person,
+        "contact_email":    dept.contact_email,
+        "contact_phone":    dept.contact_phone,
+        "max_personnel":    dept.max_personnel,
+        "current_personnel_count": personnel_count,
+        "sub_departments_count":   sub_dept_count,
+        "budget_allocated": budget_alloc,
+        "budget_used":      budget_used,
+        "budget_utilization": utilization,
+        "safety_critical":              dept.safety_critical or False,
+        "security_clearance_required":  dept.security_clearance_required or False,
+        "required_certifications":      dept.required_certifications,
+        "safety_protocols":             dept.safety_protocols,
+        "access_levels":                dept.access_levels,
+        "zkteco_department_id": dept.zkteco_department_id,
+        "zkteco_sync_enabled":  dept.zkteco_sync_enabled,
+        "zkteco_status":        _zkteco_status(dept),
+        "last_sync_at":         dept.last_sync_at.isoformat() if dept.last_sync_at else None,
+        "default_shift_id":     dept.default_shift_id,
+        "default_shift_name":   default_shift_name,
+        "created_at":           dept.created_at.isoformat() if dept.created_at else None,
+        "updated_at":           dept.updated_at.isoformat() if dept.updated_at else None,
+        "created_by":           dept.created_by,
+        "updated_by":           dept.updated_by,
+    }
+
+
+# ── Static routes (all must come before /{department_id}) ────────────────────
+
+@router.get("/meta/summary")
+async def department_summary(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    depts = db.query(Department).filter(Department.is_active == True).all()
+    by_type   = {}
+    by_status = {}
+    zkteco_synced = 0
+    zkteco_pending = 0
+    safety_critical = 0
+    total_budget = 0.0
+    used_budget  = 0.0
+
+    for d in depts:
+        dt = (d.department_type or "other").lower()
+        by_type[dt] = by_type.get(dt, 0) + 1
+        st = (d.status or "active").lower()
+        by_status[st] = by_status.get(st, 0) + 1
+        zs = _zkteco_status(d)
+        if zs == "synced":
+            zkteco_synced += 1
+        elif zs == "pending":
+            zkteco_pending += 1
+        if d.safety_critical:
+            safety_critical += 1
+        total_budget += float(d.budget_allocated or 0)
+        used_budget  += float(d.budget_used or 0)
+
+    total_personnel = (
+        db.query(DepartmentPersonnel)
+        .filter(DepartmentPersonnel.status == "active")
+        .count()
+    )
+
+    return {
+        "total_departments":      len(depts),
+        "active":                 by_status.get("active", 0),
+        "inactive":               by_status.get("inactive", 0),
+        "safety_critical":        safety_critical,
+        "zkteco_synced":          zkteco_synced,
+        "zkteco_pending":         zkteco_pending,
+        "total_personnel_assigned": total_personnel,
+        "total_budget_allocated": total_budget,
+        "total_budget_used":      used_budget,
+        "by_type":                by_type,
+        "by_status":              by_status,
+    }
+
+
+@router.get("/meta/zkteco-compare")
+async def zkteco_compare(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    local_depts   = db.query(Department).filter(Department.is_active == True).all()
+    biotime_depts = db.query(BioTimeDept).all()
+    biotime_by_id = {b.id: b for b in biotime_depts}
+    linked_ids    = set()
+
+    matched    = []
+    local_only = []
+
+    for d in local_depts:
+        bt = biotime_by_id.get(d.zkteco_department_id)
+        if bt:
+            matched.append({
+                "local_id":    d.id,
+                "local_name":  d.name,
+                "local_code":  d.code,
+                "biotime_id":  bt.id,
+                "biotime_name": bt.dept_name,
+                "biotime_code": bt.dept_code,
+                "name_match":  d.name.lower() == bt.dept_name.lower(),
+                "code_match":  d.code.lower() == (bt.dept_code or "").lower(),
+            })
+            linked_ids.add(bt.id)
+        else:
+            local_only.append({
+                "local_id":              d.id,
+                "local_name":            d.name,
+                "local_code":            d.code,
+                "zkteco_department_id":  d.zkteco_department_id,
+            })
+
+    biotime_only = [
+        {"biotime_id": b.id, "biotime_name": b.dept_name, "biotime_code": b.dept_code}
+        for b in biotime_depts if b.id not in linked_ids
+    ]
+
+    return {
+        "matched":        matched,
+        "local_only":     local_only,
+        "biotime_only":   biotime_only,
+        "total_local":    len(local_depts),
+        "total_biotime":  len(biotime_depts),
+        "total_matched":  len(matched),
+    }
+
+
+@router.get("/types", response_model=List[str])
+async def get_department_types():
+    return DEPT_TYPES
+
+
+@router.get("/statuses", response_model=List[str])
+async def get_department_statuses():
+    return DEPT_STATUSES
+
+
+@router.get("/hierarchy/tree")
+async def get_hierarchy(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    depts = db.query(Department).filter(Department.is_active == True).order_by(Department.sort_order, Department.name).all()
+
+    def build_tree(parent_id=None):
+        return [
+            {
+                "id":              d.id,
+                "name":            d.name,
+                "code":            d.code,
+                "department_type": d.department_type.lower() if d.department_type else None,
+                "status":          (d.status or "active").lower(),
+                "level":           d.level,
+                "children":        build_tree(d.id),
+            }
+            for d in depts if d.parent_id == parent_id
+        ]
+
+    return build_tree()
+
+
+# ── CRUD ──────────────────────────────────────────────────────────────────────
+
+@router.get("/")
+async def list_departments(
+    department_type: Optional[str] = None,
+    status:          Optional[str] = None,
+    is_active:       Optional[bool] = True,
+    parent_id:       Optional[int] = None,
+    skip:  int = Query(0, ge=0),
+    limit: int = Query(500, ge=1, le=1000),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    q = db.query(Department)
+    if is_active is not None:
+        q = q.filter(Department.is_active == is_active)
+    if department_type:
+        q = q.filter(Department.department_type == department_type)
+    if status:
+        q = q.filter(Department.status == status)
+    if parent_id is not None:
+        q = q.filter(Department.parent_id == parent_id)
+    depts = q.order_by(Department.sort_order, Department.name).offset(skip).limit(limit).all()
+    return [_to_dict(d, db) for d in depts]
+
+
+@router.get("/{department_id}")
+async def get_department(
+    department_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    dept = db.query(Department).filter(Department.id == department_id).first()
+    if not dept:
+        raise HTTPException(status_code=404, detail="Department not found")
+    return _to_dict(dept, db)
+
+
+@router.post("/", status_code=201)
+async def create_department(
+    data: DepartmentCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    existing = db.query(Department).filter(Department.code == data.code).first()
+    if existing:
+        raise HTTPException(status_code=400, detail=f"Department code '{data.code}' already exists")
+    payload = data.model_dump()
+    payload["created_by"] = current_user.id
+    payload["updated_by"] = current_user.id
+    dept = Department(**payload)
+    db.add(dept)
+    db.commit()
+    db.refresh(dept)
+    return _to_dict(dept, db)
+
+
+@router.put("/{department_id}")
+async def update_department(
+    department_id: int,
+    data: DepartmentUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    dept = db.query(Department).filter(Department.id == department_id).first()
+    if not dept:
+        raise HTTPException(status_code=404, detail="Department not found")
+    for k, v in data.model_dump(exclude_unset=True).items():
+        setattr(dept, k, v)
+    dept.updated_by = current_user.id
+    db.commit()
+    db.refresh(dept)
+    return _to_dict(dept, db)
+
+
+@router.delete("/{department_id}", status_code=204)
+async def delete_department(
+    department_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    dept = db.query(Department).filter(Department.id == department_id).first()
+    if not dept:
+        raise HTTPException(status_code=404, detail="Department not found")
+    children = db.query(Department).filter(Department.parent_id == department_id).count()
+    if children:
+        raise HTTPException(status_code=400, detail=f"Cannot delete department with {children} sub-department(s)")
+    active_personnel = (
+        db.query(DepartmentPersonnel)
+        .filter(DepartmentPersonnel.department_id == department_id, DepartmentPersonnel.status == "active")
+        .count()
+    )
+    if active_personnel:
+        raise HTTPException(status_code=400, detail=f"Cannot delete department with {active_personnel} active personnel assignment(s)")
+    dept.is_active = False
+    dept.status = "inactive"
+    dept.updated_by = current_user.id
+    db.commit()
+
+
+# ── Personnel assignments ──────────────────────────────────────────────────────
+
+@router.get("/{department_id}/personnel")
+async def get_department_personnel(
+    department_id: int,
+    status: Optional[str] = "active",
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    dept = db.query(Department).filter(Department.id == department_id).first()
+    if not dept:
+        raise HTTPException(status_code=404, detail="Department not found")
+
+    q = db.query(DepartmentPersonnel).filter(DepartmentPersonnel.department_id == department_id)
+    if status:
+        q = q.filter(DepartmentPersonnel.status == status)
+    assignments = q.all()
+
+    result = []
+    for a in assignments:
+        p = db.query(Personnel).filter(Personnel.id == a.personnel_id).first()
+        result.append({
+            "id":           a.id,
+            "personnel_id": a.personnel_id,
+            "personnel_name": f"{getattr(p,'first_name','')} {getattr(p,'last_name','')}".strip() if p else "",
+            "emp_code":     getattr(p, "emp_code", None),
+            "personnel_type": getattr(p, "personnel_type", None),
+            "company":      getattr(p, "company", None),
+            "role":         a.role,
+            "position":     a.position,
+            "is_primary":   a.is_primary,
+            "is_manager":   a.is_manager,
+            "status":       a.status,
+            "assigned_at":  a.assigned_at.isoformat() if a.assigned_at else None,
+        })
+    return result
+
+
+@router.post("/{department_id}/assign-personnel", status_code=201)
+async def assign_personnel(
+    department_id: int,
+    data: PersonnelAssignCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    dept = db.query(Department).filter(Department.id == department_id).first()
+    if not dept:
+        raise HTTPException(status_code=404, detail="Department not found")
+    if not db.query(Personnel).filter(Personnel.id == data.personnel_id).first():
+        raise HTTPException(status_code=404, detail="Personnel not found")
+    existing = db.query(DepartmentPersonnel).filter(
+        DepartmentPersonnel.department_id == department_id,
+        DepartmentPersonnel.personnel_id == data.personnel_id,
+        DepartmentPersonnel.status == "active",
+    ).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Personnel already assigned to this department")
+    assignment = DepartmentPersonnel(
+        department_id=department_id,
+        personnel_id=data.personnel_id,
+        role=data.role,
+        position=data.position,
+        is_primary=data.is_primary or False,
+        is_manager=data.is_manager or False,
+        approved_by=current_user.id,
+        approved_at=datetime.utcnow(),
+        status="active",
+    )
+    db.add(assignment)
+    db.commit()
+    db.refresh(assignment)
+    return {"id": assignment.id, "department_id": department_id, "personnel_id": data.personnel_id, "status": "active"}
+
+
+@router.delete("/{department_id}/personnel/{personnel_id}", status_code=204)
+async def remove_personnel(
+    department_id: int,
+    personnel_id:  int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    assignment = db.query(DepartmentPersonnel).filter(
+        DepartmentPersonnel.department_id == department_id,
+        DepartmentPersonnel.personnel_id == personnel_id,
+        DepartmentPersonnel.status == "active",
+    ).first()
+    if not assignment:
+        raise HTTPException(status_code=404, detail="Active assignment not found")
+    assignment.status = "transferred"
+    assignment.unassigned_at = datetime.utcnow()
+    db.commit()
+
+
+# ── ZKTeco sync ───────────────────────────────────────────────────────────────
+
+@router.post("/{department_id}/push-to-biotime")
+async def push_to_biotime(
+    department_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    dept = db.query(Department).filter(Department.id == department_id, Department.is_active == True).first()
+    if not dept:
+        raise HTTPException(status_code=404, detail="Department not found")
+    if dept.zkteco_department_id:
+        existing = db.query(BioTimeDept).filter(BioTimeDept.id == dept.zkteco_department_id).first()
+        if existing:
+            raise HTTPException(status_code=400, detail="Already linked to BioTime department")
+    bt = BioTimeDept(
+        dept_code=dept.code[:20],
+        dept_name=dept.name[:50],
+    )
+    db.add(bt)
+    db.commit()
+    db.refresh(bt)
+    dept.zkteco_department_id = bt.id
+    dept.zkteco_sync_enabled  = True
+    dept.last_sync_at         = datetime.utcnow()
+    dept.updated_by           = current_user.id
+    db.commit()
+    db.refresh(dept)
+    return _to_dict(dept, db)
+
+
+@router.put("/{department_id}/zkteco-sync")
+async def update_zkteco_sync(
+    department_id:       int,
+    zkteco_department_id: Optional[int]  = None,
+    zkteco_sync_enabled:  Optional[bool] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    dept = db.query(Department).filter(Department.id == department_id).first()
+    if not dept:
+        raise HTTPException(status_code=404, detail="Department not found")
+    if zkteco_department_id is not None:
+        dept.zkteco_department_id = zkteco_department_id
+    if zkteco_sync_enabled is not None:
+        dept.zkteco_sync_enabled = zkteco_sync_enabled
+    dept.last_sync_at = datetime.utcnow()
+    dept.updated_by = current_user.id
+    db.commit()
+    db.refresh(dept)
+    return _to_dict(dept, db)
