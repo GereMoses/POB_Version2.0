@@ -18,6 +18,7 @@ import logging
 from app.core.database import get_db
 from app.core.dependencies import get_current_user
 from app.core.websocket import ConnectionManager
+from app.services.emergency_service import EmergencyService
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
@@ -596,6 +597,20 @@ async def delete_door(
 
 @router.post("/doors/{door_id}/open/")
 async def remote_open_door(door_id: int, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    # Require explicit access-control permission — authentication alone is not enough
+    if not getattr(current_user, "is_superuser", False):
+        perm = db.execute(text("""
+            SELECT 1 FROM auth_user_role ur
+            JOIN auth_role r ON r.id = ur.role_id
+            JOIN auth_role_permission rp ON rp.role_id = r.id
+            JOIN auth_permission p ON p.id = rp.permission_id
+            WHERE ur.user_id = :uid
+              AND p.codename IN ('access_control.change', 'access_control.manage', 'access_control.open_door')
+            LIMIT 1
+        """), {"uid": current_user.id}).fetchone()
+        if not perm:
+            raise HTTPException(status_code=403, detail="Permission denied: access_control.change required")
+
     door = db.execute(text("SELECT id, name, terminal_sn FROM acc_door WHERE id=:id"), {"id": door_id}).fetchone()
     if not door:
         raise HTTPException(404, "Door not found")
@@ -612,8 +627,26 @@ async def remote_open_door(door_id: int, db: Session = Depends(get_db), current_
     return {"success": True, "message": "Door open command sent"}
 
 
+def _require_ac_permission(current_user, db) -> None:
+    """Raise 403 unless caller is superuser or has access_control.change."""
+    if getattr(current_user, "is_superuser", False):
+        return
+    perm = db.execute(text("""
+        SELECT 1 FROM auth_user_role ur
+        JOIN auth_role r ON r.id = ur.role_id
+        JOIN auth_role_permission rp ON rp.role_id = r.id
+        JOIN auth_permission p ON p.id = rp.permission_id
+        WHERE ur.user_id = :uid
+          AND p.codename IN ('access_control.change', 'access_control.manage')
+        LIMIT 1
+    """), {"uid": current_user.id}).fetchone()
+    if not perm:
+        raise HTTPException(status_code=403, detail="Permission denied: access_control.change required")
+
+
 @router.post("/doors/{door_id}/sync/")
 async def sync_door(door_id: int, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    _require_ac_permission(current_user, db)
     row = db.execute(text("SELECT id FROM acc_door WHERE id=:id"), {"id": door_id}).fetchone()
     if not row:
         raise HTTPException(404, "Door not found")
@@ -622,9 +655,13 @@ async def sync_door(door_id: int, db: Session = Depends(get_db), current_user=De
 
 @router.post("/doors/set-mustering-mode/")
 async def set_mustering_mode(body: MusteringBody, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    _require_ac_permission(current_user, db)
     if body.door_ids:
-        ids_sql = ", ".join(str(i) for i in body.door_ids)
-        db.execute(text(f"UPDATE acc_door SET mustering_mode=:mm WHERE id IN ({ids_sql})"), {"mm": body.mustering_mode})
+        # Parameterized: use ANY(:ids) to avoid f-string SQL injection
+        db.execute(
+            text("UPDATE acc_door SET mustering_mode=:mm WHERE id = ANY(:ids)"),
+            {"mm": body.mustering_mode, "ids": list(body.door_ids)},
+        )
     db.commit()
     return {"success": True, "message": f"Mustering mode {'enabled' if body.mustering_mode else 'disabled'} on {len(body.door_ids)} doors"}
 
@@ -712,8 +749,9 @@ async def get_antipassback(db: Session = Depends(get_db), current_user=Depends(g
 async def update_antipassback(
     settings: List[Dict[str, Any]],
     db: Session = Depends(get_db),
-    current_user=Depends(get_current_user)
+    current_user=Depends(get_current_user),
 ):
+    _require_ac_permission(current_user, db)
     for s in settings:
         db.execute(text("UPDATE acc_door SET anti_passback=:apb WHERE id=:id"),
                    {"apb": s.get("anti_passback", 0), "id": s["door_id"]})
@@ -981,44 +1019,63 @@ async def emergency_action(body: EmergencyBody, db: Session = Depends(get_db), c
     return {"success": True, "message": f"Emergency {body.action} applied to {len(door_ids)} doors"}
 
 
+class EmergencyLockBody(BaseModel):
+    reason: str
+
+
 @router.post("/emergency/lock-all/")
-async def emergency_lock_all(db: Session = Depends(get_db), current_user=Depends(get_current_user)):
-    door_ids = [r._mapping["id"] for r in db.execute(text("SELECT id FROM acc_door")).fetchall()]
-    for did in door_ids:
-        door = db.execute(text("SELECT name, terminal_sn FROM acc_door WHERE id=:id"), {"id": did}).fetchone()
-        if not door:
-            continue
-        db.execute(text("""
-            INSERT INTO acc_event (event_time, terminal_sn, door_id, emp_code, emp_name, event_type, description)
-            VALUES (NOW(), :sn, :did, :ec, :en, 6, 'Emergency lock-all')
-        """), {
-            "sn": door._mapping["terminal_sn"],
-            "did": did,
-            "ec": getattr(current_user, "username", "system"),
-            "en": getattr(current_user, "first_name", ""),
-        })
-    db.commit()
-    return {"success": True, "message": f"Emergency lock applied to {len(door_ids)} doors"}
+async def emergency_lock_all(
+    body: EmergencyLockBody,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    if not getattr(current_user, "is_superuser", False):
+        raise HTTPException(
+            status_code=403,
+            detail="Emergency lock-all requires superuser privileges",
+        )
+    if not body.reason or len(body.reason.strip()) < 5:
+        raise HTTPException(status_code=400, detail="A reason of at least 5 characters is required")
+
+    # Delegate to EmergencyService so an EmergencyEvent row is created, the
+    # lockdown is auditable from the emergency dashboard, and device RELAY
+    # commands are queued — the old implementation only wrote acc_event rows.
+    result = await EmergencyService().execute_lockdown(
+        scope="global",
+        action="lock",
+        reason=body.reason.strip(),
+        initiated_by=getattr(current_user, "id", None),
+        db=db,
+    )
+    return {"success": True, "message": result.get("message", "Emergency lock applied"), **result}
+
+
+class EmergencyUnlockBody(BaseModel):
+    reason: str
 
 
 @router.post("/emergency/unlock-all/")
-async def emergency_unlock_all(db: Session = Depends(get_db), current_user=Depends(get_current_user)):
-    door_ids = [r._mapping["id"] for r in db.execute(text("SELECT id FROM acc_door")).fetchall()]
-    for did in door_ids:
-        door = db.execute(text("SELECT name, terminal_sn FROM acc_door WHERE id=:id"), {"id": did}).fetchone()
-        if not door:
-            continue
-        db.execute(text("""
-            INSERT INTO acc_event (event_time, terminal_sn, door_id, emp_code, emp_name, event_type, description)
-            VALUES (NOW(), :sn, :did, :ec, :en, 5, 'Emergency unlock-all')
-        """), {
-            "sn": door._mapping["terminal_sn"],
-            "did": did,
-            "ec": getattr(current_user, "username", "system"),
-            "en": getattr(current_user, "first_name", ""),
-        })
-    db.commit()
-    return {"success": True, "message": f"Emergency unlock applied to {len(door_ids)} doors"}
+async def emergency_unlock_all(
+    body: EmergencyUnlockBody,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    if not getattr(current_user, "is_superuser", False):
+        raise HTTPException(
+            status_code=403,
+            detail="Emergency unlock-all requires superuser privileges",
+        )
+    if not body.reason or len(body.reason.strip()) < 5:
+        raise HTTPException(status_code=400, detail="A reason of at least 5 characters is required")
+
+    result = await EmergencyService().execute_lockdown(
+        scope="global",
+        action="unlock",
+        reason=body.reason.strip(),
+        initiated_by=getattr(current_user, "id", None),
+        db=db,
+    )
+    return {"success": True, "message": result.get("message", "Emergency unlock applied"), **result}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1470,10 +1527,11 @@ async def get_zones(db: Session = Depends(get_db), current_user=Depends(get_curr
         zd["doors"] = _rows(doors)
         zd["door_ids"] = [d._mapping["door_id"] for d in doors]
         zd["max_occupancy"] = zd.get("capacity")   # alias for frontend
-        # Live occupancy: people whose last event via a door in this zone is entry
-        entry_door_ids = [d._mapping["door_id"] for d in doors if d._mapping["direction"] in (0, 2)]
-        if entry_door_ids:
-            ids_sql = ",".join(str(i) for i in entry_door_ids)
+        # Live occupancy: use ALL zone doors (entry + exit) — last event per person
+        # determines presence.  in_out=0 → inside, in_out=1 → outside.
+        all_door_ids = [d._mapping["door_id"] for d in doors]
+        if all_door_ids:
+            ids_sql = ",".join(str(i) for i in all_door_ids)
             occ = db.execute(text(f"""
                 SELECT COUNT(DISTINCT emp_code) AS cnt FROM (
                     SELECT DISTINCT ON (emp_code) emp_code, in_out
@@ -1489,6 +1547,51 @@ async def get_zones(db: Session = Depends(get_db), current_user=Depends(get_curr
     return {"success": True, "data": result}
 
 
+def _sync_ac_zone_to_zone_management(acc_zone_id: int, db) -> None:
+    """
+    When an access-control zone's door assignments change, propagate to Zone Management:
+    • Ensure a matching row exists in `zones` (matched by name)
+    • Set iclock_terminal.zone_id + reader_purpose for every terminal in this ac zone
+    • Recompute zones.device_count
+    """
+    az = db.execute(text("SELECT id, zone_name FROM acc_zone WHERE id=:id"), {"id": acc_zone_id}).fetchone()
+    if not az:
+        return
+    zone_name = az.zone_name
+
+    # Find or create the matching zones row
+    zrow = db.execute(text("SELECT id FROM zones WHERE name = :n LIMIT 1"), {"n": zone_name}).fetchone()
+    if not zrow:
+        zrow = db.execute(text("""
+            INSERT INTO zones (name, is_active, current_occupancy, current_personnel_count, device_count)
+            VALUES (:n, true, 0, 0, 0) RETURNING id
+        """), {"n": zone_name}).fetchone()
+    zones_id = zrow.id
+
+    # Update every terminal linked via acc_zone_door
+    doors = db.execute(text("""
+        SELECT ad.terminal_sn, azd.direction
+        FROM acc_zone_door azd
+        JOIN acc_door ad ON ad.id = azd.door_id
+        WHERE azd.zone_id = :azid AND ad.terminal_sn IS NOT NULL
+    """), {"azid": acc_zone_id}).fetchall()
+
+    for d in doors:
+        rp = "ACCESS_ENTRY" if d.direction == 0 else "ACCESS_EXIT"
+        db.execute(text("""
+            UPDATE iclock_terminal
+            SET zone_id = :zid, reader_purpose = :rp
+            WHERE sn = :sn
+        """), {"zid": zones_id, "rp": rp, "sn": d.terminal_sn})
+
+    # Recompute device_count
+    db.execute(text("""
+        UPDATE zones SET device_count = (
+            SELECT COUNT(*) FROM iclock_terminal WHERE zone_id = :zid
+        ) WHERE id = :zid
+    """), {"zid": zones_id})
+
+
 @router.post("/zones/")
 async def create_zone(body: ZoneBody, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     row = db.execute(text("""
@@ -1501,6 +1604,8 @@ async def create_zone(body: ZoneBody, db: Session = Depends(get_db), current_use
             "INSERT INTO acc_zone_door (zone_id, door_id, direction) VALUES (:zid, :did, 0) "
             "ON CONFLICT (zone_id, door_id) DO NOTHING"
         ), {"zid": zid, "did": did})
+    db.commit()
+    _sync_ac_zone_to_zone_management(zid, db)
     db.commit()
     return {"success": True, "data": dict(row._mapping)}
 
@@ -1517,6 +1622,8 @@ async def update_zone(zone_id: int, body: ZoneBody, db: Session = Depends(get_db
         db.execute(text(
             "INSERT INTO acc_zone_door (zone_id, door_id, direction) VALUES (:zid, :did, 0)"
         ), {"zid": zone_id, "did": did})
+    db.commit()
+    _sync_ac_zone_to_zone_management(zone_id, db)
     db.commit()
     return {"success": True, "message": "Zone updated"}
 
@@ -1561,6 +1668,27 @@ async def zone_mustering(zone_id: int, db: Session = Depends(get_db), current_us
         if isinstance(item.get("event_time"), datetime):
             item["event_time"] = item["event_time"].isoformat()
     return {"success": True, "data": {"zone": dict(zone._mapping), "present": data, "count": len(data)}}
+
+
+@router.post("/zones/sync-all")
+async def sync_all_zones(db=Depends(get_db), current_user=Depends(get_current_user)):
+    """
+    Reconcile ALL acc_zone assignments into Zone Management (zones + iclock_terminal).
+    Call this once after manually wiring up Access Control doors/zones to make
+    the Zone Management page reflect the Access Control configuration.
+    """
+    acc_zones = db.execute(text("SELECT id FROM acc_zone")).fetchall()
+    for az in acc_zones:
+        _sync_ac_zone_to_zone_management(az.id, db)
+    db.commit()
+    # Also refresh device_count for every zone from ground truth
+    db.execute(text("""
+        UPDATE zones z SET device_count = (
+            SELECT COUNT(*) FROM iclock_terminal t WHERE t.zone_id = z.id
+        )
+    """))
+    db.commit()
+    return {"success": True, "synced_acc_zones": len(acc_zones)}
 
 
 # ══════════════════════════════════════════════════════════════════════════════

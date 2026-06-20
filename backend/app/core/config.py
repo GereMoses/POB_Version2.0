@@ -42,7 +42,7 @@ class Settings(BaseSettings):
 
     # API / Application Configuration
     API_V1_STR: str = "/api/v1"
-    PROJECT_NAME: str = "POB System"
+    PROJECT_NAME: str = "Apex POB"
     VERSION: str = "2.0.0"
     DESCRIPTION: str = "Personnel On Board Management System for Oil & Gas Operations"
     ENVIRONMENT: str = "development"
@@ -103,6 +103,60 @@ class Settings(BaseSettings):
     # License / Subscription
     LICENSE_SECRET: str = "pob-vendor-license-secret-change-this"
     GLOBAL_ADMIN_PASSWORD: str = "GlobalAdmin@2026"
+
+    # Emergency webhook — required for external fire/gas panel integration
+    # Must be set explicitly; left empty to disable the webhook endpoint entirely
+    EMERGENCY_WEBHOOK_KEY: str = ""
+
+    # Notification channels (SMTP, SMS, WhatsApp)
+    SMTP_HOST: str = ""
+    SMTP_PORT: int = 587
+    SMTP_USER: str = ""
+    SMTP_PASSWORD: str = ""
+    EMAIL_FROM: str = ""
+    SMTP_TLS: bool = True
+    SMS_API_URL: str = ""
+    SMS_API_KEY: str = ""
+    WHATSAPP_API_URL: str = ""
+    WHATSAPP_API_KEY: str = ""
+    FCM_KEY: str = ""
+
+    @validator("SECRET_KEY")
+    def secret_key_must_be_strong(cls, v, values):
+        insecure_defaults = {
+            "pob-system-production-secret-key-2024-secure-jwt-auth",
+            "changethis",
+            "secret",
+            "your-secret-key",
+        }
+        env = values.get("ENVIRONMENT", "development")
+        if v in insecure_defaults and env == "production":
+            raise ValueError(
+                "SECRET_KEY is using an insecure default value. "
+                "Generate a strong key: python -c \"import secrets; print(secrets.token_urlsafe(48))\""
+            )
+        return v
+
+    @validator("GLOBAL_ADMIN_PASSWORD")
+    def global_admin_password_must_be_changed(cls, v, values):
+        insecure_defaults = {"GlobalAdmin@2026", "changethis", "admin", "password"}
+        env = values.get("ENVIRONMENT", "development")
+        if v in insecure_defaults and env == "production":
+            raise ValueError(
+                "GLOBAL_ADMIN_PASSWORD is using an insecure default. "
+                "Set a strong value in .env.prod (min 16 chars, mixed case, numbers, symbols)."
+            )
+        return v
+
+    @validator("LICENSE_SECRET")
+    def license_secret_must_be_changed(cls, v, values):
+        env = values.get("ENVIRONMENT", "development")
+        if v == "pob-vendor-license-secret-change-this" and env == "production":
+            raise ValueError(
+                "LICENSE_SECRET is using the default value. "
+                "Set a unique secret in .env.prod to prevent unauthorized license generation."
+            )
+        return v
 
 
 settings = Settings()

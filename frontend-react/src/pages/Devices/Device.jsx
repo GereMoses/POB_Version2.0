@@ -4,7 +4,7 @@ import {
   AppstoreOutlined, DatabaseOutlined, ThunderboltOutlined,
   MonitorOutlined, CloudUploadOutlined, SettingOutlined,
   WifiOutlined, ReloadOutlined, SafetyOutlined, ToolOutlined,
-  CalendarOutlined, LockOutlined, BarChartOutlined,
+  CalendarOutlined, LockOutlined, BarChartOutlined, SyncOutlined,
 } from '@ant-design/icons';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 
@@ -19,6 +19,7 @@ import AccessControl        from './tabs/AccessControl';
 import DeviceSchedules      from './tabs/DeviceSchedules';
 import MaintenanceTracking  from './tabs/MaintenanceTracking';
 import BiotimeAnalytics     from './tabs/BiotimeAnalytics';
+import TemplateSyncTab      from './tabs/TemplateSyncTab';
 
 import deviceAPI from '../../services/deviceAPI';
 
@@ -129,15 +130,20 @@ const Device = () => {
       label: <span><BarChartOutlined />Analytics</span>,
       children: <BiotimeAnalytics />,
     },
+    {
+      key: '12',
+      label: <span><SyncOutlined />Template Sync</span>,
+      children: <TemplateSyncTab terminals={terminals} />,
+    },
   ];
 
   return (
     <div className="device-module">
       <Card
         title={
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', overflow: 'visible' }}>
             <span style={{ fontWeight: 700, fontSize: 16 }}>Device Management</span>
-            <Space>
+            <Space size="middle" style={{ overflow: 'visible' }}>
               <Badge count={deviceStats.online} showZero color="#52c41a">
                 <WifiOutlined style={{ fontSize: 16 }} />
               </Badge>
@@ -153,12 +159,14 @@ const Device = () => {
             </Space>
           </div>
         }
+        styles={{ header: { overflow: 'visible' } }}
       >
         <Tabs
           activeKey={activeTab}
           onChange={setActiveTab}
           size="small"
           items={tabItems}
+          tabBarStyle={{ overflow: 'visible', paddingTop: 6 }}
         />
       </Card>
     </div>

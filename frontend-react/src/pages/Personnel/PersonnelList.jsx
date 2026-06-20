@@ -1,9 +1,9 @@
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   Table, Button, Space, Input, Select, Row, Col,
   Tag, App, Popconfirm, Avatar, Switch, Drawer, Descriptions, Divider,
   Tooltip, DatePicker, Form, Tabs, Badge, Modal, Steps, Upload, Progress,
-  Alert, Spin, Empty,
+  Alert, Spin, Empty, Card,
 } from 'antd';
 import {
   PlusOutlined, EditOutlined, DeleteOutlined, SearchOutlined,
@@ -12,18 +12,20 @@ import {
   PhoneOutlined, EnvironmentOutlined, MedicineBoxOutlined,
   SolutionOutlined, ApartmentOutlined, GlobalOutlined,
   ScanOutlined, CalendarOutlined, BankOutlined, AlertOutlined,
-  CheckCircleOutlined, FilterOutlined, CreditCardOutlined,
+  CheckCircleOutlined, CreditCardOutlined,
   CloseOutlined, ExportOutlined, ImportOutlined, AppstoreOutlined,
   UnorderedListOutlined, DownloadOutlined, InboxOutlined,
   ClockCircleOutlined, ThunderboltOutlined, CameraOutlined,
   FileTextOutlined, CheckOutlined, WarningOutlined, StopOutlined,
+  LoginOutlined, LogoutOutlined, FireOutlined, SwapOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useNavigate } from 'react-router-dom';
 import apiService from '../../services/api';
-import PersonnelMTDPanel from './components/PersonnelMTDPanel';
-import PersonnelBiometricPanel from './components/PersonnelBiometricPanel';
+import EmployeeDrawer from './components/EmployeeDrawer';
+import PersonnelAnalytics from './components/PersonnelAnalytics';
 
 dayjs.extend(relativeTime);
 
@@ -317,14 +319,16 @@ function exportCSV(employees, filename) {
 }
 
 // ── Activity Tab component ─────────────────────────────────────────────────────
-const ActivityTab = ({ empCode }) => {
+const ActivityTab = ({ empCode, personnelId }) => {
   const { data, isLoading } = useQuery({
-    queryKey: ['emp-activity', empCode],
-    queryFn:  () => apiService.get(`/api/device/transactions/live/?limit=20&emp_code=${empCode}`),
-    enabled:  !!empCode,
+    queryKey: ['emp-activity', personnelId || empCode],
+    queryFn:  () => personnelId
+      ? apiService.get(`/api/v1/personnel/${personnelId}/activity?limit=30`)
+      : apiService.get(`/api/v1/personnel/?search=${empCode}&page_size=1`).then(() => ({ data: [] })),
+    enabled:  !!(personnelId || empCode),
     staleTime: 30_000,
   });
-  const tx = data?.data ?? [];
+  const tx = Array.isArray(data?.data) ? data.data : (Array.isArray(data) ? data : []);
   if (isLoading) return <div style={{ textAlign: 'center', padding: 24 }}><Spin /></div>;
   if (tx.length === 0) return (
     <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={
@@ -652,18 +656,28 @@ const ImportModal = ({ open, onClose, onSuccess }) => {
 // ── PersonnelList ──────────────────────────────────────────────────────────────
 const PersonnelList = () => {
   const { message } = App.useApp();
+  const navigate = useNavigate();
 
   // filters
-  const [search,        setSearch]        = useState('');
-  const [filterStatus,  setFilterStatus]  = useState(null);
-  const [filterType,    setFilterType]    = useState(null);
-  const [filterDept,    setFilterDept]    = useState(null);
-  const [filterCompany, setFilterCompany] = useState('');
-  const [filterPOB,     setFilterPOB]     = useState(false);
+  const [search,              setSearch]              = useState('');
+  const [debouncedSearch,     setDebouncedSearch]     = useState('');
+  const [filterStatus,        setFilterStatus]        = useState(null);
+  const [filterType,          setFilterType]          = useState(null);
+  const [filterDept,          setFilterDept]          = useState(null);
+  const [filterCompany,       setFilterCompany]       = useState('');
+  const [filterPOB,           setFilterPOB]           = useState(false);
+  const [filterSafetyCritical,setFilterSafetyCritical]= useState(false);
+  const [filterZone,          setFilterZone]          = useState(null);
+
+  // Debounce: fire API after 400 ms of no typing
+  useEffect(() => {
+    const t = setTimeout(() => { setDebouncedSearch(search); setPage(1); }, 400);
+    return () => clearTimeout(t);
+  }, [search]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // view
   const [viewMode,      setViewMode]      = useState('table'); // 'table' | 'grid'
-  const [pageSize,      setPageSize]      = useState(25);
+  // pageSize managed alongside pagination below
 
   // drawers / modals
   const [regVisible,    setRegVisible]    = useState(false);
@@ -673,7 +687,7 @@ const PersonnelList = () => {
 
   const [detailVisible, setDetailVisible] = useState(false);
   const [detailRecord,  setDetailRecord]  = useState(null);
-  const [activeTab,     setActiveTab]     = useState('overview');
+
 
   const [selectedRowKeys, setSelectedRowKeys] = useState([]);
   const [importVisible,   setImportVisible]   = useState(false);
@@ -685,16 +699,24 @@ const PersonnelList = () => {
   const queryClient = useQueryClient();
 
   // ── Queries ────────────────────────────────────────────────────────────────
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(25);
+
   const { data: personnelData, isLoading, refetch } = useQuery({
-    queryKey: ['personnel', search, filterStatus, filterType, filterDept],
+    queryKey: ['personnel', debouncedSearch, filterStatus, filterType, filterDept, filterCompany, filterZone, filterSafetyCritical, page, pageSize],
     queryFn: () => {
-      const p = new URLSearchParams({ page_size: '200' });
-      if (search)       p.append('search', search);
-      if (filterStatus) p.append('status', filterStatus);
-      if (filterType)   p.append('personnel_type', filterType);
+      const p = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
+      if (debouncedSearch)     p.append('search', debouncedSearch);
+      if (filterStatus)        p.append('status', filterStatus);
+      if (filterType)          p.append('personnel_type', filterType);
+      if (filterDept)          p.append('department_id', String(filterDept));
+      if (filterCompany)       p.append('company', filterCompany);
+      if (filterZone)          p.append('zone_id', String(filterZone));
+      if (filterSafetyCritical) p.append('safety_critical', 'true');
       return apiService.get(`/api/v1/personnel/?${p}`);
     },
     refetchInterval: 30000,
+    placeholderData: (prev) => prev,
   });
 
   const { data: dashStats } = useQuery({
@@ -725,15 +747,16 @@ const PersonnelList = () => {
   const ncMap    = new Map(ncList.map(p => [p.emp_id, p.missing_items ?? []]));
 
   const employees   = personnelData?.results || [];
+  const totalCount  = personnelData?.count ?? employees.length;
   const deptList    = Array.isArray(departmentsData) ? departmentsData : (departmentsData?.results || []);
   const zoneList    = Array.isArray(zonesData) ? zonesData : (zonesData?.results || []);
+  const zoneMap     = new Map(zoneList.map(z => [z.id, z.name || z.zone_name || `Zone ${z.id}`]));
 
-  // unique companies for filter dropdown
+  // unique companies from loaded slice (server-side filtering now handles the rest)
   const companyList = [...new Set(employees.map(e => e.company).filter(Boolean))].sort();
 
-  let displayData = filterDept    ? employees.filter(e => e.department_id === filterDept)   : employees;
-  if (filterCompany) displayData  = displayData.filter(e => (e.company || '').toLowerCase().includes(filterCompany.toLowerCase()));
-  if (filterPOB)     displayData  = displayData.filter(e => e.is_onboard);
+  // POB filter is still client-side (it's a boolean on the record)
+  const displayData = filterPOB ? employees.filter(e => e.is_onboard) : employees;
 
   const totalPersonnel  = dashStats?.total_personnel  ?? personnelData?.count ?? 0;
   const offshoreCount   = dashStats?.offshore_count   ?? employees.filter(e => (e.status || '').toUpperCase() === 'OFFSHORE').length;
@@ -758,7 +781,7 @@ const PersonnelList = () => {
       queryClient.invalidateQueries(['personnel']);
       message.success('Photo uploaded');
     },
-    onError: () => message.warning('Employee saved but photo upload failed'),
+    onError: (err) => message.error(err?.message || 'Photo upload failed'),
   });
 
   const saveMutation = useMutation({
@@ -790,18 +813,18 @@ const PersonnelList = () => {
   });
 
   const deleteMutation = useMutation({
-    mutationFn: (id) => apiService.delete(`/api/v1/personnel/${id}/`),
+    mutationFn: (id) => apiService.delete(`/api/v1/personnel/${id}`),
     onSuccess: () => {
       message.success('Employee permanently deleted');
       setDetailVisible(false);
       queryClient.invalidateQueries(['personnel']);
       queryClient.invalidateQueries(['personnel-dashboard']);
     },
-    onError: (err) => message.error(err?.response?.data?.detail || 'Delete failed'),
+    onError: (err) => message.error(err?.message || 'Delete failed'),
   });
 
   const deactivateMutation = useMutation({
-    mutationFn: (id) => apiService.put(`/api/v1/personnel/${id}/`, { status: 'inactive' }),
+    mutationFn: (id) => apiService.put(`/api/v1/personnel/${id}/`, { status: 'INACTIVE' }),
     onSuccess: () => {
       message.success('Employee set to inactive');
       setDetailVisible(false);
@@ -809,6 +832,48 @@ const PersonnelList = () => {
       queryClient.invalidateQueries(['personnel-dashboard']);
     },
     onError: (err) => message.error(err?.response?.data?.detail || 'Deactivate failed'),
+  });
+
+  const checkInMutation = useMutation({
+    mutationFn: (id) => apiService.post(`/api/v1/personnel/${id}/check-in`, {}),
+    onSuccess: (_, id) => {
+      message.success('Checked in');
+      queryClient.invalidateQueries(['personnel']);
+    },
+    onError: (e) => message.error(e?.response?.data?.detail || 'Check-in failed'),
+  });
+
+  const checkOutMutation = useMutation({
+    mutationFn: (id) => apiService.post(`/api/v1/personnel/${id}/check-out`, {}),
+    onSuccess: () => {
+      message.success('Checked out');
+      queryClient.invalidateQueries(['personnel']);
+    },
+    onError: (e) => message.error(e?.response?.data?.detail || 'Check-out failed'),
+  });
+
+  const bulkStatusMutation = useMutation({
+    mutationFn: ({ ids, status }) =>
+      Promise.all(ids.map(id => apiService.post(`/api/v1/personnel/${id}/status`, { status }))),
+    onSuccess: (_, { ids, status }) => {
+      message.success(`${ids.length} employee(s) set to ${status.replace('_', ' ')}`);
+      setSelectedRowKeys([]);
+      queryClient.invalidateQueries(['personnel']);
+      queryClient.invalidateQueries(['personnel-dashboard']);
+    },
+    onError: () => message.error('Bulk status update failed'),
+  });
+
+  const bulkResetOnboardM = useMutation({
+    mutationFn: (ids) => apiService.post('/api/v1/personnel/bulk-reset-onboard', { ids: ids ?? [] }),
+    onSuccess: (data, ids) => {
+      const n = data?.cleared_count ?? 0;
+      message.success(n > 0 ? `${n} personnel marked as offboard.` : 'No onboard personnel to reset.');
+      setSelectedRowKeys([]);
+      queryClient.invalidateQueries(['personnel']);
+      queryClient.invalidateQueries(['personnel-dashboard']);
+    },
+    onError: () => message.error('Bulk offboard reset failed'),
   });
 
   // ── Handlers ───────────────────────────────────────────────────────────────
@@ -883,14 +948,46 @@ const PersonnelList = () => {
     });
   };
 
-  const openDetail = (rec) => { setDetailRecord(rec); setActiveTab('overview'); setDetailVisible(true); };
+  const openDetail = (rec) => { setDetailRecord(rec); setDetailVisible(true); };
 
-  const handleExport = () => {
-    const data = selectedRowKeys.length > 0
-      ? displayData.filter(e => selectedRowKeys.includes(e.id))
-      : displayData;
-    exportCSV(data, `personnel_export_${dayjs().format('YYYY-MM-DD')}.csv`);
-    message.success(`Exported ${data.length} employee${data.length !== 1 ? 's' : ''}`);
+  const [syncing, setSyncing] = useState(false);
+
+  const handleBioTimeSync = async () => {
+    setSyncing(true);
+    try {
+      const res = await apiService.post('/api/v1/personnel/sync/biotime', { force: false });
+      const count = res?.data?.synced_count ?? res?.synced_count ?? '?';
+      message.success(`BioTime sync complete — ${count} records synced`);
+      queryClient.invalidateQueries(['personnel']);
+    } catch (e) {
+      message.error(e?.response?.data?.detail || 'BioTime sync failed');
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const handleExport = async () => {
+    try {
+      const token = localStorage.getItem('authToken') || localStorage.getItem('token');
+      const ids = selectedRowKeys.length > 0 ? selectedRowKeys : undefined;
+      const body = { format: 'csv', template: 'DETAILED', ...(ids && { emp_ids: ids }) };
+      const res = await fetch('/api/v1/personnel/export', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(token && { Authorization: `Bearer ${token}` }) },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error('Export failed');
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a'); a.href = url; a.download = `personnel_export_${dayjs().format('YYYY-MM-DD')}.csv`; a.click();
+      URL.revokeObjectURL(url);
+      message.success(`Exported ${ids ? ids.length : totalCount} records`);
+    } catch {
+      // Fallback to client-side CSV if backend export fails
+      const data = selectedRowKeys.length > 0 ? displayData.filter(e => selectedRowKeys.includes(e.id)) : displayData;
+      exportCSV(data, `personnel_export_${dayjs().format('YYYY-MM-DD')}.csv`);
+      message.success(`Exported ${data.length} employee${data.length !== 1 ? 's' : ''}`);
+    }
   };
 
   // ── Table columns ──────────────────────────────────────────────────────────
@@ -911,24 +1008,35 @@ const PersonnelList = () => {
               {initials(name)}
             </Avatar>
             <div style={{ minWidth: 0 }}>
-              <button
-                type="button"
-                style={{
-                  background: 'none', border: 'none', padding: 0, margin: 0,
-                  color: '#111827', fontWeight: 600, fontSize: 13,
-                  cursor: 'pointer', textAlign: 'left',
-                  whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 170,
-                }}
-                onClick={() => openDetail(rec)}
-              >
-                {name || '—'}
-              </button>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <button
+                  type="button"
+                  style={{
+                    background: 'none', border: 'none', padding: 0, margin: 0,
+                    color: '#111827', fontWeight: 600, fontSize: 13,
+                    cursor: 'pointer', textAlign: 'left',
+                    whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 150,
+                  }}
+                  onClick={() => openDetail(rec)}
+                >
+                  {name || '—'}
+                </button>
+                <Tooltip title="Open full profile">
+                  <button
+                    type="button"
+                    onClick={() => navigate(`/personnel/${rec.id}`)}
+                    style={{ background: 'none', border: 'none', padding: '0 2px', cursor: 'pointer', color: '#94a3b8', fontSize: 11, lineHeight: 1 }}
+                  >
+                    ↗
+                  </button>
+                </Tooltip>
+              </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 1 }}>
                 <span style={{ fontFamily: 'monospace', fontSize: 10, color: '#6b7280', background: '#f3f4f6', borderRadius: 4, padding: '0 4px' }}>
                   {rec.emp_code}
                 </span>
                 {rec.email && (
-                  <span style={{ fontSize: 10, color: '#9ca3af', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 110 }}>
+                  <span style={{ fontSize: 10, color: '#9ca3af', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 100 }}>
                     {rec.email}
                   </span>
                 )}
@@ -1049,9 +1157,23 @@ const PersonnelList = () => {
       title: '',
       key: 'actions',
       fixed: 'right',
-      width: 126,
+      width: 158,
       render: (_, rec) => (
-        <div style={{ display: 'flex', gap: 4 }}>
+        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+          {/* Quick Check-In / Check-Out */}
+          {rec.is_onboard ? (
+            <Popconfirm title={`Check out ${rec.first_name || 'this employee'}?`} onConfirm={() => checkOutMutation.mutate(rec.id)} okText="Check Out">
+              <Tooltip title="Check Out">
+                <Button size="small" icon={<LogoutOutlined />} style={{ borderRadius: 6, color: '#1677ff', borderColor: '#91caff' }} />
+              </Tooltip>
+            </Popconfirm>
+          ) : (
+            <Popconfirm title={`Check in ${rec.first_name || 'this employee'}?`} onConfirm={() => checkInMutation.mutate(rec.id)} okText="Check In">
+              <Tooltip title="Check In">
+                <Button size="small" icon={<LoginOutlined />} style={{ borderRadius: 6, color: '#16a34a', borderColor: '#bbf7d0' }} />
+              </Tooltip>
+            </Popconfirm>
+          )}
           <Tooltip title="View Profile">
             <Button size="small" icon={<EyeOutlined />} onClick={() => openDetail(rec)} style={{ borderRadius: 6 }} />
           </Tooltip>
@@ -1082,207 +1204,79 @@ const PersonnelList = () => {
     },
   ];
 
-  // ── Detail drawer tabs ─────────────────────────────────────────────────────
-  const rec = detailRecord;
-  const detailTabs = rec ? [
-    {
-      key: 'overview',
-      label: <><SolutionOutlined /> Overview</>,
-      children: (
-        <>
-          <Descriptions column={2} size="small" bordered>
-            <Descriptions.Item label="Emp Code">
-              <Tag style={{ fontFamily: 'monospace', fontWeight: 700 }}>{rec.emp_code}</Tag>
-            </Descriptions.Item>
-            <Descriptions.Item label="Badge / Card">
-              {rec.badge_id && rec.badge_id !== rec.emp_code ? rec.badge_id : <span style={{ color: '#bbb' }}>—</span>}
-            </Descriptions.Item>
-            <Descriptions.Item label="Full Name" span={2}>
-              <strong>{rec.full_name || `${rec.first_name || ''} ${rec.last_name || ''}`.trim()}</strong>
-            </Descriptions.Item>
-            <Descriptions.Item label="Status"><StatusPill status={rec.status} /></Descriptions.Item>
-            <Descriptions.Item label="POB">
-              <Tag color={rec.is_onboard ? 'green' : 'default'} style={{ fontWeight: 700 }}>
-                {rec.is_onboard ? 'ON BOARD' : 'OFF BOARD'}
-              </Tag>
-            </Descriptions.Item>
-            <Descriptions.Item label="Personnel Type">
-              <Tag color={TYPE_COLOR[rec.personnel_type] || 'default'}>{rec.personnel_type || '—'}</Tag>
-            </Descriptions.Item>
-            <Descriptions.Item label="Employment Type">{rec.employment_type || '—'}</Descriptions.Item>
-            <Descriptions.Item label="Hire Date">
-              {rec.hire_date ? dayjs(rec.hire_date).format('DD MMM YYYY') : '—'}
-            </Descriptions.Item>
-            <Descriptions.Item label="Nationality">{rec.nationality || '—'}</Descriptions.Item>
-          </Descriptions>
-
-          <Divider orientation="left" style={{ fontSize: 12, margin: '12px 0' }}>Employment</Divider>
-          <Descriptions column={2} size="small" bordered>
-            <Descriptions.Item label="Company" span={2}>{rec.company || '—'}</Descriptions.Item>
-            <Descriptions.Item label="Department">{rec.department || '—'}</Descriptions.Item>
-            <Descriptions.Item label="Role">{rec.role || '—'}</Descriptions.Item>
-            <Descriptions.Item label="Position">{rec.position || '—'}</Descriptions.Item>
-            <Descriptions.Item label="Zone">{rec.current_zone_id ? `Zone #${rec.current_zone_id}` : '—'}</Descriptions.Item>
-          </Descriptions>
-
-          <Divider orientation="left" style={{ fontSize: 12, margin: '12px 0' }}>Contact</Divider>
-          <Descriptions column={1} size="small" bordered>
-            <Descriptions.Item label={<><MailOutlined /> Email</>}>{rec.email || '—'}</Descriptions.Item>
-            <Descriptions.Item label={<><PhoneOutlined /> Phone</>}>{rec.phone || '—'}</Descriptions.Item>
-            <Descriptions.Item label={<><EnvironmentOutlined /> Address</>}>{rec.address || '—'}</Descriptions.Item>
-          </Descriptions>
-        </>
-      ),
-    },
-    {
-      key: 'medical',
-      label: <><MedicineBoxOutlined /> Medical & Safety</>,
-      children: (
-        <>
-          <Descriptions column={2} size="small" bordered>
-            <Descriptions.Item label="Blood Group">
-              {rec.blood_group ? <Tag color="red" style={{ fontWeight: 700 }}>{rec.blood_group}</Tag> : '—'}
-            </Descriptions.Item>
-            <Descriptions.Item label="Safety Critical">
-              {rec.safety_critical ? <Tag color="red"><SafetyOutlined /> YES</Tag> : 'No'}
-            </Descriptions.Item>
-            <Descriptions.Item label="ID Number">{rec.id_number || '—'}</Descriptions.Item>
-            <Descriptions.Item label="Passport No.">{rec.passport_number || '—'}</Descriptions.Item>
-          </Descriptions>
-          {(rec.emergency_contact_name || rec.emergency_contact_phone) && (
-            <>
-              <Divider orientation="left" style={{ fontSize: 12, margin: '12px 0' }}>Emergency Contact</Divider>
-              <Descriptions column={2} size="small" bordered>
-                <Descriptions.Item label="Name">{rec.emergency_contact_name || '—'}</Descriptions.Item>
-                <Descriptions.Item label="Phone">{rec.emergency_contact_phone || '—'}</Descriptions.Item>
-              </Descriptions>
-            </>
-          )}
-          {rec.medical_conditions && (
-            <>
-              <Divider orientation="left" style={{ fontSize: 12, margin: '12px 0' }}>Medical Conditions</Divider>
-              <div style={{ background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 6, padding: '8px 12px', fontSize: 13 }}>
-                {rec.medical_conditions}
-              </div>
-            </>
-          )}
-        </>
-      ),
-    },
-    {
-      key: 'mtd',
-      label: (
-        <Space size={4}>
-          <MedicineBoxOutlined />MTD Compliance
-          {ncMap.has(rec.id) && ncMap.get(rec.id).length > 0 && <Badge dot status="error" />}
-        </Space>
-      ),
-      children: <PersonnelMTDPanel empId={rec.id} />,
-    },
-    {
-      key: 'biotime',
-      label: (
-        <Space size={4}>
-          <ScanOutlined />Biometrics
-          {rec.biometric_enrolled
-            ? <Badge dot status="success" />
-            : <Badge dot status="default" />
-          }
-        </Space>
-      ),
-      children: activeTab === 'biotime'
-        ? <PersonnelBiometricPanel empCode={rec.emp_code} personnelId={rec.id} />
-        : null,
-    },
-    {
-      key: 'activity',
-      label: <><ThunderboltOutlined /> Activity</>,
-      children: activeTab === 'activity' ? <ActivityTab empCode={rec.emp_code} /> : null,
-    },
-  ] : [];
-
   // ── Render ─────────────────────────────────────────────────────────────────
-  const STATS = [
-    { label: 'Total Personnel', value: totalPersonnel,  icon: <TeamOutlined />,        color: '#2563eb', bg: '#eff6ff' },
-    { label: 'On Board (POB)',  value: onboardCount,    icon: <SafetyOutlined />,       color: '#16a34a', bg: '#f0fdf4' },
-    { label: 'Offshore',        value: offshoreCount,   icon: <EnvironmentOutlined />,  color: '#7c3aed', bg: '#fdf4ff' },
-    { label: 'Contractors',     value: contractorCount, icon: <ToolOutlined />,         color: '#d97706', bg: '#fffbeb' },
-    { label: 'Safety Critical', value: safetyCount,     icon: <MedicineBoxOutlined />,  color: '#dc2626', bg: '#fef2f2' },
-  ];
 
-  const activeFilters = [search, filterStatus, filterType, filterDept, filterCompany, filterPOB].filter(Boolean).length;
+  const activeFilters = [debouncedSearch, filterStatus, filterType, filterDept, filterCompany, filterPOB, filterSafetyCritical, filterZone].filter(Boolean).length;
 
   return (
-    <div style={{ padding: 24, background: '#f8fafc', minHeight: '100vh' }}>
-
-      {/* ── Page header ──────────────────────────────────────────────────── */}
-      <div style={{ marginBottom: 20 }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
-          <div>
-            <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: '#0f172a', letterSpacing: '-0.3px' }}>
-              Personnel Directory
-            </h2>
-            <p style={{ margin: '2px 0 0', fontSize: 13, color: '#64748b' }}>
-              Manage and track all personnel, contractors, and visitors
-            </p>
-          </div>
-          <Space wrap>
-            <Tooltip title="Toggle table / card view">
-              <span>
-                <Space.Compact style={{ borderRadius: 8, overflow: 'hidden' }}>
-                  <Button
-                    icon={<UnorderedListOutlined />}
-                    type={viewMode === 'table' ? 'primary' : 'default'}
-                    onClick={() => setViewMode('table')}
-                  />
-                  <Button
-                    icon={<AppstoreOutlined />}
-                    type={viewMode === 'grid' ? 'primary' : 'default'}
-                    onClick={() => setViewMode('grid')}
-                  />
-                </Space.Compact>
-              </span>
-            </Tooltip>
-            <Button icon={<ReloadOutlined />} onClick={() => refetch()} loading={isLoading} style={{ borderRadius: 8 }}>
-              Refresh
-            </Button>
-            <Button icon={<ExportOutlined />} onClick={handleExport} style={{ borderRadius: 8 }}>
-              Export CSV
-            </Button>
-            <Button icon={<ImportOutlined />} onClick={() => setImportVisible(true)} style={{ borderRadius: 8 }}>
-              Import
-            </Button>
-            <Button type="primary" icon={<PlusOutlined />} onClick={openAdd} style={{ borderRadius: 8, fontWeight: 600 }}>
-              Register Employee
-            </Button>
-          </Space>
-        </div>
-      </div>
-
-      {/* ── Stat cards ───────────────────────────────────────────────────── */}
-      <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
-        {STATS.map((s) => (
-          <Col xs={12} sm={8} md={24 / 5} key={s.label}>
-            <div style={{
-              background: '#fff', borderRadius: 12, padding: '14px 16px',
-              border: '1px solid #e2e8f0', boxShadow: '0 1px 3px rgba(0,0,0,0.04)',
-              display: 'flex', alignItems: 'center', gap: 12,
-            }}>
-              <div style={{
-                width: 40, height: 40, borderRadius: 10, flexShrink: 0,
-                background: s.bg, display: 'flex', alignItems: 'center',
-                justifyContent: 'center', color: s.color, fontSize: 18,
-              }}>
-                {s.icon}
-              </div>
-              <div>
-                <div style={{ fontSize: 24, fontWeight: 800, color: '#0f172a', lineHeight: 1 }}>{s.value}</div>
-                <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 3, fontWeight: 500 }}>{s.label}</div>
+    <div className="personnel-module">
+      <Card
+        title={
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', overflow: 'visible' }}>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 16 }}>Personnel Directory</div>
+              <div style={{ fontSize: 12, color: '#64748b', fontWeight: 400, marginTop: 2 }}>
+                Manage and track all personnel, contractors, and visitors
               </div>
             </div>
-          </Col>
-        ))}
-      </Row>
+            <Space size="middle" wrap style={{ overflow: 'visible' }}>
+              <Badge count={totalPersonnel} showZero color="#1677ff">
+                <UserOutlined style={{ fontSize: 16 }} />
+              </Badge>
+              <Badge count={offshoreCount} showZero color="#14b8a6">
+                <GlobalOutlined style={{ fontSize: 16 }} />
+              </Badge>
+              <Tooltip title="Toggle table / card view">
+                <span>
+                  <Space.Compact style={{ borderRadius: 8, overflow: 'hidden' }}>
+                    <Button
+                      icon={<UnorderedListOutlined />}
+                      size="small"
+                      type={viewMode === 'table' ? 'primary' : 'default'}
+                      onClick={() => setViewMode('table')}
+                    />
+                    <Button
+                      icon={<AppstoreOutlined />}
+                      size="small"
+                      type={viewMode === 'grid' ? 'primary' : 'default'}
+                      onClick={() => setViewMode('grid')}
+                    />
+                  </Space.Compact>
+                </span>
+              </Tooltip>
+              <Button icon={<ReloadOutlined />} onClick={() => refetch()} loading={isLoading} size="small">
+                Refresh
+              </Button>
+              <Tooltip title="Sync from BioTime 9.5 device data">
+                <Button icon={<ScanOutlined />} onClick={handleBioTimeSync} loading={syncing} size="small">
+                  BioTime Sync
+                </Button>
+              </Tooltip>
+              <Button icon={<ExportOutlined />} onClick={handleExport} size="small">
+                Export
+              </Button>
+              <Button icon={<ImportOutlined />} onClick={() => setImportVisible(true)} size="small">
+                Import
+              </Button>
+              <Button type="primary" icon={<PlusOutlined />} onClick={openAdd} size="small" style={{ fontWeight: 600 }}>
+                Register Employee
+              </Button>
+            </Space>
+          </div>
+        }
+        styles={{ header: { overflow: 'visible' } }}
+      >
+
+      {/* ── Analytics (clickable stat cards + charts) ─────────────────── */}
+      <PersonnelAnalytics
+        employees={displayData}
+        dashStats={dashStats}
+        loading={isLoading}
+        activeFilterStatus={filterStatus}
+        activeFilterType={filterType}
+        onFilterStatus={(v) => { setFilterStatus(v); setPage(1); }}
+        onFilterType={(v) => { setFilterType(v); setPage(1); }}
+      />
 
       {/* ── Filter bar ───────────────────────────────────────────────────── */}
       <div style={{
@@ -1302,7 +1296,7 @@ const PersonnelList = () => {
         <Select
           placeholder="Department"
           style={{ flex: '1 1 140px', minWidth: 140, maxWidth: 190 }}
-          value={filterDept} onChange={setFilterDept} allowClear
+          value={filterDept} onChange={v => { setFilterDept(v); setPage(1); }} allowClear
         >
           {deptList.map(d => <Option key={d.id} value={d.id}>{d.name || d.dept_name}</Option>)}
         </Select>
@@ -1310,7 +1304,7 @@ const PersonnelList = () => {
           placeholder="Company"
           style={{ flex: '1 1 140px', minWidth: 140, maxWidth: 190 }}
           value={filterCompany || undefined}
-          onChange={v => setFilterCompany(v || '')}
+          onChange={v => { setFilterCompany(v || ''); setPage(1); }}
           allowClear
           showSearch
           optionFilterProp="children"
@@ -1320,40 +1314,93 @@ const PersonnelList = () => {
         <Select
           placeholder="Status"
           style={{ flex: '1 1 120px', minWidth: 120, maxWidth: 160 }}
-          value={filterStatus} onChange={setFilterStatus} allowClear
+          value={filterStatus} onChange={v => { setFilterStatus(v); setPage(1); }} allowClear
         >
           {STATUS_OPTIONS.map(s => <Option key={s} value={s}>{s.replace('_', ' ')}</Option>)}
         </Select>
         <Select
           placeholder="Type"
           style={{ flex: '1 1 110px', minWidth: 110, maxWidth: 150 }}
-          value={filterType} onChange={setFilterType} allowClear
+          value={filterType} onChange={v => { setFilterType(v); setPage(1); }} allowClear
         >
           <Option value="STAFF">Staff</Option>
           <Option value="CONTRACTOR">Contractor</Option>
           <Option value="VISITOR">Visitor</Option>
         </Select>
-        <Tooltip title="Show only personnel currently on board">
-          <Button
-            type={filterPOB ? 'primary' : 'default'}
-            size="small"
-            onClick={() => setFilterPOB(!filterPOB)}
-            style={{ borderRadius: 8, fontWeight: 600, fontSize: 12 }}
-          >
-            POB Only
-          </Button>
-        </Tooltip>
+        {/* Zone filter */}
+        <Select
+          placeholder="Zone"
+          style={{ flex: '1 1 120px', minWidth: 110, maxWidth: 160 }}
+          value={filterZone}
+          onChange={v => { setFilterZone(v); setPage(1); }}
+          allowClear
+          showSearch
+          optionFilterProp="children"
+        >
+          {zoneList.map(z => <Option key={z.id} value={z.id}>{z.name || z.zone_name}</Option>)}
+        </Select>
+
+        {/* Quick toggles */}
+        <Space size={4}>
+          <Tooltip title="Show only On Board (POB)">
+            <Button
+              type={filterPOB ? 'primary' : 'default'}
+              size="small"
+              onClick={() => setFilterPOB(!filterPOB)}
+              style={{ borderRadius: 8, fontWeight: 600, fontSize: 12 }}
+            >
+              POB {onboardCount > 0 && `(${onboardCount})`}
+            </Button>
+          </Tooltip>
+          {onboardCount > 0 && (
+            <Tooltip title={`Reset all ${onboardCount} onboard personnel to offboard — clears phantom/stale records`}>
+              <Popconfirm
+                title="Reset ALL onboard personnel?"
+                description={`This will mark all ${onboardCount} currently-onboard personnel as offboard and clear their POB timestamps. Use this to fix phantom records.`}
+                onConfirm={() => bulkResetOnboardM.mutate([])}
+                okText="Reset All" okButtonProps={{ danger: true }}
+              >
+                <Button
+                  size="small"
+                  icon={<ReloadOutlined />}
+                  loading={bulkResetOnboardM.isPending}
+                  style={{ borderRadius: 8, fontSize: 12, fontWeight: 600, color: '#dc2626', borderColor: '#fca5a5', background: '#fef2f2' }}
+                >
+                  Reset All Onboard
+                </Button>
+              </Popconfirm>
+            </Tooltip>
+          )}
+          <Tooltip title="Show only Safety-Critical personnel">
+            <Button
+              type={filterSafetyCritical ? 'primary' : 'default'}
+              size="small"
+              danger={filterSafetyCritical}
+              icon={<FireOutlined />}
+              onClick={() => { setFilterSafetyCritical(!filterSafetyCritical); setPage(1); }}
+              style={{ borderRadius: 8, fontWeight: 600, fontSize: 12 }}
+            >
+              Safety
+            </Button>
+          </Tooltip>
+        </Space>
+
         {activeFilters > 0 && (
           <Button
             size="small"
             style={{ borderRadius: 6, fontSize: 12 }}
-            onClick={() => { setSearch(''); setFilterDept(null); setFilterStatus(null); setFilterType(null); setFilterCompany(''); setFilterPOB(false); setSelectedRowKeys([]); }}
+            onClick={() => { setSearch(''); setFilterDept(null); setFilterStatus(null); setFilterType(null); setFilterCompany(''); setFilterPOB(false); setFilterSafetyCritical(false); setFilterZone(null); setSelectedRowKeys([]); setPage(1); }}
           >
-            Clear {activeFilters > 0 ? `(${activeFilters})` : ''}
+            Clear ({activeFilters})
           </Button>
         )}
         <div style={{ marginLeft: 'auto', color: '#94a3b8', fontSize: 12, whiteSpace: 'nowrap' }}>
-          {displayData.length} employee{displayData.length !== 1 ? 's' : ''}
+          {isLoading
+            ? '…'
+            : filterPOB
+              ? `${displayData.length} on board`
+              : `${totalCount.toLocaleString()} employee${totalCount !== 1 ? 's' : ''}`
+          }
         </div>
       </div>
 
@@ -1361,31 +1408,68 @@ const PersonnelList = () => {
       {selectedRowKeys.length > 0 && (
         <div style={{
           background: '#1d4ed8', borderRadius: 10, padding: '10px 16px',
-          marginBottom: 10, display: 'flex', alignItems: 'center', gap: 12,
+          marginBottom: 10, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
           boxShadow: '0 4px 12px rgba(29,78,216,0.3)',
         }}>
           <span style={{ color: '#fff', fontWeight: 700, fontSize: 13 }}>
             {selectedRowKeys.length} selected
           </span>
           <div style={{ flex: 1 }} />
+
+          {/* Bulk status change */}
+          <Select
+            placeholder="Change status…"
+            size="small"
+            style={{ width: 150, borderRadius: 6 }}
+            onChange={v => bulkStatusMutation.mutate({ ids: selectedRowKeys, status: v })}
+            loading={bulkStatusMutation.isPending}
+            value={null}
+          >
+            {STATUS_OPTIONS.map(s => (
+              <Option key={s} value={s}>
+                <SwapOutlined style={{ marginRight: 6, opacity: 0.6 }} />
+                {s.replace('_', ' ')}
+              </Option>
+            ))}
+          </Select>
+
+          {/* Mark selected as Offboard */}
+          {selectedRowKeys.some(id => employees.find(e => e.id === id)?.is_onboard) && (
+            <Popconfirm
+              title="Mark selected as Offboard?"
+              description={`This will clear the onboard flag and POB timestamp for ${selectedRowKeys.filter(id => employees.find(e => e.id === id)?.is_onboard).length} selected employee(s).`}
+              onConfirm={() => bulkResetOnboardM.mutate(selectedRowKeys)}
+              okText="Mark Offboard" okButtonProps={{ danger: true }}
+            >
+              <Button
+                size="small"
+                icon={<LogoutOutlined />}
+                loading={bulkResetOnboardM.isPending}
+                style={{ borderRadius: 6, background: '#f59e0b', border: 'none', color: '#fff', fontWeight: 600 }}
+              >
+                Mark Offboard
+              </Button>
+            </Popconfirm>
+          )}
+
           <Button
             size="small" icon={<ExportOutlined />} onClick={handleExport}
             style={{ borderRadius: 6, background: 'rgba(255,255,255,0.15)', border: '1px solid rgba(255,255,255,0.3)', color: '#fff' }}
           >
-            Export selected
+            Export
           </Button>
           <Popconfirm
             title={`Delete ${selectedRowKeys.length} employee${selectedRowKeys.length !== 1 ? 's' : ''}?`}
             description="This action cannot be undone."
             onConfirm={() => {
-              Promise.all(selectedRowKeys.map(id => apiService.delete(`/api/v1/personnel/${id}/`)))
+              Promise.all(selectedRowKeys.map(id => apiService.delete(`/api/v1/personnel/${id}`)))
                 .then(() => {
                   message.success(`${selectedRowKeys.length} employee(s) deleted`);
                   setSelectedRowKeys([]);
                   queryClient.invalidateQueries(['personnel']);
                   queryClient.invalidateQueries(['personnel-dashboard']);
                 })
-                .catch(() => message.error('Some deletions failed'));
+                .catch((err) => message.error(err?.message || 'Some deletions failed'));
             }}
             okText="Delete all" okButtonProps={{ danger: true }}
           >
@@ -1393,7 +1477,7 @@ const PersonnelList = () => {
               size="small" danger icon={<DeleteOutlined />}
               style={{ borderRadius: 6, background: '#dc2626', border: 'none', color: '#fff' }}
             >
-              Delete selected
+              Delete
             </Button>
           </Popconfirm>
           <Button
@@ -1420,10 +1504,12 @@ const PersonnelList = () => {
               selections: [Table.SELECTION_ALL, Table.SELECTION_INVERT, Table.SELECTION_NONE],
             }}
             pagination={{
+              current: page,
               pageSize,
+              total: totalCount,
               showSizeChanger: true,
               pageSizeOptions: ['10', '25', '50', '100'],
-              onShowSizeChange: (_, size) => setPageSize(size),
+              onChange: (p, ps) => { setPage(p); if (ps !== pageSize) setPageSize(ps); },
               showTotal: (t, r) => `${r[0]}–${r[1]} of ${t} employees`,
               style: { padding: '12px 16px', margin: 0 },
             }}
@@ -1467,117 +1553,15 @@ const PersonnelList = () => {
         </div>
       )}
 
-      {/* ── Detail Drawer ────────────────────────────────────────────────── */}
-      <Drawer
+      {/* ── Detail Drawer (new component) ───────────────────────────────── */}
+      <EmployeeDrawer
         open={detailVisible}
+        record={detailRecord}
+        zoneMap={zoneMap}
         onClose={() => setDetailVisible(false)}
-        width={760}
-        styles={{ body: { padding: 0 } }}
-        extra={
-          rec && (
-            <Space>
-              <Button icon={<EditOutlined />} onClick={() => { setDetailVisible(false); openEdit(rec); }}>Edit</Button>
-              <Popconfirm
-                title="Set employee to inactive?"
-                onConfirm={() => deactivateMutation.mutate(rec?.id)}
-                okText="Deactivate" cancelText="Cancel"
-              >
-                <Button icon={<StopOutlined />} style={{ color: '#d97706', borderColor: '#fcd34d' }}>Deactivate</Button>
-              </Popconfirm>
-              <Popconfirm
-                title="Permanently delete this employee?"
-                description="This cannot be undone. All assignments will also be removed."
-                onConfirm={() => deleteMutation.mutate(rec?.id)}
-                okText="Delete" cancelText="Cancel" okButtonProps={{ danger: true }}
-              >
-                <Button danger icon={<DeleteOutlined />}>Delete</Button>
-              </Popconfirm>
-            </Space>
-          )
-        }
-        title={null}
-        destroyOnHidden
-      >
-        {rec && (
-          <>
-            {/* Hero header */}
-            <div style={{
-              background: 'linear-gradient(135deg, #1e293b 0%, #0f172a 100%)',
-              padding: '24px 24px 20px',
-            }}>
-              <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start' }}>
-                {/* Avatar with camera button */}
-                <div style={{ position: 'relative', flexShrink: 0 }}>
-                  <Avatar
-                    src={rec.photo_url || undefined}
-                    size={72}
-                    style={{ background: avatarColor(rec.full_name || `${rec.first_name} ${rec.last_name}`), fontSize: 22, fontWeight: 700, border: '3px solid rgba(255,255,255,0.2)' }}
-                  >
-                    {initials(rec.full_name || `${rec.first_name || ''} ${rec.last_name || ''}`)}
-                  </Avatar>
-                  {rec.is_onboard && (
-                    <span style={{ position: 'absolute', bottom: 2, right: 2, width: 14, height: 14, borderRadius: '50%', background: '#22c55e', border: '2px solid #1e293b' }} />
-                  )}
-                </div>
-
-                {/* Name + meta */}
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 20, fontWeight: 800, color: '#f8fafc', lineHeight: 1.2 }}>
-                    {rec.full_name || `${rec.first_name || ''} ${rec.last_name || ''}`.trim()}
-                  </div>
-                  <div style={{ fontSize: 12, color: '#94a3b8', marginTop: 3 }}>
-                    <span style={{ fontFamily: 'monospace', background: 'rgba(255,255,255,0.08)', padding: '1px 6px', borderRadius: 4 }}>{rec.emp_code}</span>
-                    {rec.company ? <span style={{ marginLeft: 8 }}>· {rec.company}</span> : null}
-                  </div>
-                  <div style={{ fontSize: 12, color: '#cbd5e1', marginTop: 4 }}>
-                    {[rec.role || rec.position, rec.department].filter(Boolean).join(' · ')}
-                  </div>
-
-                  {/* tags row */}
-                  <div style={{ display: 'flex', gap: 6, marginTop: 10, flexWrap: 'wrap' }}>
-                    <StatusPill status={rec.status} />
-                    {rec.is_onboard && (
-                      <span style={{ background: '#22c55e', color: '#fff', borderRadius: 20, padding: '2px 10px', fontSize: 11, fontWeight: 700 }}>ON BOARD</span>
-                    )}
-                    {rec.safety_critical && (
-                      <span style={{ background: '#ef4444', color: '#fff', borderRadius: 20, padding: '2px 10px', fontSize: 11, fontWeight: 700 }}>⚠ SAFETY CRITICAL</span>
-                    )}
-                    {rec.personnel_type && rec.personnel_type !== 'STAFF' && (
-                      <Tag color={TYPE_COLOR[rec.personnel_type] || 'default'} style={{ margin: 0, borderRadius: 10 }}>{rec.personnel_type}</Tag>
-                    )}
-                  </div>
-                </div>
-              </div>
-
-              {/* Quick stats strip */}
-              <div style={{ display: 'flex', gap: 16, marginTop: 18, paddingTop: 16, borderTop: '1px solid rgba(255,255,255,0.08)' }}>
-                {[
-                  { label: 'Compliance', value: `${rec.compliance_score ?? 0}%`, color: rec.compliance_score >= 90 ? '#22c55e' : rec.compliance_score >= 70 ? '#f59e0b' : '#ef4444' },
-                  { label: 'Blood Group', value: rec.blood_group || '—', color: '#f87171' },
-                  { label: 'Last Seen', value: rec.last_seen ? dayjs(rec.last_seen).fromNow() : '—', color: '#94a3b8' },
-                  { label: 'Hire Date', value: rec.hire_date ? dayjs(rec.hire_date).format('MMM YYYY') : '—', color: '#94a3b8' },
-                ].map(({ label, value, color }) => (
-                  <div key={label} style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 10, color: '#64748b', textTransform: 'uppercase', fontWeight: 600, letterSpacing: '0.05em' }}>{label}</div>
-                    <div style={{ fontSize: 14, fontWeight: 700, color, marginTop: 2 }}>{value}</div>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {/* Tabs */}
-            <div style={{ padding: '0 24px 24px' }}>
-              <Tabs
-                activeKey={activeTab}
-                onChange={setActiveTab}
-                items={detailTabs}
-                size="small"
-                style={{ marginTop: 4 }}
-              />
-            </div>
-          </>
-        )}
-      </Drawer>
+        onEdit={openEdit}
+        onRefresh={() => { refetch(); queryClient.invalidateQueries(['personnel-dashboard']); }}
+      />
 
       {/* ── Registration / Edit Drawer ───────────────────────────────────── */}
       <Drawer
@@ -1597,12 +1581,17 @@ const PersonnelList = () => {
         onClose={() => { setRegVisible(false); setEditingRecord(null); setPhotoFile(null); form.resetFields(); }}
         width={860}
         footer={
-          <Space style={{ float: 'right' }}>
-            <Button onClick={() => { setRegVisible(false); setEditingRecord(null); setPhotoFile(null); form.resetFields(); }}>Cancel</Button>
-            <Button type="primary" onClick={handleSubmit} loading={saveMutation.isPending}>
-              {editingRecord ? 'Update Employee' : 'Register Employee'}
-            </Button>
-          </Space>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span style={{ fontSize: 12, color: '#94a3b8' }}>
+              Fields marked <span style={{ color: '#ff4d4f' }}>*</span> are required. The employee code must be unique across all BioTime devices.
+            </span>
+            <Space>
+              <Button onClick={() => { setRegVisible(false); setEditingRecord(null); setPhotoFile(null); form.resetFields(); }}>Cancel</Button>
+              <Button type="primary" onClick={handleSubmit} loading={saveMutation.isPending} icon={<CheckOutlined />}>
+                {editingRecord ? 'Save Changes' : 'Register Employee'}
+              </Button>
+            </Space>
+          </div>
         }
         forceRender
       >
@@ -1621,7 +1610,7 @@ const PersonnelList = () => {
               <input
                 ref={photoInputRef}
                 type="file"
-                accept="image/*"
+                accept=".jpg,.jpeg,.png,.gif,.webp"
                 style={{ display: 'none' }}
                 onChange={e => {
                   const f = e.target.files?.[0];
@@ -1644,7 +1633,25 @@ const PersonnelList = () => {
           <Row gutter={12}>
             <Col span={8}>
               <Form.Item name="emp_code" label="Employee Code (PIN)" rules={[{ required: true, message: 'Required — must be unique' }]}>
-                <Input placeholder="e.g. EMP001" disabled={!!editingRecord} style={{ fontFamily: 'monospace' }} />
+                <Space.Compact style={{ width: '100%' }}>
+                  <Input
+                    placeholder="e.g. EMP001"
+                    disabled={!!editingRecord}
+                    style={{ fontFamily: 'monospace', flex: 1 }}
+                  />
+                  {!editingRecord && (
+                    <Button
+                      type="default"
+                      size="middle"
+                      onClick={() => {
+                        const now = Date.now().toString().slice(-5);
+                        form.setFieldValue('emp_code', `EMP${now}`);
+                      }}
+                    >
+                      Auto
+                    </Button>
+                  )}
+                </Space.Compact>
               </Form.Item>
             </Col>
             <Col span={8}>
@@ -1843,6 +1850,7 @@ const PersonnelList = () => {
         }
         .ant-table-tbody > tr:last-child > td { border-bottom: none !important; }
       `}</style>
+      </Card>
     </div>
   );
 };

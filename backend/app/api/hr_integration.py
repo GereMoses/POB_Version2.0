@@ -41,7 +41,7 @@ def _require_admin(current_user=Depends(get_current_user)):
 
 class ConfigIn(BaseModel):
     api_base_url:        str
-    api_key:             str
+    api_key:             Optional[str] = None   # None / empty = keep existing (sent when key field is masked)
     org_id:              Optional[str] = None
     auth_header_name:    Optional[str] = "Authorization"
     attendance_endpoint: Optional[str] = "/v1/attendance/clock-records"
@@ -109,14 +109,34 @@ async def save_integration_config(
 ):
 
 
-    # If api_key is all stars (masked), keep the existing key
-    existing_key = None
-    if set(body.api_key) == {"*"}:
+    # Determine the real API key to store.
+    # Keep existing if: key is absent (None), empty, or looks masked (starts with "*").
+    # This handles the case where the frontend sends the masked display value when
+    # the user didn't change the key.
+    raw_key = (body.api_key or "").strip()
+    keep_existing = (not raw_key) or raw_key.startswith("*")
+
+    from ..core.crypto import encrypt_secret
+    from ..services.attendance_export import validate_integration_base_url, IntegrationUrlError
+
+    # SSRF + TLS guard: never store/send a credential to a non-public or cleartext URL.
+    try:
+        safe_base_url = validate_integration_base_url(body.api_base_url)
+    except IntegrationUrlError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    if keep_existing:
+        # Existing key is stored encrypted (or legacy plaintext) — preserve it verbatim.
         row = db.execute(text("SELECT api_key FROM hr_integration_config LIMIT 1")).fetchone()
         existing_key = row[0] if row else None
         if not existing_key:
-            raise HTTPException(status_code=400, detail="API key required")
-    api_key = existing_key or body.api_key
+            raise HTTPException(status_code=400, detail="API key is required for the initial setup")
+        api_key = existing_key  # already stored form; encrypt_secret() below is idempotent
+    else:
+        api_key = raw_key
+
+    # Encrypt at rest (idempotent: re-encrypting an already-encrypted value is a no-op).
+    api_key = encrypt_secret(api_key)
 
     db.execute(text("DELETE FROM hr_integration_config"))
     db.execute(text("""
@@ -127,7 +147,7 @@ async def save_integration_config(
           (:base_url, :api_key, :org_id, :auth_name,
            :att_ep, :emp_ep, :enabled, :sync_time, NOW())
     """), {
-        "base_url":  body.api_base_url.rstrip("/"),
+        "base_url":  safe_base_url,
         "api_key":   api_key,
         "org_id":    body.org_id,
         "auth_name": body.auth_header_name or "Authorization",

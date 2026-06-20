@@ -52,11 +52,19 @@ const API_ENDPOINTS = {
   ANALYTICS: '/analytics',
 };
 
+// How often the silent-refresh heartbeat fires (30 minutes)
+const REFRESH_INTERVAL_MS = 30 * 60 * 1000;
+
 // API Service Class
 class ApiService {
   constructor() {
     this.baseURL = API_CONFIG.baseURL;
     this.timeout = API_CONFIG.timeout;
+    this._refreshTimer = null;
+    // Re-arm the heartbeat on page reload if a token is already in storage
+    if (this.getAuthToken()) {
+      this.startSilentRefresh();
+    }
   }
 
   // Get auth token — canonical key is 'token'; legacy aliases checked as fallback
@@ -64,16 +72,53 @@ class ApiService {
     return localStorage.getItem('token') || localStorage.getItem('authToken') || localStorage.getItem('access_token');
   }
 
-  // Set auth token
+  // Set auth token and start the silent-refresh heartbeat
   setAuthToken(token) {
     localStorage.setItem('token', token);
     localStorage.removeItem('authToken');
     localStorage.removeItem('access_token');
+    this.startSilentRefresh();
   }
 
-  // Remove auth token — clears all alias keys
+  // Remove auth token — clears all alias keys and stops the refresh timer
   removeAuthToken() {
     ['token', 'authToken', 'access_token', 'user_info'].forEach(k => localStorage.removeItem(k));
+    this.stopSilentRefresh();
+  }
+
+  // Proactively refresh the access token before it expires.
+  // As long as the browser tab is open, the session never times out.
+  startSilentRefresh() {
+    this.stopSilentRefresh(); // clear any existing timer
+    this._refreshTimer = setInterval(async () => {
+      const token = this.getAuthToken();
+      if (!token) { this.stopSilentRefresh(); return; }
+      try {
+        const response = await fetch(`${this.baseURL}/api/v1/auth/refresh`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (response.ok) {
+          const data = await response.json();
+          if (data.access_token) {
+            localStorage.setItem('token', data.access_token);
+          }
+        } else if (response.status === 401) {
+          // Token truly expired — log out
+          this.removeAuthToken();
+          window.dispatchEvent(new CustomEvent('auth:unauthorized'));
+        }
+      } catch (_) {
+        // Network error during refresh — silent; will retry next interval
+      }
+    }, REFRESH_INTERVAL_MS);
+  }
+
+  stopSilentRefresh() {
+    if (this._refreshTimer) {
+      clearInterval(this._refreshTimer);
+      this._refreshTimer = null;
+    }
   }
 
   // Get headers
@@ -89,8 +134,14 @@ class ApiService {
   async handleResponse(response) {
     if (!response.ok) {
       if (response.status === 401) {
-        this.removeAuthToken();
-        window.dispatchEvent(new CustomEvent('auth:unauthorized'));
+        // Ignore 401s that came from a redirect: when the browser follows a
+        // cross-origin 307 redirect it strips the Authorization header, causing
+        // a false "Authentication required" 401 that is not a real session
+        // expiry.  response.redirected is true in that case.
+        if (!response.redirected) {
+          this.removeAuthToken();
+          window.dispatchEvent(new CustomEvent('auth:unauthorized'));
+        }
       }
       if (response.status === 402) {
         const body = await response.json().catch(() => ({}));
@@ -120,7 +171,15 @@ class ApiService {
 
   // Generic request method
   async request(endpoint, options = {}) {
-    const url = `${this.baseURL}${endpoint}`;
+    const method = (options.method || 'GET').toUpperCase();
+    // FastAPI redirects trailing-slash URLs with a 307, which strips the
+    // Authorization header in the browser. Strip the trailing slash for
+    // mutating requests before the fetch so no redirect occurs.
+    const normalizedEndpoint =
+      method !== 'GET' && method !== 'HEAD' && endpoint.endsWith('/')
+        ? endpoint.slice(0, -1)
+        : endpoint;
+    const url = `${this.baseURL}${normalizedEndpoint}`;
     const config = {
       headers: this.getHeaders(),
       ...options,
@@ -173,6 +232,22 @@ class ApiService {
     });
   }
 
+  // Download file — returns { blob, filename } for CSV/PDF exports
+  async downloadFile(endpoint, params = {}) {
+    const queryString = new URLSearchParams(params).toString();
+    const url = queryString ? `${endpoint}?${queryString}` : endpoint;
+    const response = await fetch(`${this.baseURL}${url}`, {
+      method: 'GET',
+      headers: this.getHeaders(),
+    });
+    if (!response.ok) throw new Error(`Download failed: HTTP ${response.status}`);
+    const blob = await response.blob();
+    const disposition = response.headers.get('content-disposition') || '';
+    const match = disposition.match(/filename=([^;]+)/);
+    const filename = match ? match[1].trim() : 'export.csv';
+    return { blob, filename };
+  }
+
   // File upload
   async upload(endpoint, file, onProgress) {
     const formData = new FormData();
@@ -199,15 +274,24 @@ class ApiService {
       });
 
       xhr.addEventListener('load', () => {
-        if (xhr.status === 200) {
+        if (xhr.status >= 200 && xhr.status < 300) {
           try {
             const response = JSON.parse(xhr.responseText);
             resolve(response);
           } catch (error) {
-            reject(new Error('Invalid response format'));
+            resolve({});
           }
         } else {
-          reject(new Error(`Upload failed with status ${xhr.status}`));
+          // Parse the backend error detail so callers see the real message
+          let message = `Upload failed (${xhr.status})`;
+          try {
+            const body = JSON.parse(xhr.responseText);
+            if (body.detail) message = body.detail;
+            else if (body.message) message = body.message;
+          } catch (_) {}
+          const err = new Error(message);
+          err.status = xhr.status;
+          reject(err);
         }
       });
 

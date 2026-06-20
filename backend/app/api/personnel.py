@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import func, text
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta
 import io
@@ -24,7 +24,6 @@ from ..services.file_upload import file_upload_service
 from ..services.bulk_import import bulk_import_service
 from ..services.personnel_status import personnel_status_service
 from ..services.certification_training import certification_training_service
-from ..services.emergency_contacts import emergency_contact_service
 from ..services.medical_fitness import medical_fitness_service
 from ..services.badge_printing import badge_printing_service
 from ..services.audit_trail import audit_trail_service
@@ -257,6 +256,36 @@ async def get_onboard_personnel(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get onboard personnel: {str(e)}"
         )
+
+
+@router.post("/bulk-reset-onboard")
+async def bulk_reset_onboard(
+    body: dict,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+) -> dict:
+    """
+    Clear is_onboard + pob_since for a list of personnel IDs.
+    If ids is empty or omitted, resets ALL currently onboard personnel.
+    """
+    ids = body.get("ids", [])
+    if ids:
+        result = db.execute(
+            text("UPDATE personnel SET is_onboard = FALSE, is_pob = FALSE, pob_since = NULL WHERE id = ANY(:ids) AND is_onboard = TRUE RETURNING id"),
+            {"ids": ids},
+        )
+    else:
+        result = db.execute(
+            text("UPDATE personnel SET is_onboard = FALSE, is_pob = FALSE, pob_since = NULL WHERE is_onboard = TRUE RETURNING id")
+        )
+    cleared = [r[0] for r in result.fetchall()]
+    db.commit()
+    return {
+        "success": True,
+        "cleared_count": len(cleared),
+        "cleared_ids": cleared,
+        "message": f"{len(cleared)} personnel marked as offboard.",
+    }
 
 
 @router.get("/dashboard")
@@ -643,10 +672,12 @@ async def delete_personnel(
         from sqlalchemy import text
         p = {"personnel_id": personnel_id}
 
-        # The DB has a trigger sync_personnel_to_employee() that cascades
-        # DELETE personnel → DELETE personnel_employee.  att_manual_log.emp_id
-        # references personnel_employee.id with no CASCADE, so we must remove
-        # those rows first or the trigger will raise a ForeignKeyViolation.
+        # The DB trigger sync_personnel_to_employee() fires on DELETE personnel
+        # and tries to DELETE from personnel_employee.  Several att_* and other
+        # tables FK-reference personnel_employee.id WITHOUT ON DELETE CASCADE,
+        # so we must remove those rows first or the trigger raises a
+        # ForeignKeyViolation.  Use savepoints so an absent table/column
+        # (e.g. after a schema migration) doesn't roll back the whole tx.
         pe_row = db.execute(
             text(
                 "SELECT pe.id FROM personnel_employee pe "
@@ -656,10 +687,50 @@ async def delete_personnel(
             p,
         ).fetchone()
         if pe_row:
-            db.execute(
-                text("DELETE FROM att_manual_log WHERE emp_id = :pe_id"),
-                {"pe_id": pe_row[0]},
-            )
+            pe_id = pe_row[0]
+            pe_p = {"pe_id": pe_id}
+            # All tables whose emp_id/user_id/personnel_id column FK-references
+            # personnel_employee.id without CASCADE.
+            _pe_dep_tables = [
+                ("att_report",           "emp_id"),
+                ("att_exception",        "emp_id"),
+                ("att_overtime",         "emp_id"),
+                ("att_manual_log",       "emp_id"),
+                ("checkinout",           "user_id"),
+                ("onboarding_task",      "emp_id"),
+                ("transport_crew",       "personnel_id"),
+                ("vis_pre_registration", "host_emp_id"),
+                ("vis_visit_log",        "host_emp_id"),
+                ("mtg_attendee",         "emp_id"),
+                ("ssr_userdevicebind",   "user_id"),
+            ]
+            for _tbl, _col in _pe_dep_tables:
+                _sp = f"sp_pe_{_tbl}"
+                try:
+                    db.execute(text(f"SAVEPOINT {_sp}"))
+                    db.execute(text(f"DELETE FROM {_tbl} WHERE {_col} = :pe_id"), pe_p)
+                except Exception:
+                    db.execute(text(f"ROLLBACK TO SAVEPOINT {_sp}"))
+            # Nullable organiser/approval references — NULL them rather than
+            # deleting the whole booking/action-item row.
+            _pe_nullable_refs = [
+                ("mtg_booking",          "organizer_emp_id"),
+                ("mtg_booking",          "approval_by"),
+                ("mtg_action_item",      "assignee_emp_id"),
+                ("mtg_action_item",      "created_by"),
+                ("mtg_minutes",          "uploaded_by"),
+                ("vis_pre_registration", "approval_by"),
+                ("emergency_device_maintenance", "supervisor_id"),
+                ("emergency_device_maintenance", "technician_id"),
+                ("mtd_induction_record", "trainer_emp_id"),
+            ]
+            for _tbl, _col in _pe_nullable_refs:
+                _sp = f"sp_pe_null_{_tbl}_{_col}"
+                try:
+                    db.execute(text(f"SAVEPOINT {_sp}"))
+                    db.execute(text(f"UPDATE {_tbl} SET {_col} = NULL WHERE {_col} = :pe_id"), pe_p)
+                except Exception:
+                    db.execute(text(f"ROLLBACK TO SAVEPOINT {_sp}"))
 
         # Clean up FK-dependent rows on personnel.id — use savepoints so a
         # missing table/column doesn't roll back the whole transaction.
@@ -1567,63 +1638,6 @@ async def add_emergency_contact(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to add emergency contact: {str(e)}"
-        )
-
-
-@router.get("/{personnel_id}/emergency-contacts")
-async def get_personnel_emergency_contacts(
-    personnel_id: int,
-    contact_type: Optional[str] = Query(None),
-    db: Session = Depends(get_db)
-) -> Dict[str, Any]:
-    """
-    Get personnel emergency contacts
-    
-    Args:
-        personnel_id: Personnel ID
-        contact_type: Filter by contact type (optional)
-        db: Database session
-        
-    Returns:
-        Emergency contact information
-    """
-    try:
-        contacts = await emergency_contact_service.get_personnel_emergency_contacts(
-            personnel_id=personnel_id,
-            contact_type=contact_type,
-            db=db
-        )
-        return contacts
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e)
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get emergency contacts: {str(e)}"
-        )
-
-
-@router.get("/emergency-contacts/summary")
-async def get_emergency_contact_summary(db: Session = Depends(get_db)) -> Dict[str, Any]:
-    """
-    Get emergency contact summary statistics
-    
-    Args:
-        db: Database session
-        
-    Returns:
-        Emergency contact summary
-    """
-    try:
-        summary = await emergency_contact_service.get_emergency_contact_summary(db=db)
-        return summary
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get emergency contact summary: {str(e)}"
         )
 
 
@@ -3049,7 +3063,7 @@ async def sync_personnel_from_biotime(
     db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
     """
-    Sync personnel data from BioTime to POB system
+    Sync personnel data from BioTime to Apex POB
     
     Args:
         force_sync: Force full sync regardless of last sync time

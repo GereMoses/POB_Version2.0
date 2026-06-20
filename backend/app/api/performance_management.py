@@ -78,6 +78,10 @@ def _enrich_appraisal(a: PerformanceAppraisal, db: Session) -> PerformanceApprai
     a.cycle_name         = getattr(c, "cycle_name", None)
     a.cycle_code         = getattr(c, "cycle_code", None)
     a.reviewer_name      = _person_name(reviewer) if reviewer else None
+    # Department enrichment
+    dept = getattr(p, "department", None)
+    a.department_id   = getattr(p, "department_id", None)
+    a.department_name = getattr(dept, "name", None) if dept else None
 
     pct, expired = _training_snapshot(a.personnel_id, db)
     a.training_compliance = pct
@@ -194,11 +198,13 @@ async def create_appraisal(
 
 @router.get("/performance/appraisals", response_model=List[PerformanceAppraisalResponse])
 async def list_appraisals(
-    personnel_id: Optional[int] = None,
-    cycle_id:     Optional[int] = None,
-    status:       Optional[str] = None,
+    personnel_id:  Optional[int] = None,
+    cycle_id:      Optional[int] = None,
+    status:        Optional[str] = None,
+    department_id: Optional[int] = None,
+    rating:        Optional[str] = None,
     skip: int = Query(0, ge=0),
-    limit: int = Query(200, ge=1, le=1000),
+    limit: int = Query(500, ge=1, le=1000),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -209,8 +215,14 @@ async def list_appraisals(
         q = q.filter(PerformanceAppraisal.cycle_id == cycle_id)
     if status:
         q = q.filter(PerformanceAppraisal.status == status)
+    if rating:
+        q = q.filter(PerformanceAppraisal.overall_rating == rating)
     appraisals = q.order_by(PerformanceAppraisal.appraisal_date.desc()).offset(skip).limit(limit).all()
-    return [_enrich_appraisal(a, db) for a in appraisals]
+    enriched = [_enrich_appraisal(a, db) for a in appraisals]
+    # Apply department filter after enrichment (via personnel.department_id)
+    if department_id:
+        enriched = [a for a in enriched if a.department_id == department_id]
+    return enriched
 
 
 @router.get("/performance/appraisals/{appraisal_id}", response_model=PerformanceAppraisalResponse)
@@ -311,10 +323,14 @@ async def performance_summary(
         q = q.filter(PerformanceAppraisal.cycle_id == cycle_id)
     appraisals = q.all()
 
-    by_status  = {}
-    by_rating  = {}
-    by_type    = {}
-    scores     = []
+    by_status   = {}
+    by_rating   = {}
+    by_type     = {}
+    by_dept     = {}
+    scores      = []
+    goals       = []
+
+    RATING_ORDER = ["excellent", "very_good", "good", "satisfactory", "needs_improvement", "poor"]
 
     for a in appraisals:
         by_status[a.status] = by_status.get(a.status, 0) + 1
@@ -322,16 +338,57 @@ async def performance_summary(
             by_rating[a.overall_rating] = by_rating.get(a.overall_rating, 0) + 1
         if a.performance_score is not None:
             scores.append(float(a.performance_score))
+        if a.goals_achieved is not None:
+            goals.append(float(a.goals_achieved))
         p = db.query(Personnel).filter(Personnel.id == a.personnel_id).first()
         ptype = getattr(p, "personnel_type", "STAFF") or "STAFF"
         by_type[ptype] = by_type.get(ptype, 0) + 1
+        dept = getattr(p, "department", None)
+        dept_name = getattr(dept, "name", "No Department") if dept else "No Department"
+        if dept_name not in by_dept:
+            by_dept[dept_name] = {"total": 0, "scores": [], "ratings": {}}
+        by_dept[dept_name]["total"] += 1
+        if a.performance_score is not None:
+            by_dept[dept_name]["scores"].append(float(a.performance_score))
+        if a.overall_rating:
+            by_dept[dept_name]["ratings"][a.overall_rating] = by_dept[dept_name]["ratings"].get(a.overall_rating, 0) + 1
+
+    # Score histogram: buckets 0-20, 20-40, 40-60, 60-80, 80-100
+    score_buckets = [0, 0, 0, 0, 0]
+    for s in scores:
+        idx = min(int(s // 20), 4)
+        score_buckets[idx] += 1
+
+    # Department summary with avg score
+    dept_summary = []
+    for name, data in by_dept.items():
+        avg = round(sum(data["scores"]) / len(data["scores"]), 1) if data["scores"] else None
+        top_rating = max(data["ratings"], key=data["ratings"].get) if data["ratings"] else None
+        dept_summary.append({
+            "department": name,
+            "total": data["total"],
+            "avg_score": avg,
+            "top_rating": top_rating,
+        })
+    dept_summary.sort(key=lambda x: -(x["avg_score"] or 0))
+
+    # Rating ordered list for charts
+    rating_chart = [
+        {"rating": r, "count": by_rating.get(r, 0), "label": r.replace("_", " ").title()}
+        for r in RATING_ORDER
+        if r in by_rating
+    ]
 
     return {
         "total":         len(appraisals),
         "by_status":     by_status,
         "by_rating":     by_rating,
+        "rating_chart":  rating_chart,
         "by_type":       by_type,
+        "by_dept":       dept_summary,
         "avg_score":     round(sum(scores) / len(scores), 1) if scores else None,
+        "avg_goals":     round(sum(goals) / len(goals), 1) if goals else None,
+        "score_buckets": score_buckets,
         "total_cycles":  db.query(AppraisalCycle).count(),
         "open_cycles":   db.query(AppraisalCycle).filter(AppraisalCycle.status == "open").count(),
     }

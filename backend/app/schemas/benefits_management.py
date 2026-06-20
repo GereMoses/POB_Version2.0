@@ -112,8 +112,11 @@ class EmployeeBenefitResponse(BaseModel):
     personnel_type:     Optional[str] = None
     personnel_company:  Optional[str] = None
     plan_name:          Optional[str] = None
+    plan_code:          Optional[str] = None
     benefit_type:       Optional[str] = None
     dependent_count:    Optional[int] = None
+    department_id:      Optional[int] = None
+    department_name:    Optional[str] = None
 
     class Config:
         from_attributes = True

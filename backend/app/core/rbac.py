@@ -141,18 +141,20 @@ class RBACMiddleware(BaseHTTPMiddleware):
                     authorization = f"Bearer {qs_token}"
             api_key = request.headers.get("x-api-key")
 
-            # Skip RBAC for public endpoints
+            # Public endpoints always pass through — even if a stale/expired token
+            # header was sent (e.g. the browser's apiService attaches the old token
+            # to every request including the login call itself).
+            if self._is_public_endpoint(request.url.path):
+                response = await call_next(request)
+                return response
+
+            # No credentials at all on a protected endpoint
             if not authorization and not api_key:
-                # Check if this is a public endpoint
-                if self._is_public_endpoint(request.url.path):
-                    response = await call_next(request)
-                    return response
-                else:
-                    return JSONResponse(
-                        status_code=401,
-                        content={"detail": "Authentication required"}
-                    )
-            
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "Authentication required"}
+                )
+
             # Get user from JWT or API key
             user = None
             if authorization:
@@ -337,17 +339,48 @@ class RBACMiddleware(BaseHTTPMiddleware):
             logger.error(f"Error getting user permissions: {e}")
             return []
     
-    async def _log_operation(self, request: Request, response, user: User):
-        """Log operation for audit trail via Python logger (OperationLog DB table not yet active)."""
+    async def _log_operation(self, request: Request, response, user):
+        """Persist every state-changing request and every denied request to base_operationlog."""
         try:
             if self._is_public_endpoint(request.url.path):
                 return
-            if response.status_code >= 400:
-                logger.warning(
-                    "RBAC audit %s %s → %s user=%s",
-                    request.method, request.url.path, response.status_code,
-                    getattr(user, 'username', user.id),
-                )
+            method = request.method
+            # Only log writes and access denials — skip noisy GETs that succeed
+            if method == "GET" and response.status_code < 400:
+                return
+
+            from .database import SessionLocal
+            from datetime import datetime, timezone
+            from sqlalchemy import text as _text
+
+            action = self._get_action_from_method(method)
+            status_code = response.status_code
+            username = getattr(user, "username", str(getattr(user, "id", "unknown")))
+            user_id  = getattr(user, "id", None)
+
+            db = SessionLocal()
+            try:
+                db.execute(_text("""
+                    INSERT INTO base_operationlog
+                        (user_id, action, table_name, new_values, ip_address, created_at)
+                    VALUES
+                        (:uid, :action, :table_name, :new_values, :ip, :ts)
+                """), {
+                    "uid":        user_id,
+                    "action":     action,
+                    "table_name": request.url.path,
+                    "new_values": f"{method} {request.url.path} → {status_code} | user={username}",
+                    "ip":         request.client.host if request.client else "",
+                    "ts":         datetime.now(timezone.utc),
+                })
+                db.commit()
+            except Exception as db_exc:
+                db.rollback()
+                # Fall back to structured logger if DB write fails — never block the response
+                logger.warning("Audit log DB write failed: %s | %s %s %s user=%s",
+                               db_exc, method, request.url.path, status_code, username)
+            finally:
+                db.close()
         except Exception:
             pass
     

@@ -73,6 +73,9 @@ def _resolve_emp_code(db: Session, user_id: str) -> str:
 
 
 def _save_punch(db: Session, sn: str, area: str, rec) -> Optional[Dict]:
+    from ...models.biotime_models import IClockTerminal
+    from ...api.adms_protocol import _handle_zone_access, _ensure_access_control_records
+
     ts = rec.timestamp
     if ts is None:
         return None
@@ -81,7 +84,17 @@ def _save_punch(db: Session, sn: str, area: str, rec) -> Optional[Dict]:
 
     raw_id = str(rec.user_id) if rec.user_id else str(getattr(rec, "uid", ""))
     emp_code = _resolve_emp_code(db, raw_id)
-    punch_state = int(rec.punch) if hasattr(rec, "punch") and rec.punch is not None else 0
+
+    # Look up terminal to determine reader purpose and apply correct routing
+    terminal = db.query(IClockTerminal).filter(IClockTerminal.sn == sn).first()
+    reader_purpose = terminal.reader_purpose if terminal and terminal.reader_purpose else 'ATTENDANCE'
+    is_access_reader = reader_purpose in ('ACCESS_ENTRY', 'ACCESS_EXIT')
+
+    # Force punch direction for access readers; use raw device value for attendance
+    if is_access_reader:
+        punch_state = 0 if reader_purpose == 'ACCESS_ENTRY' else 1
+    else:
+        punch_state = int(rec.punch) if hasattr(rec, "punch") and rec.punch is not None else 0
 
     exists = db.query(IClockTransaction).filter(
         IClockTransaction.terminal_sn == sn,
@@ -90,6 +103,19 @@ def _save_punch(db: Session, sn: str, area: str, rec) -> Optional[Dict]:
     ).first()
     if exists:
         return None
+
+    # Zone tracking for access-control readers
+    if is_access_reader:
+        direction = 'ENTRY' if reader_purpose == 'ACCESS_ENTRY' else 'EXIT'
+        try:
+            _ensure_access_control_records(
+                sn, getattr(terminal, 'alias', None) or sn,
+                terminal.zone_id, direction, db,
+            )
+            _handle_zone_access(emp_code, sn, ts, terminal, direction, db)
+        except Exception as exc:
+            logger.error("Live capture zone access error %s@%s: %s", emp_code, sn, exc)
+            db.rollback()
 
     txn = IClockTransaction(
         emp_code=emp_code,
@@ -165,9 +191,10 @@ def _zk_thread(ip: str, port: int, stop_evt: threading.Event,
 
 async def _device_live_capture(device_id: int,
                                 loop: asyncio.AbstractEventLoop) -> None:
-    RETRY_BASE = 5
-    RETRY_MAX  = 60
-    retry      = RETRY_BASE
+    RETRY_BASE    = 5
+    RETRY_MAX     = 300   # max 5 min between retries for persistently offline devices
+    STABLE_THRESH = 30    # seconds connected before we consider it "stable" and reset backoff
+    retry         = RETRY_BASE
 
     def _get_device_config():
         db: Session = SessionLocal()
@@ -204,7 +231,8 @@ async def _device_live_capture(device_id: int,
             _device_threads[device_id] = thread
         thread.start()
 
-        punch_count = 0
+        punch_count  = 0
+        connect_time = asyncio.get_event_loop().time()
         db = SessionLocal()
         try:
             while True:
@@ -240,6 +268,13 @@ async def _device_live_capture(device_id: int,
                         db.rollback()
                     except Exception:
                         pass
+                    # Re-create session so the pool connection is fully released
+                    try:
+                        db.close()
+                    except Exception:
+                        pass
+                    from ...core.database import SessionLocal as _SL
+                    db = _SL()
         finally:
             stop_evt.set()
             db.close()
@@ -247,11 +282,15 @@ async def _device_live_capture(device_id: int,
                 _device_threads[device_id] = None
 
         thread.join(timeout=5)
-        logger.info("Live capture %s: offline (%s punches saved) — retry in %ss",
-                    sn, punch_count, retry)
-        await asyncio.sleep(retry)
-        retry = min(retry * 2, RETRY_MAX)
-        retry = RETRY_BASE   # reset so reconnect cycles don't grow indefinitely
+        connected_for = asyncio.get_event_loop().time() - connect_time
+        if connected_for >= STABLE_THRESH or punch_count > 0:
+            # Connection was stable — reset backoff so next reconnect is fast
+            retry = RETRY_BASE
+        else:
+            # Quick failure — apply exponential backoff
+            retry = min(retry * 2, RETRY_MAX)
+        logger.info("Live capture %s: offline (%s punches, %.0fs connected) — retry in %ss",
+                    sn, punch_count, connected_for, retry)
 
 
 # ── Module-level task registry (populated by supervisor) ─────────────────────

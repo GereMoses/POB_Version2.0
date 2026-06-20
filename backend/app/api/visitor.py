@@ -6,8 +6,9 @@ blacklist, host approval, and mustering integration.
 
 from datetime import date, datetime
 from typing import Optional, List
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.responses import JSONResponse
+import csv, io
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -28,7 +29,8 @@ from app.schemas.visitor import (
     VisitorVisitLogResponse, VisitorVisitLogListResponse,
     VisitorBlacklistResponse, VisitorBlacklistListResponse,
     VisitorQRResponseWrapper, VisitorDailyReportResponse,
-    VisitorOverstayReportListResponse
+    VisitorOverstayReportListResponse,
+    VisitorAnalyticsResponse, VisitorFrequencyListResponse,
 )
 from app.core.exceptions import ValidationError, NotFoundError
 
@@ -388,15 +390,44 @@ async def resend_pre_registration(
 @router.get("/qr/{qr_code}", response_model=VisitorQRResponseWrapper)
 async def scan_qr_code(
     qr_code: str,
-    db: Session = Depends(get_db)
+    request: Request,
+    db: Session = Depends(get_db),
 ):
-    """Public endpoint to scan QR code and get pre-registration data"""
+    """Public endpoint to scan QR code — validates expiry before returning data."""
+    from ..core.rate_limiter import rate_limiter
+    from datetime import date as _date, datetime as _dt, timezone as _tz
+
+    # Rate-limit QR lookups to block brute-force enumeration
+    ip = request.client.host if request.client else "unknown"
+    allowed, info = rate_limiter.is_allowed(key=f"qr_scan:{ip}", limit=30, window=60)
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many QR scan requests",
+            headers={"Retry-After": str(info["retry_after"])},
+        )
+
     try:
         service = get_visitor_service(db)
         pre_reg = service.get_pre_registration_by_qr(qr_code)
         if not pre_reg:
             raise HTTPException(status_code=404, detail="QR code not found")
-        
+
+        # Validate visit date — reject expired passes
+        today = _date.today()
+        if pre_reg.visit_date and pre_reg.visit_date < today:
+            raise HTTPException(status_code=403, detail="QR code expired — visit date has passed")
+
+        # Validate time window if specified
+        if pre_reg.visit_time_end:
+            now_time = _dt.now(_tz.utc).time()
+            if now_time > pre_reg.visit_time_end:
+                raise HTTPException(status_code=403, detail="QR code expired — visit time window has closed")
+
+        # Reject already-used or explicitly expired registrations (status 4=checked_out, 5=expired)
+        if getattr(pre_reg, "status", None) in (4, 5):
+            raise HTTPException(status_code=403, detail="QR code has already been used or expired")
+
         qr_data = VisitorQRResponse(
             qr_code=pre_reg.qr_code,
             visitor_name=pre_reg.visitor.full_name if pre_reg.visitor else "Unknown",
@@ -406,18 +437,17 @@ async def scan_qr_code(
             visit_time_start=pre_reg.visit_time_start,
             visit_time_end=pre_reg.visit_time_end,
             purpose=pre_reg.purpose,
-            status=pre_reg.status
+            status=pre_reg.status,
         )
-        
         return VisitorQRResponseWrapper(
             success=True,
             message="QR code scanned successfully",
-            data=qr_data
+            data=qr_data,
         )
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="QR scan error")
 
 
 # Check-In/Check-Out Endpoints
@@ -636,3 +666,248 @@ async def get_mustering_compliance_report(
         return {"success": True, "message": "Mustering compliance report generated successfully"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/reports/analytics/", response_model=VisitorAnalyticsResponse)
+async def get_analytics(
+    days: int = Query(30, ge=7, le=365),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Real aggregated visitor analytics"""
+    try:
+        service = get_visitor_service(db)
+        data = service.get_analytics(days)
+        return VisitorAnalyticsResponse(success=True, message="Analytics generated", data=data)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/reports/frequency/", response_model=VisitorFrequencyListResponse)
+async def get_visitor_frequency(
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get most frequent (returning) visitors"""
+    try:
+        service = get_visitor_service(db)
+        data = service.get_visitor_frequency(limit)
+        return VisitorFrequencyListResponse(success=True, message="Frequency report generated", data=data)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/records/export/")
+async def export_visit_records(
+    start_date: Optional[date] = Query(None),
+    end_date: Optional[date] = Query(None),
+    host_id: Optional[int] = Query(None),
+    status: Optional[int] = Query(None),
+    search: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Export visit records as CSV"""
+    try:
+        service = get_visitor_service(db)
+        rows = service.get_records_for_export(start_date, end_date, host_id, status, search)
+
+        output = io.StringIO()
+        if rows:
+            writer = csv.DictWriter(output, fieldnames=rows[0].keys())
+            writer.writeheader()
+            writer.writerows(rows)
+        else:
+            output.write("No records found")
+
+        output.seek(0)
+        filename = f"visitor_records_{start_date or 'all'}_{end_date or 'all'}.csv"
+        return StreamingResponse(
+            iter([output.getvalue()]),
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/check-out/{log_id}/force/", response_model=VisitorVisitLogResponse)
+async def force_check_out(
+    log_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Force check-out a visitor by visit log ID"""
+    try:
+        service = get_visitor_service(db)
+        visit_log = service.force_check_out_by_log_id(log_id)
+        return VisitorVisitLogResponse(success=True, message="Visitor force checked out", data=visit_log)
+    except NotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/visitors/lookup/", response_model=VisitorListResponse)
+async def lookup_visitor(
+    phone: Optional[str] = Query(None),
+    id_no: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Quick lookup of existing visitor by phone, ID, or name — for returning visitor check-in"""
+    try:
+        service = get_visitor_service(db)
+        visitors = service.get_visitors(search=search, phone=phone, id_no=id_no, limit=10)
+        return VisitorListResponse(success=True, message="Visitor lookup complete", data=visitors)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PUBLIC KIOSK ENDPOINTS  (no authentication — self-service tablet mode)
+# ─────────────────────────────────────────────────────────────────────────────
+
+from pydantic import BaseModel as _BaseModel, EmailStr
+
+
+class KioskCheckIn(_BaseModel):
+    first_name: str
+    last_name: str = ""
+    phone: str = ""
+    email: str = ""
+    company: str = ""
+    id_number: str = ""
+    visitor_type: str = "Walk-in"
+    host_name: str = ""
+    purpose: str = ""
+
+
+@router.post("/kiosk/check-in")
+async def kiosk_check_in(
+    data: KioskCheckIn,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """
+    Public self-service check-in — no auth required.
+    Creates (or finds) the visitor, then records a check-in log.
+    Rate-limited: 10 requests per minute per IP to prevent DB flooding.
+    """
+    from ..core.rate_limiter import rate_limiter
+    ip = request.client.host if request.client else "unknown"
+    allowed, info = rate_limiter.is_allowed(key=f"kiosk:{ip}", limit=10, window=60)
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many check-in requests. Please wait before trying again.",
+            headers={"Retry-After": str(info["retry_after"])},
+        )
+    from sqlalchemy import text as _text
+    from datetime import datetime, timezone
+
+    # Blacklist check — query vis_blacklist directly by id_number and/or phone
+    # before any visitor record is created. This mirrors VisitorService._is_blacklisted().
+    if data.id_number or data.phone:
+        bl_row = db.execute(_text("""
+            SELECT 1 FROM vis_blacklist
+            WHERE is_active = TRUE
+              AND (
+                    (:id <> '' AND id_no = :id)
+                 OR (:ph <> '' AND phone = :ph)
+              )
+            LIMIT 1
+        """), {"id": data.id_number, "ph": data.phone}).fetchone()
+        if bl_row:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Entry not permitted. Please see the front desk.",
+            )
+
+    # Upsert visitor — INSERT with ON CONFLICT DO NOTHING to eliminate the TOCTOU
+    # race between concurrent kiosk submissions for the same person. We match on
+    # id_number when it is provided (most reliable identity); fall back to
+    # (first_name, phone) when id_number is blank. A SELECT after the INSERT
+    # picks up whichever row won the race.
+    if data.id_number:
+        db.execute(_text("""
+            INSERT INTO vis_visitor (first_name, last_name, phone, email, company,
+                                     id_number, visitor_type, created_at)
+            VALUES (:fn, :ln, :ph, :em, :co, :id, :vt, NOW())
+            ON CONFLICT (id_number) WHERE id_number <> '' DO NOTHING
+        """), {
+            "fn": data.first_name, "ln": data.last_name,
+            "ph": data.phone,      "em": data.email,
+            "co": data.company,    "id": data.id_number,
+            "vt": data.visitor_type,
+        })
+        db.commit()
+        row = db.execute(_text(
+            "SELECT id FROM vis_visitor WHERE id_number = :id LIMIT 1"
+        ), {"id": data.id_number}).fetchone()
+    else:
+        # No ID supplied — match on (first_name, phone); accept duplicates for
+        # genuinely anonymous walk-ins (no phone, no ID).
+        if data.phone:
+            db.execute(_text("""
+                INSERT INTO vis_visitor (first_name, last_name, phone, email, company,
+                                         id_number, visitor_type, created_at)
+                VALUES (:fn, :ln, :ph, :em, :co, '', :vt, NOW())
+                ON CONFLICT (phone) WHERE phone <> '' DO NOTHING
+            """), {
+                "fn": data.first_name, "ln": data.last_name,
+                "ph": data.phone,      "em": data.email,
+                "co": data.company,    "vt": data.visitor_type,
+            })
+            db.commit()
+            row = db.execute(_text(
+                "SELECT id FROM vis_visitor WHERE phone = :ph LIMIT 1"
+            ), {"ph": data.phone}).fetchone()
+        else:
+            # Truly anonymous — always insert a new record
+            res = db.execute(_text("""
+                INSERT INTO vis_visitor (first_name, last_name, phone, email, company,
+                                         id_number, visitor_type, created_at)
+                VALUES (:fn, :ln, '', :em, :co, '', :vt, NOW())
+                RETURNING id
+            """), {
+                "fn": data.first_name, "ln": data.last_name,
+                "em": data.email,      "co": data.company,
+                "vt": data.visitor_type,
+            }).fetchone()
+            db.commit()
+            row = res
+
+    if not row:
+        raise HTTPException(status_code=500, detail="Could not create visitor record")
+
+    visitor_id = row[0]
+
+    # Record check-in
+    db.execute(_text("""
+        INSERT INTO vis_visit_log (visitor_id, check_in_time, purpose, host_name,
+                                   status, created_at)
+        VALUES (:vid, NOW(), :pur, :hn, 0, NOW())
+    """), {
+        "vid": visitor_id, "pur": data.purpose, "hn": data.host_name,
+    })
+    db.commit()
+
+    return {
+        "success": True,
+        "message": f"Welcome, {data.first_name}! You have been checked in.",
+        "visitor_id": visitor_id,
+        "checked_in_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@router.get("/kiosk/types")
+async def kiosk_visitor_types(db: Session = Depends(get_db)):
+    """Public: return available visitor types for the kiosk dropdown."""
+    from sqlalchemy import text as _text
+    rows = db.execute(_text(
+        "SELECT id, name, description FROM vis_visitor_type WHERE is_active = TRUE ORDER BY name"
+    )).fetchall()
+    return {"types": [dict(r._mapping) for r in rows]}

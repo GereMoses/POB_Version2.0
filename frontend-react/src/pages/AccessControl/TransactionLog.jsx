@@ -159,8 +159,8 @@ const TransactionLog = () => {
       return;
     }
     const token = localStorage.getItem('token') || '';
-    const host  = window.location.hostname;
-    const ws    = new WebSocket(`ws://${host}:8000/api/access-control/events/ws?token=${token}`);
+    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws    = new WebSocket(`${proto}//${window.location.host}/api/access-control/events/ws?token=${token}`);
     wsRef.current = ws;
     ws.onopen    = () => setWsStatus('connected');
     ws.onclose   = () => setWsStatus('disconnected');

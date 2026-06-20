@@ -4,7 +4,7 @@ Complete mustering system with real-time headcount tracking
 """
 
 from sqlalchemy.orm import Session
-from sqlalchemy import and_, func, or_
+from sqlalchemy import and_, func, or_, text, update
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 import logging
@@ -13,19 +13,47 @@ import json
 from app.models.biotime_models import (
     MusteringEvent, MusteringLog, MusteringExpected,
     MusteringSearchSweep, MusteringEscalationRecord,
-    PersonnelEmployee, IClockTerminal, AccDoor, AuthUser, PersonnelDepartment
+    PersonnelEmployee, IClockTerminal, AccDoor, AuthUser, PersonnelDepartment,
+    IClockTransaction,
 )
 from app.models.zone import Zone
 from app.models.personnel import Personnel
 
 logger = logging.getLogger(__name__)
 
+# PostgreSQL advisory-lock IDs — keep globally unique across the codebase.
+# 42 = global guard ensuring only one mustering event is started at a time.
+_MUSTER_START_LOCK_ID = 42
+
 class MusteringService:
     """Core mustering business logic service"""
     
     def __init__(self, db: Session):
         self.db = db
-    
+
+    def _adjust_event_counters(
+        self,
+        event_id: int,
+        delta_safe: int = 0,
+        delta_missing: int = 0,
+        delta_injured: int = 0,
+    ) -> None:
+        """Atomically adjust mustering event counters in a single SQL UPDATE.
+
+        Using server-side arithmetic prevents the read-modify-write race condition
+        that occurs when multiple biometric punches arrive concurrently and each
+        reader increments the Python object before the previous commit lands.
+        """
+        self.db.execute(
+            update(MusteringEvent)
+            .where(MusteringEvent.id == event_id)
+            .values(
+                total_safe=MusteringEvent.total_safe + delta_safe,
+                total_missing=MusteringEvent.total_missing + delta_missing,
+                total_injured=MusteringEvent.total_injured + delta_injured,
+            )
+        )
+
     def start_mustering_event(
         self,
         zone_ids: List[int],
@@ -56,10 +84,23 @@ class MusteringService:
             if missing:
                 raise ValueError(f"Zone(s) not found: {missing}")
 
-            # Reject if any of these zones already has an active event
-            active_event = self.db.query(MusteringEvent).filter(
-                MusteringEvent.status == 0
-            ).first()
+            # Acquire the global mustering advisory lock before checking for an active
+            # event. The system intentionally allows only ONE active mustering event at a
+            # time (see the active_event check below), so a single global lock is correct:
+            # it prevents two concurrent requests both finding no active event and both
+            # inserting (the check-then-insert race). pg_try_advisory_xact_lock returns
+            # FALSE if another session holds the lock; it auto-releases at transaction end.
+            #
+            # ADVISORY LOCK REGISTRY (keep unique across the codebase):
+            #   _MUSTER_START_LOCK_ID = 42  → global single-active-mustering-event guard
+            lock_acquired = self.db.execute(
+                text("SELECT pg_try_advisory_xact_lock(:lock_id)"),
+                {"lock_id": _MUSTER_START_LOCK_ID},
+            ).scalar()
+            if not lock_acquired:
+                raise ValueError("Another mustering event is being started. Please try again in a moment.")
+
+            active_event = self.db.query(MusteringEvent).filter(MusteringEvent.status == 0).first()
             if active_event:
                 raise ValueError("An active mustering event already exists. End it before starting a new one.")
 
@@ -117,11 +158,59 @@ class MusteringService:
                     last_punch_area=emp.get('current_zone_name'),
                 ))
 
-            # Activate mustering readers for all selected zones
-            for zid in zone_ids:
-                self._set_mustering_readers(zid, True)
-
+            # Commit the event and expected roster first so that reader activation
+            # failures cannot roll back the event. Personnel accountability matters
+            # more than device commands — a muster must start even if a reader's
+            # serial number is misconfigured.
             self.db.commit()
+
+            # Reset zone TILE counts for all non-muster-point zones so zone tiles
+            # correctly show 0 (everyone should be evacuating to muster points).
+            #
+            # IMPORTANT: We deliberately do NOT clear Personnel.current_zone_id.
+            # That FK is the rescue intelligence — if someone does not scan at a
+            # muster point, their current_zone_id still points to the last zone
+            # they badged into, which is where a rescue team should search first.
+            # The last_punch_area field in MusteringLog already snapshots the zone
+            # name at event start for historical accuracy; current_zone_id gives
+            # the live queryable FK for grouping missing persons by search zone.
+            try:
+                muster_zone_ids = [
+                    row[0] for row in self.db.query(Zone.id).filter(
+                        Zone.zone_type == 'MUSTER_POINT'
+                    ).all()
+                ]
+                zone_filter = Zone.current_occupancy > 0
+                if muster_zone_ids:
+                    zone_filter = and_(zone_filter, ~Zone.id.in_(muster_zone_ids))
+                self.db.query(Zone).filter(zone_filter).update(
+                    {'current_occupancy': 0, 'current_personnel_count': 0},
+                    synchronize_session=False
+                )
+                self.db.commit()
+                logger.info(f"Zone tile counts reset for muster event {event.id} "
+                            f"(Personnel.current_zone_id preserved for rescue tracking)")
+            except Exception as occ_err:
+                logger.warning(f"Could not reset zone tile counts: {occ_err}")
+                try:
+                    self.db.rollback()
+                except Exception:
+                    pass
+
+            # Activate mustering readers for all selected zones (best-effort).
+            for zid in zone_ids:
+                try:
+                    self._set_mustering_readers(zid, True)
+                except Exception as reader_err:
+                    logger.warning(
+                        f"Could not activate mustering reader for zone {zid}: {reader_err} — "
+                        f"event already committed, continuing"
+                    )
+                    # Reset the session in case the transaction is now aborted
+                    try:
+                        self.db.rollback()
+                    except Exception:
+                        pass
 
             zone_names = [z.name for z in zones]
             logger.info(
@@ -153,23 +242,57 @@ class MusteringService:
             
             if event.status != 0:
                 raise ValueError(f"Event {event_id} is not active")
-            
-            # Calculate final headcount
-            headcount = self.get_event_headcount(event_id)
-            
-            # Update event
+
+            # Close the event FIRST and commit. process_mustering_punch() only
+            # attributes punches to events with status==0, so once this commits no
+            # new punch can change the counts. Computing the final headcount BEFORE
+            # the flip (the previous order) left a race window where a punch landing
+            # between the read and the commit was silently overwritten by the
+            # absolute-value write below.
             event.status = 1  # Completed
             event.end_time = datetime.utcnow()
+            self.db.commit()
+
+            # Now that the event is closed, compute the authoritative final headcount
+            # and persist it. No concurrent punch can race this read anymore.
+            headcount = self.get_event_headcount(event_id)
             event.total_safe = headcount['total_safe']
             event.total_missing = headcount['total_missing']
             event.total_injured = headcount['total_injured']
-            
-            # Reset mustering readers for all zones covered by this event
-            for zid in (event.zone_ids or ([event.zone_id] if event.zone_id else [])):
-                self._set_mustering_readers(zid, False)
-            
             self.db.commit()
-            
+
+            # Clear zone occupancy counters — after a muster event the accumulated
+            # counts during the emergency are no longer meaningful; readers will
+            # repopulate them as personnel badge back through zone gates.
+            try:
+                self.db.query(Zone).filter(Zone.current_occupancy > 0).update(
+                    {'current_occupancy': 0, 'current_personnel_count': 0},
+                    synchronize_session=False,
+                )
+                self.db.commit()
+                logger.info(f"Zone occupancy counters cleared after event {event_id} ended")
+            except Exception as clr_err:
+                logger.warning(f"Could not clear zone occupancy after event end: {clr_err}")
+                try:
+                    self.db.rollback()
+                except Exception:
+                    pass
+
+            # Reset mustering readers (best-effort — bad serial numbers must not
+            # prevent the event from being marked complete).
+            for zid in (event.zone_ids or ([event.zone_id] if event.zone_id else [])):
+                try:
+                    self._set_mustering_readers(zid, False)
+                except Exception as reader_err:
+                    logger.warning(
+                        f"Could not deactivate mustering reader for zone {zid}: {reader_err} — "
+                        f"event already committed as completed"
+                    )
+                    try:
+                        self.db.rollback()
+                    except Exception:
+                        pass
+
             logger.info(f"Mustering event {event_id} ended")
             
             return {
@@ -222,14 +345,18 @@ class MusteringService:
             if not zone:
                 raise ValueError(f"No mustering zone found for device {device_sn}")
             
-            # Find active event
+            # Find active event — check both the primary zone_id and the JSONB zone_ids
+            # array so that punches at secondary muster stations are correctly captured.
             event = self.db.query(MusteringEvent).filter(
                 and_(
-                    MusteringEvent.zone_id == zone.id,
+                    or_(
+                        MusteringEvent.zone_id == zone.id,
+                        MusteringEvent.zone_ids.contains([zone.id]),
+                    ),
                     MusteringEvent.status == 0  # Active
                 )
             ).first()
-            
+
             if not event:
                 raise ValueError(f"No active mustering event for zone {zone.id}")
             
@@ -249,13 +376,11 @@ class MusteringService:
                 existing_log.device_alias = device.alias
                 existing_log.status = 1  # Safe
                 
-                # Update event counts
+                # Update event counts atomically
                 if old_status == 0:  # Was missing
-                    event.total_safe += 1
-                    event.total_missing -= 1
+                    self._adjust_event_counters(event.id, delta_safe=+1, delta_missing=-1)
                 elif old_status == 2:  # Was injured
-                    event.total_safe += 1
-                    event.total_injured -= 1
+                    self._adjust_event_counters(event.id, delta_safe=+1, delta_injured=-1)
                     
             else:
                 # Create new log
@@ -275,12 +400,11 @@ class MusteringService:
                 )
                 self.db.add(log)
                 
-                # Update event counts
-                event.total_safe += 1
-                event.total_missing -= 1
-            
+                # Update event counts atomically
+                self._adjust_event_counters(event.id, delta_safe=+1, delta_missing=-1)
+
             self.db.commit()
-            
+
             logger.info(f"Processed mustering punch for {emp_code} at {device_sn}")
             
             return {
@@ -301,29 +425,54 @@ class MusteringService:
             event = self.db.query(MusteringEvent).filter(MusteringEvent.id == event_id).first()
             if not event:
                 raise ValueError(f"Event {event_id} not found")
-            
-            # Count by status
+
             logs = self.db.query(MusteringLog).filter(MusteringLog.event_id == event_id).all()
-            
+
             total_safe = len([log for log in logs if log.status == 1])
             total_missing = len([log for log in logs if log.status == 0])
             total_injured = len([log for log in logs if log.status == 2])
             total_accounted = total_safe + total_injured
-            
+
             completion_percentage = (total_accounted / event.total_expected * 100) if event.total_expected > 0 else 0
-            
+
+            # Per-zone breakdown: group logs by the zone each person was in at event start
+            zone_tally: dict = {}
+            for log in logs:
+                area = log.last_punch_area or 'Unknown'
+                if area not in zone_tally:
+                    zone_tally[area] = {'zone_name': area, 'zone_id': None, 'total': 0, 'safe': 0, 'missing': 0, 'injured': 0}
+                zone_tally[area]['total'] += 1
+                if log.status == 1:
+                    zone_tally[area]['safe'] += 1
+                elif log.status == 0:
+                    zone_tally[area]['missing'] += 1
+                else:
+                    zone_tally[area]['injured'] += 1
+
+            # Attach zone IDs for front-end linking
+            event_zone_ids = event.zone_ids or ([event.zone_id] if event.zone_id else [])
+            if event_zone_ids:
+                zone_rows = self.db.query(Zone).filter(Zone.id.in_(event_zone_ids)).all()
+                name_to_id = {z.name: z.id for z in zone_rows}
+                for entry in zone_tally.values():
+                    entry['zone_id'] = name_to_id.get(entry['zone_name'])
+
+            zone_breakdown = sorted(zone_tally.values(), key=lambda x: x['missing'], reverse=True)
+
             return {
                 "event_id": event_id,
                 "zone_id": event.zone_id,
+                "zone_ids": event_zone_ids,
                 "total_expected": event.total_expected,
                 "total_safe": total_safe,
                 "total_missing": total_missing,
                 "total_injured": total_injured,
                 "total_accounted": total_accounted,
                 "completion_percentage": round(completion_percentage, 2),
+                "zone_breakdown": zone_breakdown,
                 "last_updated": datetime.utcnow().isoformat()
             }
-            
+
         except Exception as e:
             logger.error(f"Error getting event headcount: {e}")
             raise
@@ -353,17 +502,30 @@ class MusteringService:
             raise
     
     def get_event_logs(self, event_id: int, status: Optional[int] = None) -> List[Dict[str, Any]]:
-        """Get logs for a mustering event"""
+        """Get logs for a mustering event.
+
+        For MISSING personnel (status=0), the response includes last_known_zone
+        (live, from Personnel.current_zone_id) so rescue teams know exactly which
+        zone to search. This relies on current_zone_id NOT being cleared at muster
+        start — see start_mustering_event for the reasoning.
+        """
         try:
-            query = self.db.query(MusteringLog).filter(MusteringLog.event_id == event_id)
-            
+            query = (
+                self.db.query(MusteringLog, Personnel, Zone)
+                .outerjoin(Personnel, Personnel.emp_code == MusteringLog.emp_code)
+                .outerjoin(Zone, Zone.id == Personnel.current_zone_id)
+                .filter(MusteringLog.event_id == event_id)
+            )
+
             if status is not None:
                 query = query.filter(MusteringLog.status == status)
-            
-            logs = query.order_by(MusteringLog.check_time.desc()).all()
-            
-            return [
-                {
+
+            rows = query.order_by(MusteringLog.check_time.desc()).all()
+
+            result = []
+            for log, person, zone in rows:
+                is_missing = log.status == 0
+                result.append({
                     "id": log.id,
                     "emp_code": log.emp_code,
                     "emp_name": log.emp_name,
@@ -372,11 +534,15 @@ class MusteringService:
                     "device_sn": log.device_sn,
                     "device_alias": getattr(log, 'device_alias', None),
                     "last_punch_area": getattr(log, 'last_punch_area', None),
+                    # Rescue intelligence — live zone FK, preserved through the event.
+                    # Only meaningful for MISSING personnel (safe/injured are at muster point).
+                    "last_known_zone_id": person.current_zone_id if person and is_missing else None,
+                    "last_known_zone": zone.name if zone and is_missing else None,
+                    "last_known_zone_code": zone.code if zone and is_missing else None,
                     "status": log.status,
-                }
-                for log in logs
-            ]
-            
+                })
+            return result
+
         except Exception as e:
             logger.error(f"Error getting event logs: {e}")
             raise
@@ -616,29 +782,30 @@ class MusteringService:
             old_status = log.status
             log.status = status
             log.check_time = datetime.utcnow()
-            
-            # Update event counts
-            event = self.db.query(MusteringEvent).filter(MusteringEvent.id == event_id).first()
-            
-            if old_status == 0 and status == 1:  # Missing -> Safe
-                event.total_safe += 1
-                event.total_missing -= 1
+
+            # Compute counter deltas and apply atomically
+            delta_safe = delta_missing = delta_injured = 0
+            if old_status == 0 and status == 1:    # Missing -> Safe
+                delta_safe, delta_missing = +1, -1
             elif old_status == 0 and status == 2:  # Missing -> Injured
-                event.total_injured += 1
-                event.total_missing -= 1
+                delta_injured, delta_missing = +1, -1
             elif old_status == 1 and status == 0:  # Safe -> Missing
-                event.total_safe -= 1
-                event.total_missing += 1
+                delta_safe, delta_missing = -1, +1
             elif old_status == 1 and status == 2:  # Safe -> Injured
-                event.total_injured += 1
-                event.total_safe -= 1
+                delta_injured, delta_safe = +1, -1
             elif old_status == 2 and status == 0:  # Injured -> Missing
-                event.total_injured -= 1
-                event.total_missing += 1
+                delta_injured, delta_missing = -1, +1
             elif old_status == 2 and status == 1:  # Injured -> Safe
-                event.total_safe += 1
-                event.total_injured -= 1
-            
+                delta_safe, delta_injured = +1, -1
+
+            if any([delta_safe, delta_missing, delta_injured]):
+                self._adjust_event_counters(
+                    event_id,
+                    delta_safe=delta_safe,
+                    delta_missing=delta_missing,
+                    delta_injured=delta_injured,
+                )
+
             self.db.commit()
             
             logger.info(f"Marked {emp_code} as {status} in event {event_id}")
@@ -657,23 +824,38 @@ class MusteringService:
             raise
     
     def _calculate_expected_personnel(self, zone_ids: List[int]) -> List[Dict[str, Any]]:
-        """Return all personnel currently located in any of the given zones.
+        """Return personnel expected to muster for the given work zones.
 
-        Source of truth: Personnel.current_zone_id, which is maintained by the
-        access-control system (gangway/helideck reader sets it on entry/exit).
-        T&A is not consulted — it tracks shift duration, not physical location.
+        Strategy (two-tier):
+        1. Primary: personnel whose current_zone_id is in the selected zones — set
+           by access-control readers when someone badges through a zone gate.
+        2. Fallback: if no zone-assigned personnel are found (readers not yet
+           updating current_zone_id, or zone IDs are muster points), fall back to
+           ALL personnel with is_onboard=True.  This ensures the expected list is
+           never empty on a live offshore installation where people are present but
+           readers haven't been fully configured.
         """
         try:
-            rows = (
-                self.db.query(Personnel, PersonnelEmployee, Zone)
-                .outerjoin(PersonnelEmployee, Personnel.emp_code == PersonnelEmployee.emp_code)
-                .outerjoin(Zone, Zone.id == Personnel.current_zone_id)
-                .filter(
-                    Personnel.current_zone_id.in_(zone_ids),
-                    Personnel.is_active == True,
+            def _build_rows(filter_clause):
+                return (
+                    self.db.query(Personnel, PersonnelEmployee, Zone)
+                    .outerjoin(PersonnelEmployee, Personnel.emp_code == PersonnelEmployee.emp_code)
+                    .outerjoin(Zone, Zone.id == Personnel.current_zone_id)
+                    .filter(filter_clause, Personnel.is_active == True)
+                    .all()
                 )
-                .all()
-            )
+
+            rows = _build_rows(Personnel.current_zone_id.in_(zone_ids))
+
+            used_fallback = False
+            if not rows:
+                logger.warning(
+                    "Zones %s: no personnel have current_zone_id set — "
+                    "falling back to all is_onboard=True personnel",
+                    zone_ids,
+                )
+                rows = _build_rows(Personnel.is_onboard == True)
+                used_fallback = True
 
             expected = []
             for person, bio_emp, zone in rows:
@@ -696,8 +878,8 @@ class MusteringService:
                 })
 
             logger.info(
-                "Zones %s: %d personnel currently present will be expected to muster",
-                zone_ids, len(expected)
+                "Zones %s: %d personnel expected to muster (fallback=%s)",
+                zone_ids, len(expected), used_fallback,
             )
             return expected
 
@@ -738,7 +920,28 @@ class MusteringService:
                     logger.info(f"No AccDoor row for {reader_sn} — skipping door record update")
 
                 command = 1 if mustering_mode else 0
-                logger.info(f"Queuing SET_MUSTERING_MODE={command} for {reader_sn}")
+                # Verify the terminal exists in iclock_terminal before inserting a
+                # devcmd row — the FK constraint will reject unknown serial numbers.
+                # This can happen when a zone.reader_sn points to a deleted or
+                # never-registered terminal; skip silently rather than aborting.
+                terminal_exists = self.db.query(IClockTerminal).filter(
+                    IClockTerminal.sn == reader_sn
+                ).first()
+                if not terminal_exists:
+                    logger.warning(
+                        f"Terminal {reader_sn!r} not found in iclock_terminal — "
+                        f"skipping SET MUSTERING MODE devcmd"
+                    )
+                    continue
+                self.db.execute(text("""
+                    INSERT INTO iclock_devcmd (sn, cmd_content, status, cmd_commit_time)
+                    VALUES (:sn, :cmd, 0, :now)
+                """), {
+                    'sn': reader_sn,
+                    'cmd': f"SET MUSTERING MODE={command}",
+                    'now': datetime.utcnow(),
+                })
+                logger.info(f"Queued SET MUSTERING MODE={command} for reader {reader_sn}")
 
             self.db.commit()
 

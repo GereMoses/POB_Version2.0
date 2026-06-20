@@ -96,6 +96,10 @@ api_router.include_router(biometric_router, tags=["Biometric Management"])
 from .zkteco_direct import router as zkteco_direct_router
 api_router.include_router(zkteco_direct_router, prefix="/zkteco", tags=["ZKTeco Direct IP"])
 
+# Device Auto-Discovery (pending ADMS approvals + on-demand network scan)
+from .device_discovery import router as device_discovery_router
+api_router.include_router(device_discovery_router, tags=["Device Auto-Discovery"])
+
 # System & Health
 api_router.include_router(health_router, prefix="/health", tags=["Health Checks"])
 api_router.include_router(notifications_router, prefix="/notifications", tags=["Notifications"])
@@ -210,6 +214,55 @@ try:
     direct_router.include_router(device_ws_router, tags=["Device WebSocket"])
 except Exception as e:
     _logger.warning(f"Device WebSocket disabled: {e}")
+
+# Compliance email — manual trigger + preview
+try:
+    from .compliance_email_api import router as compliance_email_router
+    direct_router.include_router(compliance_email_router, tags=["Compliance Email"])
+except Exception as e:
+    _logger.warning(f"Compliance Email API disabled: {e}")
+
+# Document management — file upload for certifications, permits, medical records
+try:
+    from .documents import router as documents_router
+    api_router.include_router(documents_router, tags=["Document Management"])
+except Exception as e:
+    _logger.warning(f"Documents API disabled: {e}")
+
+# MFA/2FA — TOTP setup and verification
+try:
+    from .mfa import router as mfa_router
+    api_router.include_router(mfa_router, tags=["MFA/2FA"])
+except Exception as e:
+    _logger.warning(f"MFA API disabled: {e}")
+
+# Global search — cross-module entity lookup
+try:
+    from .search import router as search_router
+    api_router.include_router(search_router, tags=["Global Search"])
+except Exception as e:
+    _logger.warning(f"Global Search API disabled: {e}")
+
+# Session management — view and revoke active user sessions
+try:
+    from .sessions import router as sessions_router
+    direct_router.include_router(sessions_router, tags=["Sessions"])
+except Exception as e:
+    _logger.warning(f"Sessions API disabled: {e}")
+
+# Audit trail — query base_operationlog
+try:
+    from .audit import router as audit_router
+    direct_router.include_router(audit_router, tags=["Audit Trail"])
+except Exception as e:
+    _logger.warning(f"Audit API disabled: {e}")
+
+# Reports — PDF/CSV download
+try:
+    from .reports import router as reports_router
+    direct_router.include_router(reports_router, tags=["PDF Reports"])
+except Exception as e:
+    _logger.warning(f"Reports (PDF) API disabled: {e}")
 
 # NOTE: mustering_emergency_api, qr_codes exist as files but are intentionally
 # not registered — they are unfinished modules. Register when complete.

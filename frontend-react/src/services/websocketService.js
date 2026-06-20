@@ -6,7 +6,8 @@
 import { message } from 'antd';
 import { useState, useEffect, useCallback } from 'react';
 
-const _wsBase = () => `ws://${window.location.hostname}:8000`;
+const _wsBase = () =>
+  `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}`;
 const _token = () =>
   localStorage.getItem('token') || sessionStorage.getItem('token') || '';
 

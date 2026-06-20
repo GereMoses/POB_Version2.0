@@ -70,13 +70,21 @@ import {
     FullscreenExitOutlined,
     EyeOutlined,
     EyeInvisibleOutlined,
+    GlobalOutlined,
+    MenuFoldOutlined,
+    MenuUnfoldOutlined,
+    SearchOutlined,
+    TrophyOutlined,
 } from '@ant-design/icons';
 import axios from 'axios';
 import CustomReportBuilder from './components/CustomReportBuilder';
 import { AgGridReact } from 'ag-grid-react';
 import 'ag-grid-community/styles/ag-grid.css';
 import 'ag-grid-community/styles/ag-theme-alpine.css';
-import { Bar, Line, Pie, Column } from '@ant-design/charts';
+import {
+  BarChart, Bar, LineChart, Line, PieChart, Pie, Cell,
+  XAxis, YAxis, CartesianGrid, Tooltip as RechartTooltip, Legend, ResponsiveContainer,
+} from 'recharts';
 import dayjs from 'dayjs';
 
 const { Header, Sider, Content } = Layout;
@@ -101,6 +109,7 @@ const Reports = () => {
   const [favorites, setFavorites] = useState([]);
   const [presets, setPresets] = useState([]);
   const [departments, setDepartments] = useState([]);
+  const [zones, setZones] = useState([]);
   const [schedules, setSchedules] = useState([]);
 
   // Enhanced features state
@@ -131,6 +140,18 @@ const Reports = () => {
 
   // Report categories with BioTime 9.5 structure
   const reportCategories = [
+    {
+      key: 'pob_ops',
+      title: 'POB Operations',
+      icon: <GlobalOutlined />,
+      reports: [
+        { key: 'pob.daily_manifest',         title: 'Daily Manifest',           description: 'Current onboard personnel — who is on the platform right now, by zone and company' },
+        { key: 'pob.crew_change',            title: 'Crew Change',              description: 'Personnel who mobilized or demobilized on a given date' },
+        { key: 'pob.rotation_overdue',       title: 'Rotation Overdue',         description: 'Personnel who have exceeded their rotation threshold (default 28 days)' },
+        { key: 'pob.zone_occupancy_history', title: 'Zone Occupancy History',   description: 'Daily check-in and check-out counts per zone over a date range' },
+        { key: 'pob.headcount_by_company',   title: 'Headcount by Company',     description: 'Onboard headcount broken down by company, department and personnel type' },
+      ]
+    },
     {
       key: 'personnel',
       title: 'Personnel',
@@ -291,6 +312,7 @@ const Reports = () => {
     loadFavorites();
     loadPresets();
     loadDepartments();
+    loadZones();
     loadSchedules();
   }, []);
 
@@ -350,6 +372,22 @@ const Reports = () => {
       }
     } catch (error) {
       console.error('Error loading departments:', error);
+    }
+  };
+
+  // Load zones for POB reports
+  const loadZones = async () => {
+    try {
+      const response = await fetch('/api/v1/zones/', {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+      });
+      if (response.ok) {
+        const data = await response.json();
+        const zList = Array.isArray(data) ? data : (data.results || data.zones || data.data || []);
+        setZones(zList.filter(z => z && z.id).map(z => ({ id: z.id, name: z.name || `Zone ${z.id}` })));
+      }
+    } catch (error) {
+      console.error('Error loading zones:', error);
     }
   };
 
@@ -695,49 +733,111 @@ const Reports = () => {
     }));
   };
 
-  // Render chart based on type
+  // Derive chart data from report rows when the backend sends no chart_data
+  const getAutoChartData = () => {
+    if (!reportData?.data?.length || !columns?.length) return null;
+    const labelCol = columns.find(c => !c.type || c.type === 'string' || c.type === 'text');
+    const valueCol = columns.find(c => c.type === 'number' || c.type === 'currency' || c.type === 'integer');
+    if (!labelCol || !valueCol) return null;
+    return reportData.data
+      .slice(0, 20)
+      .map(row => ({
+        category: String(row[labelCol.field] ?? ''),
+        value: Number(row[valueCol.field] ?? 0),
+      }))
+      .filter(d => d.category);
+  };
+
+  // Render chart based on type — using recharts (consistent with rest of app)
   const renderChart = () => {
-    if (!chartData || !showChart) return null;
+    if (!showChart) return null;
 
-    const labels = chartData.labels || [];
-    const dataset = chartData.datasets?.[0] || {};
-    const values = dataset.data || [];
-    if (!labels.length) return null;
+    let data;
+    const labels = chartData?.labels || [];
+    if (labels.length > 0) {
+      const dataset = chartData.datasets?.[0] || {};
+      const values = dataset.data || [];
+      data = labels.map((label, i) => ({
+        category: String(label || ''),
+        value: Number(values[i] ?? 0),
+      }));
+    } else {
+      data = getAutoChartData();
+    }
+    if (!data?.length) return null;
 
-    // Convert Chart.js {labels, datasets} → Ant Design Charts [{category, value}]
-    const data = labels.map((label, i) => ({
-      category: String(label || ''),
-      value: Number(values[i] ?? 0),
-    }));
+    const COLORS = ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6',
+                    '#06B6D4', '#F97316', '#84CC16', '#EC4899', '#6366F1'];
 
-    // G2 v5 (@ant-design/plots v2): labels use position 'outside', no {template} strings
-    const baseConfig = {
+    const commonProps = {
       data,
-      xField: 'category',
-      yField: 'value',
-      label: { position: 'outside', style: { fill: '#555', fontSize: 11 } },
+      margin: { top: 10, right: 20, left: 10, bottom: 60 },
+    };
+
+    const xAxisProps = {
+      dataKey: 'category',
+      tick: { fontSize: 11, fill: '#555' },
+      angle: -30,
+      textAnchor: 'end',
+      interval: 0,
     };
 
     switch (chartType) {
       case 'line':
-        return <Line {...baseConfig} />;
+        return (
+          <ResponsiveContainer width="100%" height={300}>
+            <LineChart {...commonProps}>
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis {...xAxisProps} />
+              <YAxis tick={{ fontSize: 11 }} />
+              <RechartTooltip />
+              <Legend />
+              <Line type="monotone" dataKey="value" stroke="#3B82F6" strokeWidth={2} dot={{ r: 4 }} />
+            </LineChart>
+          </ResponsiveContainer>
+        );
       case 'pie':
         return (
-          <Pie
-            data={data}
-            angleField="value"
-            colorField="category"
-            label={{
-              position: 'outside',
-              text: (d) => `${d.category}: ${d.value}`,
-            }}
-            legend={{ position: 'bottom' }}
-          />
+          <ResponsiveContainer width="100%" height={320}>
+            <PieChart>
+              <Pie
+                data={data}
+                dataKey="value"
+                nameKey="category"
+                cx="50%"
+                cy="45%"
+                outerRadius={110}
+                label={({ category, percent }) => `${category} (${(percent * 100).toFixed(0)}%)`}
+                labelLine
+              >
+                {data.map((_, i) => (
+                  <Cell key={i} fill={COLORS[i % COLORS.length]} />
+                ))}
+              </Pie>
+              <RechartTooltip formatter={(v) => v.toLocaleString()} />
+              <Legend />
+            </PieChart>
+          </ResponsiveContainer>
         );
       case 'bar':
       case 'heatmap':
       default:
-        return <Bar {...baseConfig} />;
+        return (
+          <ResponsiveContainer width="100%" height={300}>
+            <BarChart {...commonProps}>
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis {...xAxisProps} />
+              <YAxis tick={{ fontSize: 11 }} />
+              <RechartTooltip formatter={(v) => v.toLocaleString()} />
+              <Legend />
+              <Bar dataKey="value" name={chartData?.datasets?.[0]?.label || 'Value'} radius={[4, 4, 0, 0]}>
+                {data.map((_, i) => (
+                  <Cell key={i} fill={COLORS[i % COLORS.length]} />
+                ))}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        );
     }
   };
 
@@ -960,6 +1060,115 @@ const Reports = () => {
       );
     }
 
+    // POB Operations filter bar
+    if (reportKey.startsWith('pob.')) {
+      const isCrewChange   = reportKey === 'pob.crew_change';
+      const isManifest     = reportKey === 'pob.daily_manifest';
+      const isOverdue      = reportKey === 'pob.rotation_overdue';
+      const isOccHistory   = reportKey === 'pob.zone_occupancy_history';
+      const isHeadByCompany = reportKey === 'pob.headcount_by_company';
+      return (
+        <Card size="small" style={{ marginBottom: 16 }}>
+          <Row gutter={[16, 8]} align="middle" wrap>
+            {/* Date picker — single date for crew change */}
+            {isCrewChange && (
+              <Col>
+                <DatePicker
+                  placeholder="Crew Change Date"
+                  value={filters.date ? dayjs(filters.date) : dayjs()}
+                  onChange={(d) => handleFilterChange('date', d ? d.format('YYYY-MM-DD') : undefined)}
+                />
+              </Col>
+            )}
+            {/* Date range for zone occupancy history */}
+            {isOccHistory && (
+              <Col>
+                <RangePicker
+                  placeholder={['Date From', 'Date To']}
+                  value={filters.date_from ? [dayjs(filters.date_from), dayjs(filters.date_to || filters.date_from)] : null}
+                  onChange={(dates) => {
+                    if (dates) {
+                      const nf = { ...filters, date_from: dates[0].format('YYYY-MM-DD'), date_to: dates[1].format('YYYY-MM-DD') };
+                      setFilters(nf); if (selectedReport) loadReportData(selectedReport.key, nf);
+                    } else {
+                      const nf = { ...filters }; delete nf.date_from; delete nf.date_to;
+                      setFilters(nf); if (selectedReport) loadReportData(selectedReport.key, nf);
+                    }
+                  }}
+                />
+              </Col>
+            )}
+            {/* Change type for crew change */}
+            {isCrewChange && (
+              <Col>
+                <Select placeholder="All Changes" style={{ width: 160 }} allowClear
+                  onChange={(v) => handleFilterChange('change_type', v)}>
+                  <Option value="MOBILIZE">Mobilize (Check-In)</Option>
+                  <Option value="DEMOBILIZE">Demobilize (Check-Out)</Option>
+                </Select>
+              </Col>
+            )}
+            {/* Zone filter for manifest and occupancy history */}
+            {(isManifest || isOccHistory) && (
+              <Col>
+                <Select placeholder="All Zones" style={{ width: 160 }} allowClear showSearch
+                  filterOption={(inp, opt) => opt.children.toLowerCase().includes(inp.toLowerCase())}
+                  onChange={(v) => handleFilterChange('zone_id', v)}>
+                  {zones.map(z => <Option key={z.id} value={z.id}>{z.name}</Option>)}
+                </Select>
+              </Col>
+            )}
+            {/* Department filter */}
+            {(isManifest || isOverdue) && (
+              <Col>
+                <Select placeholder="Department" style={{ width: 150 }} allowClear showSearch
+                  filterOption={(inp, opt) => opt.children.toLowerCase().includes(inp.toLowerCase())}
+                  onChange={(v) => handleFilterChange('department', v)}>
+                  {departments.map(d => <Option key={d} value={d}>{d}</Option>)}
+                </Select>
+              </Col>
+            )}
+            {/* Personnel type for manifest */}
+            {isManifest && (
+              <Col>
+                <Select placeholder="Type" style={{ width: 130 }} allowClear
+                  onChange={(v) => handleFilterChange('personnel_type', v)}>
+                  <Option value="STAFF">Staff</Option>
+                  <Option value="CONTRACTOR">Contractor</Option>
+                  <Option value="VISITOR">Visitor</Option>
+                </Select>
+              </Col>
+            )}
+            {/* Company filter (text) */}
+            {(isManifest || isOverdue || isHeadByCompany) && (
+              <Col>
+                <Input placeholder="Company" style={{ width: 160 }} allowClear
+                  onPressEnter={(e) => handleFilterChange('company', e.target.value || undefined)}
+                  onBlur={(e) => handleFilterChange('company', e.target.value || undefined)}
+                />
+              </Col>
+            )}
+            {/* Threshold days for rotation overdue */}
+            {isOverdue && (
+              <Col>
+                <Input
+                  type="number" min={1} placeholder="Threshold (days)" style={{ width: 160 }}
+                  defaultValue={28}
+                  onPressEnter={(e) => handleFilterChange('threshold_days', parseInt(e.target.value) || 28)}
+                  onBlur={(e) => handleFilterChange('threshold_days', parseInt(e.target.value) || 28)}
+                />
+              </Col>
+            )}
+            <Col>
+              <Button type="primary" onClick={() => { if (selectedReport) loadReportData(selectedReport.key, filters); }}>
+                Run Report
+              </Button>
+            </Col>
+          </Row>
+        </Card>
+      );
+    }
+
     // Attendance filter bar
     if (isAttReport) {
       const isSingleDate = ATT_SINGLE_DATE.includes(reportKey);
@@ -1133,105 +1342,67 @@ const Reports = () => {
     );
   };
 
-  // Render action bar
+  // Compact dark action toolbar
   const renderActionBar = () => (
     <Card size="small" style={{ marginBottom: 16 }}>
-      <Row gutter={16} justify="space-between" align="middle" wrap>
-        <Col>
-          <Space wrap>
-            <Button icon={<DownloadOutlined />} onClick={() => setExportModalVisible(true)}>Export</Button>
-            <Button icon={<MailOutlined />} onClick={() => setScheduleModalVisible(true)}>Schedule</Button>
-            <Divider type="vertical" />
-            {/* View mode: Table | Timeline */}
-            <Segmented
-              value={viewMode}
-              onChange={setViewMode}
-              options={[
-                { value: 'table',    label: <span><TableOutlined /> Table</span> },
-                ...(isTimelineReport() ? [{ value: 'timeline', label: <span><HistoryOutlined /> Timeline</span> }] : []),
-              ]}
-              size="small"
-            />
-            {/* Chart toggle + type selector */}
-            <Button
-              size="small"
-              icon={showChart ? <EyeInvisibleOutlined /> : <BarChartOutlined />}
-              type={showChart ? 'primary' : 'default'}
-              onClick={() => setShowChart(v => !v)}
-            >
-              {showChart ? 'Hide Chart' : 'Chart'}
-            </Button>
-            {showChart && (
-              <Segmented
-                value={chartType}
-                onChange={setChartType}
-                size="small"
-                options={[
-                  { value: 'bar',  label: <BarChartOutlined /> },
-                  { value: 'line', label: <LineChartOutlined /> },
-                  { value: 'pie',  label: <PieChartOutlined /> },
-                ]}
-              />
-            )}
-            <Button icon={<SettingOutlined />} size="small" onClick={() => setColumnModalVisible(true)}>Columns</Button>
-          </Space>
-        </Col>
-        <Col>
-          <Space>
-            <Tooltip title="Auto-refresh every 30 seconds">
-              <Switch
-                checkedChildren="Auto"
-                unCheckedChildren="Manual"
-                checked={autoRefreshOn}
-                onChange={(checked) => {
-                  setAutoRefreshOn(checked);
-                  message.info(checked ? 'Auto-refresh ON (30s)' : 'Auto-refresh OFF');
-                }}
-                size="small"
-              />
-            </Tooltip>
-            <Button
-              icon={<ReloadOutlined />}
-              size="small"
-              loading={loading}
-              onClick={() => loadReportData(selectedReport?.key, filters)}
-            >
-              Refresh
-            </Button>
-            <Tooltip title={fullscreen ? 'Exit fullscreen' : 'Fullscreen'}>
-              <Button
-                size="small"
-                icon={fullscreen ? <FullscreenExitOutlined /> : <FullscreenOutlined />}
-                onClick={() => setFullscreen(v => !v)}
-              />
-            </Tooltip>
-          </Space>
-        </Col>
-      </Row>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+        <Space size={8} wrap>
+          <Button size="small" icon={<DownloadOutlined />} onClick={() => setExportModalVisible(true)}>Export</Button>
+          <Button size="small" icon={<MailOutlined />} onClick={() => setScheduleModalVisible(true)}>Schedule</Button>
+          <Divider type="vertical" />
+          <Segmented
+            value={viewMode}
+            onChange={setViewMode}
+            size="small"
+            options={[
+              { value: 'table',    label: <span><TableOutlined /> Table</span> },
+              ...(isTimelineReport() ? [{ value: 'timeline', label: <span><HistoryOutlined /> Timeline</span> }] : []),
+            ]}
+          />
+          <Button
+            size="small"
+            icon={showChart ? <EyeInvisibleOutlined /> : <BarChartOutlined />}
+            type={showChart ? 'primary' : 'default'}
+            onClick={() => setShowChart(v => !v)}
+          >
+            {showChart ? 'Hide Chart' : 'Chart'}
+          </Button>
+          <Button size="small" icon={<SettingOutlined />} onClick={() => setColumnModalVisible(true)}>Columns</Button>
+        </Space>
+        <Space size={8}>
+          <Tooltip title="Auto-refresh every 30 seconds">
+            <Switch checkedChildren="Auto" unCheckedChildren="Manual" checked={autoRefreshOn} size="small"
+              onChange={(checked) => { setAutoRefreshOn(checked); message.info(checked ? 'Auto-refresh ON (30s)' : 'Auto-refresh OFF'); }} />
+          </Tooltip>
+          <Button size="small" icon={<ReloadOutlined />} loading={loading} onClick={() => loadReportData(selectedReport?.key, filters)}>Refresh</Button>
+          <Tooltip title={fullscreen ? 'Exit fullscreen' : 'Fullscreen'}>
+            <Button size="small" icon={fullscreen ? <FullscreenExitOutlined /> : <FullscreenOutlined />} onClick={() => setFullscreen(v => !v)} />
+          </Tooltip>
+        </Space>
+      </div>
     </Card>
   );
 
-  // Render summary cards
   const renderSummaryCards = () => {
     if (!reportData?.summary) return null;
-
     const summaryItems = Object.entries(reportData.summary)
-      .filter(([, value]) => value !== null && typeof value !== 'object')
+      .filter(([, v]) => v !== null && typeof v !== 'object')
       .map(([key, value]) => ({
         title: key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()),
-        value: typeof value === 'number' ? value.toLocaleString() : String(value),
-        suffix: typeof value === 'number' && key.includes('rate') ? '%' : ''
+        value: typeof value === 'number' ? value : String(value),
+        suffix: typeof value === 'number' && key.includes('rate') ? '%' : '',
       }));
-
+    if (!summaryItems.length) return null;
     return (
-      <Row gutter={16} style={{ marginBottom: 16 }}>
-        {summaryItems.map((item, index) => (
-          <Col span={6} key={index}>
+      <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
+        {summaryItems.map((item, i) => (
+          <Col xs={12} sm={8} md={6} key={i}>
             <Card size="small">
               <Statistic
                 title={item.title}
                 value={item.value}
                 suffix={item.suffix}
+                valueStyle={{ fontSize: 20 }}
               />
             </Card>
           </Col>
@@ -1241,10 +1412,11 @@ const Reports = () => {
   };
 
   return (
+    <>
     <Layout style={{ height: '100vh' }}>
-      <Sider 
-        width={300} 
-        collapsible 
+      <Sider
+        width={300}
+        collapsible
         collapsed={sidebarCollapsed}
         onCollapse={setSidebarCollapsed}
         style={{ background: '#fff', borderRight: '1px solid #f0f0f0' }}
@@ -1264,7 +1436,7 @@ const Reports = () => {
           {renderSidebarTree()}
         </div>
       </Sider>
-      
+
       <Layout>
         <Header style={{ background: '#fff', padding: '0 24px', borderBottom: '1px solid #f0f0f0' }}>
           <Row justify="space-between" align="middle">
@@ -1279,26 +1451,18 @@ const Reports = () => {
             <Col>
               <Space>
                 <Badge count={favReports.size} color="gold">
-                  <Button
-                    icon={<StarFilled style={{ color: '#faad14' }} />}
-                    onClick={() => setFavDrawerOpen(true)}
-                  >
+                  <Button icon={<StarFilled style={{ color: '#faad14' }} />} onClick={() => setFavDrawerOpen(true)}>
                     Favorites
                   </Button>
                 </Badge>
-                <Button
-                  icon={<PlusOutlined />}
-                  type="primary"
-                  ghost
-                  onClick={() => setActiveTab('custom')}
-                >
+                <Button icon={<PlusOutlined />} type="primary" ghost onClick={() => setActiveTab('custom')}>
                   Custom Builder
                 </Button>
               </Space>
             </Col>
           </Row>
         </Header>
-        
+
         <Content style={{ padding: '24px', overflow: 'auto' }}>
           <Tabs
             activeKey={activeTab}
@@ -1312,13 +1476,15 @@ const Reports = () => {
                     {renderFilterBar()}
                     {renderActionBar()}
                     {renderSummaryCards()}
-                    {showChart && chartData && (
+
+                    {/* Chart — always renders when toggled on; auto-derives data when backend sends none */}
+                    {showChart && (
                       <Card
-                        title="Chart View"
+                        title={<span><BarChartOutlined style={{ marginRight: 8, color: '#1677ff' }} />Chart View</span>}
                         style={{ marginBottom: 16 }}
                         extra={
                           <Segmented
-                            value={chartType}
+                            value={chartType === 'none' ? 'bar' : chartType}
                             onChange={setChartType}
                             size="small"
                             options={[
@@ -1329,22 +1495,27 @@ const Reports = () => {
                           />
                         }
                       >
-                        {renderChart()}
+                        {renderChart() || (
+                          <Empty
+                            image={Empty.PRESENTED_IMAGE_SIMPLE}
+                            description="No chartable data — run a report with numeric columns to see a chart"
+                            style={{ padding: '24px 0' }}
+                          />
+                        )}
                       </Card>
                     )}
+
                     {viewMode === 'timeline' ? (
                       <Card
                         title={<span><HistoryOutlined style={{ marginRight: 8 }} />Event Timeline</span>}
                         extra={<Tag color="blue">{(reportData?.data || []).length} events</Tag>}
                       >
-                        <Spin spinning={loading}>
-                          {renderTimeline()}
-                        </Spin>
+                        <Spin spinning={loading}>{renderTimeline()}</Spin>
                       </Card>
                     ) : (
                       <Card
                         title="Report Data"
-                        extra={reportData?.total ? <Tag>{reportData.total.toLocaleString()} rows</Tag> : null}
+                        extra={reportData?.total != null ? <Tag>{Number(reportData.total).toLocaleString()} rows</Tag> : null}
                       >
                         <Spin spinning={loading}>
                           <div style={{ height: fullscreen ? 'calc(100vh - 380px)' : 520 }} className="ag-theme-alpine">
@@ -1354,7 +1525,7 @@ const Reports = () => {
                               defaultColDef={{ sortable: true, filter: true, resizable: true }}
                               pagination={true}
                               paginationPageSize={50}
-                              domLayout='normal'
+                              domLayout="normal"
                             />
                           </div>
                         </Spin>
@@ -1617,7 +1788,8 @@ const Reports = () => {
           />
         </Content>
       </Layout>
-      
+    </Layout>
+
       {/* Favorites Drawer */}
       <Drawer
         title={<span><StarFilled style={{ color: '#faad14', marginRight: 8 }} />Favourite Reports</span>}
@@ -1675,29 +1847,68 @@ const Reports = () => {
         open={exportModalVisible}
         onCancel={() => setExportModalVisible(false)}
         footer={null}
+        width={480}
       >
-        <Space direction="vertical" style={{ width: '100%' }}>
-          <Button 
-            block 
-            icon={<FilePdfOutlined />}
-            onClick={() => handleExport('pdf')}
-          >
-            Export as PDF
-          </Button>
-          <Button 
-            block 
-            icon={<FileExcelOutlined />}
-            onClick={() => handleExport('xlsx')}
-          >
-            Export as Excel
-          </Button>
-          <Button 
-            block 
-            icon={<FileTextOutlined />}
-            onClick={() => handleExport('csv')}
-          >
-            Export as CSV
-          </Button>
+        <Space direction="vertical" style={{ width: '100%' }} size={16}>
+          {/* Quick Direct Downloads */}
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 600, color: '#6B7A8D', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>
+              Quick Download (Direct PDF/CSV)
+            </div>
+            <Row gutter={[8, 8]}>
+              {[
+                { label: 'Attendance PDF',  url: '/api/v1/reports/attendance/pdf',  icon: <FilePdfOutlined style={{ color: '#EF4444' }} /> },
+                { label: 'Attendance CSV',  url: '/api/v1/reports/attendance/csv',  icon: <FileTextOutlined style={{ color: '#10B981' }} /> },
+                { label: 'Compliance PDF',  url: '/api/v1/reports/compliance/pdf',  icon: <FilePdfOutlined style={{ color: '#EF4444' }} /> },
+                { label: 'Compliance CSV',  url: '/api/v1/reports/compliance/csv',  icon: <FileTextOutlined style={{ color: '#10B981' }} /> },
+                { label: 'POB Report PDF',  url: '/api/v1/reports/pob/pdf',         icon: <FilePdfOutlined style={{ color: '#EF4444' }} /> },
+                { label: 'POB Report CSV',  url: '/api/v1/reports/pob/csv',         icon: <FileTextOutlined style={{ color: '#10B981' }} /> },
+                { label: 'Visitors PDF',    url: '/api/v1/reports/visitors/pdf',    icon: <FilePdfOutlined style={{ color: '#EF4444' }} /> },
+                { label: 'Visitors CSV',    url: '/api/v1/reports/visitors/csv',    icon: <FileTextOutlined style={{ color: '#10B981' }} /> },
+              ].map(item => (
+                <Col span={12} key={item.url}>
+                  <Button
+                    block
+                    icon={item.icon}
+                    size="small"
+                    onClick={() => {
+                      const token = localStorage.getItem('token');
+                      const a = document.createElement('a');
+                      a.href = item.url + (item.url.includes('?') ? '&' : '?') + `_auth=${token}`;
+                      // Use fetch to add auth header and trigger download
+                      fetch(item.url, { headers: { Authorization: `Bearer ${token}` } })
+                        .then(r => r.blob())
+                        .then(blob => {
+                          const url = URL.createObjectURL(blob);
+                          const dl = document.createElement('a');
+                          dl.href = url;
+                          dl.download = item.label.replace(/ /g, '_').toLowerCase() + item.url.split('.').pop();
+                          dl.click();
+                          URL.revokeObjectURL(url);
+                        });
+                    }}
+                    style={{ textAlign: 'left' }}
+                  >
+                    {item.label}
+                  </Button>
+                </Col>
+              ))}
+            </Row>
+          </div>
+
+          <Divider style={{ margin: '4px 0' }} />
+
+          {/* Task-based export for selected report */}
+          <div>
+            <div style={{ fontSize: 12, fontWeight: 600, color: '#6B7A8D', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 8 }}>
+              Export Selected Report
+            </div>
+            <Space direction="vertical" style={{ width: '100%' }}>
+              <Button block icon={<FilePdfOutlined />} onClick={() => handleExport('pdf')}>Export as PDF</Button>
+              <Button block icon={<FileExcelOutlined />} onClick={() => handleExport('xlsx')}>Export as Excel</Button>
+              <Button block icon={<FileTextOutlined />} onClick={() => handleExport('csv')}>Export as CSV</Button>
+            </Space>
+          </div>
         </Space>
       </Modal>
       
@@ -1839,7 +2050,7 @@ const Reports = () => {
           </Form.Item>
         </Form>
       </Modal>
-    </Layout>
+    </>
   );
 };
 

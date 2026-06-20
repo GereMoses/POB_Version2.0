@@ -38,5 +38,7 @@ module.exports = function (app) {
   app.use('/api', backendProxy);   // /api/v1/*, /api/emergency/*, /api/meeting/*, /api/visitor/*, etc.
   app.use('/health', backendProxy);
   app.use('/iclock', backendProxy);
+  app.use('/uploads', backendProxy);  // personnel photos and other uploaded files
+  app.use('/media', backendProxy);    // media files
   app.use(wsProxy);                // /ws/<subpath> only — does NOT intercept CRA HMR at /ws
 };

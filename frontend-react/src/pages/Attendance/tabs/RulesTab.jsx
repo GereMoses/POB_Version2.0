@@ -1,7 +1,7 @@
 import React from 'react';
 import {
   Card, Button, Space, App, Form,
-  Select, InputNumber, Row, Col, Divider,
+  Input, Select, InputNumber, Row, Col, Divider,
   Switch, Tooltip, Spin, Alert, Typography, TimePicker,
 } from 'antd';
 import {
@@ -102,8 +102,7 @@ const RulesTab = () => {
             <Col xs={24} sm={12} md={8}>
               <Form.Item name="grace_period_minutes" label="Grace Period (minutes)"
                 tooltip="Arrivals within this window after shift start are not marked Late">
-                <InputNumber min={0} max={60} style={{ width:'100%' }} size="middle"
-                  addonAfter="min" placeholder="5" />
+                <Space.Compact style={{ width:'100%' }}><InputNumber min={0} max={60} size="middle" placeholder="5" style={{ flex: 1 }} /><Input readOnly value="min" style={{ width: 44, textAlign: 'center' }} size="middle" /></Space.Compact>
               </Form.Item>
             </Col>
             <Col xs={24} sm={12} md={8}>

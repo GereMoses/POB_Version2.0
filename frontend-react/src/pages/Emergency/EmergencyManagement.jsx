@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   Table, Button, Space, Modal, Form, Input, Select, Tag, Popconfirm,
-  Row, Col, Card, App, Tabs, Switch, Alert, DatePicker,
+  Row, Col, Card, Badge, App, Tabs, Switch, Alert, DatePicker,
   Descriptions, Empty, Spin, Divider, Timeline, Progress, Tooltip,
 } from 'antd';
 import {
@@ -1672,7 +1672,7 @@ const EmergencyManagement = ({ embedded = false }) => {
   useEffect(() => {
     const token = localStorage.getItem('token') || '';
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(`${proto}//${window.location.hostname}:8000/api/emergency/ws/emergency/?token=${token}`);
+    const ws = new WebSocket(`${proto}//${window.location.host}/api/emergency/ws/emergency/?token=${token}`);
     wsRef.current = ws;
     ws.onopen  = () => setWsStatus('connected');
     ws.onclose = () => setWsStatus('disconnected');
@@ -1694,76 +1694,48 @@ const EmergencyManagement = ({ embedded = false }) => {
   ];
 
   return (
-    <div style={{ background: '#f0f2f5', minHeight: embedded ? 0 : '100vh', width: '100%' }}>
-      {/* Module Header */}
-      <div style={{
-        background: embedded
-          ? 'white'
-          : isEmergency
-            ? 'linear-gradient(135deg, #820014 0%, #cf1322 60%, #a8071a 100%)'
-            : 'linear-gradient(135deg, #1a0000 0%, #4a0000 50%, #7a0000 100%)',
-        padding: embedded ? 0 : '20px 28px 0',
-        boxShadow: embedded ? 'none' : '0 4px 24px rgba(26,0,0,0.5)',
-        borderBottom: embedded ? '1px solid #f0f0f0' : 'none',
-        transition: 'background 0.5s ease',
-      }}>
-        {/* Full title row — hidden when embedded */}
-        {!embedded && (
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-            <Space size={14}>
-              <div style={{ width: 52, height: 52, borderRadius: 14, flexShrink: 0, background: 'linear-gradient(135deg, rgba(255,255,255,0.2), rgba(255,255,255,0.08))', backdropFilter: 'blur(8px)', border: '1px solid rgba(255,255,255,0.15)', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 4px 20px rgba(0,0,0,0.3)', animation: isEmergency ? 'iconPulse 1.2s infinite' : 'none' }}>
-                <AlertOutlined style={{ color: 'white', fontSize: 24 }} />
+    <div className={embedded ? undefined : 'emergency-module'}>
+      <Card
+        title={!embedded ? (
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', overflow: 'visible' }}>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 16 }}>Emergency Management</div>
+              <div style={{ fontSize: 12, color: '#64748b', fontWeight: 400, marginTop: 2 }}>
+                Real-time emergency response, lockdown and incident control
               </div>
-              <div>
-                <div style={{ color: 'white', fontSize: 21, fontWeight: 800, letterSpacing: '-0.3px', lineHeight: 1.2 }}>Emergency Management</div>
-                <div style={{ color: 'rgba(255,255,255,0.5)', fontSize: 12, marginTop: 3 }}>Real-time emergency response, lockdown and incident control</div>
-              </div>
-            </Space>
-            <Space size={10}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: isEmergency ? 'rgba(255,255,255,0.15)' : 'rgba(255,255,255,0.08)', border: `1px solid ${isEmergency ? 'rgba(255,255,255,0.3)' : 'rgba(255,255,255,0.15)'}`, borderRadius: 10, padding: '7px 14px', backdropFilter: 'blur(4px)' }}>
-                <span style={{ width: 8, height: 8, borderRadius: '50%', background: isEmergency ? '#ff4d4f' : '#52c41a', boxShadow: `0 0 0 3px ${isEmergency ? 'rgba(255,77,79,0.3)' : 'rgba(82,196,26,0.25)'}`, animation: isEmergency ? 'dotPulse 1s infinite' : 'none' }} />
-                <span style={{ color: 'white', fontSize: 12, fontWeight: 700, letterSpacing: '0.04em' }}>{d.system_status || 'NORMAL'}</span>
+            </div>
+            <Space size="middle" style={{ overflow: 'visible' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '3px 10px', borderRadius: 8, background: isEmergency ? '#fff1f0' : '#f6ffed', border: `1px solid ${isEmergency ? '#ffa39e' : '#b7eb8f'}` }}>
+                <span style={{ width: 7, height: 7, borderRadius: '50%', background: isEmergency ? '#ff4d4f' : '#52c41a', animation: isEmergency ? 'emDotPulse 1s infinite' : 'none' }} />
+                <span style={{ fontSize: 11, fontWeight: 700, color: isEmergency ? '#cf1322' : '#389e0d' }}>{d.system_status || 'NORMAL'}</span>
               </div>
               {(d.total_emergencies || 0) > 0 && (
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, background: 'rgba(255,77,79,0.2)', border: '1px solid rgba(255,77,79,0.4)', borderRadius: 10, padding: '7px 14px' }}>
-                  <WarningOutlined style={{ color: '#ff4d4f', fontSize: 12 }} />
-                  <span style={{ color: '#ff4d4f', fontSize: 12, fontWeight: 700 }}>{d.total_emergencies} Active</span>
-                </div>
+                <Badge count={d.total_emergencies} color="#cf1322">
+                  <WarningOutlined style={{ fontSize: 16 }} />
+                </Badge>
               )}
               <Tooltip title={`WebSocket: ${wsStatus}`}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 10, padding: '7px 12px' }}>
-                  <span style={{ width: 7, height: 7, borderRadius: '50%', background: wsColor, boxShadow: wsStatus === 'connected' ? `0 0 5px ${wsColor}` : 'none', animation: wsStatus === 'connected' ? 'dotPulse 2s infinite' : 'none' }} />
-                  <span style={{ color: 'rgba(255,255,255,0.75)', fontSize: 11 }}>{wsStatus === 'connected' ? 'Live' : wsStatus === 'error' ? 'Error' : 'Offline'}</span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                  <span style={{ width: 7, height: 7, borderRadius: '50%', background: wsColor, animation: wsStatus === 'connected' ? 'emDotPulse 2s infinite' : 'none' }} />
+                  <span style={{ fontSize: 11, color: '#64748b' }}>{wsStatus === 'connected' ? 'Live' : wsStatus === 'error' ? 'Error' : 'Offline'}</span>
                 </div>
               </Tooltip>
-              <Button icon={<ReloadOutlined />} onClick={() => refetch()} loading={isLoading} style={{ background: 'rgba(255,255,255,0.1)', border: '1px solid rgba(255,255,255,0.18)', color: 'white', borderRadius: 10 }}>Refresh</Button>
+              <Button icon={<ReloadOutlined />} onClick={() => refetch()} loading={isLoading} size="small">Refresh</Button>
             </Space>
           </div>
-        )}
+        ) : undefined}
+        bordered={!embedded}
+        styles={!embedded ? { header: { overflow: 'visible' } } : { body: { padding: 0 } }}
+      >
+        <Tabs
+          items={tabItems}
+          className="em-tabs-light"
+          size="middle"
+          tabBarStyle={{ marginBottom: 0 }}
+        />
+      </Card>
 
-        {/* Tab bar — always shown */}
-        <Tabs items={tabItems} className={embedded ? 'em-tabs-light' : 'em-root-tabs'} tabBarStyle={{ marginBottom: 0, padding: embedded ? '0 20px' : '0' }} />
-      </div>
-
-      {/* Global CSS */}
       <style>{`
-        /* Tab bar on dark header */
-        .em-root-tabs .ant-tabs-nav { background: transparent !important; }
-        .em-root-tabs .ant-tabs-nav::before { border-color: rgba(255,255,255,0.1) !important; }
-        .em-root-tabs .ant-tabs-tab {
-          color: rgba(255,255,255,0.5) !important;
-          font-weight: 500 !important;
-          padding: 10px 16px !important;
-          margin: 0 1px !important;
-          border-radius: 8px 8px 0 0 !important;
-          transition: all 0.2s !important;
-        }
-        .em-root-tabs .ant-tabs-tab:hover { color: rgba(255,255,255,0.9) !important; background: rgba(255,255,255,0.06) !important; }
-        .em-root-tabs .ant-tabs-tab-active { color: white !important; background: rgba(255,255,255,0.12) !important; font-weight: 700 !important; }
-        .em-root-tabs .ant-tabs-ink-bar { background: #ff4d4f !important; height: 3px !important; border-radius: 2px 2px 0 0 !important; }
-        .em-root-tabs .ant-tabs-content-holder { background: #f0f2f5 !important; }
-
-        /* Tab bar on white header (embedded mode) */
         .em-tabs-light .ant-tabs-nav { background: transparent !important; }
         .em-tabs-light .ant-tabs-nav::before { border-color: #f0f0f0 !important; }
         .em-tabs-light .ant-tabs-tab { color: rgba(0,0,0,0.45) !important; font-weight: 500 !important; padding: 10px 16px !important; margin: 0 1px !important; border-radius: 8px 8px 0 0 !important; transition: all 0.2s !important; }
@@ -1771,24 +1743,11 @@ const EmergencyManagement = ({ embedded = false }) => {
         .em-tabs-light .ant-tabs-tab-active { color: #cf1322 !important; background: rgba(207,19,34,0.04) !important; font-weight: 700 !important; }
         .em-tabs-light .ant-tabs-tab-active .ant-tabs-tab-btn { color: #cf1322 !important; }
         .em-tabs-light .ant-tabs-ink-bar { background: #cf1322 !important; height: 3px !important; border-radius: 2px 2px 0 0 !important; }
-        .em-tabs-light .ant-tabs-content-holder { background: #f0f2f5 !important; }
-
-        /* Table row highlighting */
         .em-row-active td { background: rgba(207,19,34,0.03) !important; }
         .em-row-active:hover td { background: rgba(207,19,34,0.07) !important; }
-
-        /* Animations */
-        @keyframes dotPulse {
+        @keyframes emDotPulse {
           0%,100% { opacity: 1; transform: scale(1); }
           50%      { opacity: 0.6; transform: scale(1.3); }
-        }
-        @keyframes bannerGlow {
-          0%,100% { box-shadow: 0 4px 24px rgba(207,19,34,0.45); }
-          50%      { box-shadow: 0 4px 40px rgba(207,19,34,0.75); }
-        }
-        @keyframes iconPulse {
-          0%,100% { box-shadow: 0 4px 20px rgba(0,0,0,0.3); }
-          50%      { box-shadow: 0 4px 30px rgba(255,77,79,0.6); }
         }
       `}</style>
     </div>

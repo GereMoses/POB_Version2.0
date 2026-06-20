@@ -894,7 +894,7 @@ export default function POBStatus() {
         onCancel={() => setDrillLoc(null)}
         footer={null}
         width={780}
-        destroyOnClose
+        destroyOnHidden
       >
         {drillLoading ? (
           <div style={{ textAlign: 'center', padding: 32 }}><Spin /></div>

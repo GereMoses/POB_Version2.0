@@ -7,6 +7,7 @@ import logging
 import uvicorn
 import os
 import asyncio
+from typing import Optional
 from datetime import datetime, timezone, timedelta
 
 from .core.config import settings
@@ -49,6 +50,34 @@ logger = logging.getLogger(__name__)
 # Holds refs to all long-running background tasks so shutdown can cancel them cleanly.
 _background_tasks: list = []
 
+
+async def _supervised(name: str, loop_func, max_backoff: float = 30.0):
+    """
+    Run a `while True` background loop forever, auto-restarting it with capped
+    exponential backoff if it ever exits or raises. These device-connectivity
+    loops (heartbeat, poller, live capture) are the only thing that keeps
+    "online/offline" status accurate — if one dies silently with no supervisor,
+    every reader it manages freezes at its last known status until someone
+    notices and restarts the whole backend. That's exactly the kind of gap
+    that goes unnoticed in dev (short uptimes) and bites in a real deployment.
+    """
+    backoff = 1.0
+    while True:
+        started = asyncio.get_event_loop().time()
+        try:
+            await loop_func()
+            logger.error("Background task '%s' returned unexpectedly — restarting", name)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error("Background task '%s' crashed: %s", name, exc, exc_info=True)
+
+        if asyncio.get_event_loop().time() - started > 60:
+            backoff = 1.0  # it ran healthily for a while — don't punish it for one blip
+        logger.warning("Background task '%s' restarting in %.0fs", name, backoff)
+        await asyncio.sleep(backoff)
+        backoff = min(backoff * 2, max_backoff)
+
 # Disable interactive API docs in production
 _docs_url = None if settings.ENVIRONMENT == "production" else f"{settings.API_V1_STR}/docs"
 _redoc_url = None if settings.ENVIRONMENT == "production" else f"{settings.API_V1_STR}/redoc"
@@ -64,16 +93,29 @@ app = FastAPI(
     redoc_url=_redoc_url,
 )
 
-_INSECURE_KEY = "pob-system-production-secret-key-2024-secure-jwt-auth"
-if settings.SECRET_KEY == _INSECURE_KEY and settings.ENVIRONMENT == "production":
-    raise RuntimeError(
-        "SECRET_KEY is still the default insecure value. "
-        "Set a strong random SECRET_KEY in your environment before running in production."
-    )
-if settings.SECRET_KEY == _INSECURE_KEY:
-    logger.warning(
-        "⚠️  SECRET_KEY is using the insecure default — change it before deploying to production"
-    )
+_INSECURE_SECRETS = {
+    "pob-system-production-secret-key-2024-secure-jwt-auth",
+    "changethis", "secret", "your-secret-key",
+}
+_INSECURE_DB_PASSWORDS = {"pob_password", "postgres", "password", "changeme", ""}
+
+_IS_PROD = settings.ENVIRONMENT == "production"
+
+if settings.SECRET_KEY in _INSECURE_SECRETS:
+    if _IS_PROD:
+        raise RuntimeError(
+            "SECRET_KEY is using an insecure default. "
+            "Generate one with: python3 -c \"import secrets; print(secrets.token_urlsafe(48))\""
+        )
+    logger.warning("⚠️  SECRET_KEY is using an insecure default — change before production")
+
+if settings.DATABASE_PASSWORD in _INSECURE_DB_PASSWORDS:
+    if _IS_PROD:
+        raise RuntimeError(
+            "DATABASE_PASSWORD is using a known-insecure default value. "
+            "Set a strong password in the POSTGRES_PASSWORD / DATABASE_PASSWORD environment variable."
+        )
+    logger.warning("⚠️  DATABASE_PASSWORD is using an insecure default — change before production")
 
 # MIDDLEWARE ORDER MATTERS: in Starlette, last-added runs first.
 # RBAC must be added first (runs last/inner) so CORS runs first (outer).
@@ -90,6 +132,14 @@ app.add_middleware(RBACMiddleware, exclude_paths=[
     "/iclock/cdata", "/iclock/getrequest", "/iclock/devicecmd", "/iclock/test",
     "/api/v1/iclock/cdata", "/api/v1/iclock/getrequest",
     "/api/v1/iclock/devicecmd", "/api/v1/iclock/test",
+    # Visitor kiosk public self-service endpoints
+    "/api/visitor/kiosk/check-in", "/api/visitor/kiosk/types",
+    # Global search and SSE notifications (token via query param)
+    "/api/v1/notifications/stream",
+    # Punch-stream SSE uses short-lived ticket auth (no Bearer header support)
+    "/api/v1/attendance/punch-stream",
+    # Static file serving — browser <img> tags cannot send Authorization headers
+    "/uploads/", "/media/",
 ])
 logger.info("✅ RBAC middleware enabled for comprehensive access control")
 
@@ -220,6 +270,22 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             "Permissions-Policy",
             "camera=(), microphone=(), geolocation=()"
         )
+        # HSTS — only in production (meaningless/ harmful over plain HTTP in dev).
+        # Sourced from SECURE_HSTS_SECONDS so the config value is actually applied.
+        if settings.ENVIRONMENT == "production":
+            response.headers.setdefault(
+                "Strict-Transport-Security",
+                f"max-age={settings.SECURE_HSTS_SECONDS}; includeSubDomains",
+            )
+        # Content-Security-Policy — this app's backend serves JSON/API + static
+        # uploads only (the SPA is served by nginx). A tight policy here is safe and
+        # adds defense-in-depth against injected content. OpenAPI docs are disabled
+        # in production so no inline-script allowance is needed.
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            "default-src 'self'; img-src 'self' data:; object-src 'none'; "
+            "base-uri 'self'; frame-ancestors 'none'",
+        )
         return response
 
 app.add_middleware(SecurityHeadersMiddleware)
@@ -231,16 +297,25 @@ try:
 except Exception as e:
     logger.warning(f"⚠️ Rate limiting disabled due to connection issues: {e}")
 
-# Add trusted host middleware for production
-# Reads ALLOWED_HOSTS from env (comma-separated). Defaults to permissive set
-# so docker-compose and local dev work without extra config.
-_raw_hosts = os.getenv("ALLOWED_HOSTS", "localhost,127.0.0.1,0.0.0.0,*")
+# Add trusted host middleware — production only.
+# In development/staging the proxy may forward with internal Docker hostnames
+# (pob_backend:8000, etc.) that won't match any explicit allowlist, causing
+# TrustedHostMiddleware to return 400 for every request.
+# Only enable this in production where ALLOWED_HOSTS is explicitly configured.
+_raw_hosts = os.getenv("ALLOWED_HOSTS", "")
 _allowed_hosts = [h.strip() for h in _raw_hosts.split(",") if h.strip()]
-if not settings.DEBUG:
+
+if settings.ENVIRONMENT == "production":
+    if not _allowed_hosts or "*" in _allowed_hosts:
+        raise RuntimeError(
+            "ALLOWED_HOSTS must be explicitly set to your domain(s) in production. "
+            "Example: ALLOWED_HOSTS=api.yourfacility.com,yourfacility.com"
+        )
     app.add_middleware(
         TrustedHostMiddleware,
-        allowed_hosts=_allowed_hosts
+        allowed_hosts=_allowed_hosts,
     )
+    logger.info("✅ TrustedHostMiddleware enabled: %s", _allowed_hosts)
 
 # Add enhanced exception handlers
 from .core.error_handling import (
@@ -274,9 +349,29 @@ app.include_router(api_router, prefix=settings.API_V1_STR)
 app.include_router(direct_router)
 logger.info("✅ All direct API routers registered")
 
+# ARIA AI assistant endpoints
+try:
+    from .api.ai import router as ai_router
+    app.include_router(ai_router)
+    logger.info("✅ ARIA AI router registered")
+except Exception as e:
+    logger.warning(f"ARIA AI router not loaded: {e}", exc_info=True)
+
 # ADMS protocol endpoints — no authentication, device-initiated, MUST be at root
 from .api.adms_protocol import router as adms_router
 app.include_router(adms_router, tags=["ADMS Protocol"])
+
+# Prometheus metrics — must be instrumented at module level, before app starts
+try:
+    from prometheus_fastapi_instrumentator import Instrumentator
+    Instrumentator(
+        should_group_status_codes=True,
+        should_ignore_untemplated=True,
+        excluded_handlers=["/health", "/metrics"],
+    ).instrument(app).expose(app, include_in_schema=False)
+    logger.info("✅ Prometheus metrics endpoint active at /metrics")
+except ImportError:
+    logger.debug("prometheus-fastapi-instrumentator not installed — /metrics disabled")
 
 
 def _sync_time_one_pass() -> None:
@@ -379,16 +474,17 @@ async def _attendance_auto_calc_loop():
     """Periodic catch-all attendance recalc. DB query runs in thread pool."""
     from .services.attendance_calculation_service import attendance_calculation_service
     from datetime import date, timedelta
+    import time as _time
 
     await asyncio.sleep(90)
     logger.info("Attendance auto-calc loop started — periodic catch-all every 15 min")
 
     while True:
+        _start = _time.monotonic()
         try:
             today     = date.today()
             yesterday = today - timedelta(days=1)
 
-            # Blocking query — off the event loop
             emp_ids = await asyncio.to_thread(_attendance_query_pending, yesterday)
 
             if emp_ids:
@@ -409,7 +505,9 @@ async def _attendance_auto_calc_loop():
         except Exception as exc:
             logger.error(f"Periodic attendance auto-calc error: {exc}")
 
-        await asyncio.sleep(900)
+        # Sleep for the remainder of the 900s interval so runs don't overlap
+        elapsed = _time.monotonic() - _start
+        await asyncio.sleep(max(0, 900 - elapsed))
 
 
 def _drill_check_one_pass(now, retry_cutoff) -> None:
@@ -468,25 +566,48 @@ async def _seamlesshr_nightly_sync_loop():
     """
     from .services.seamlesshr_service import get_config, push_attendance
     from .core.database import SessionLocal
+    from sqlalchemy import text as _text
 
     logger.info("SeamlessHR sync scheduler started — checking every 60 s")
+
+    # Seed last-run from the DB so a restart doesn't re-trigger a sync that already
+    # ran today (and so a window miss after restart is still caught up exactly once).
     last_run_date = None
+    try:
+        _db = SessionLocal()
+        try:
+            _row = _db.execute(_text(
+                "SELECT MAX(created_at::date) FROM hr_sync_log WHERE triggered_by = 'scheduler'"
+            )).fetchone()
+            if _row and _row[0]:
+                last_run_date = str(_row[0])
+        finally:
+            _db.close()
+    except Exception:
+        pass
 
     while True:
         try:
             now       = datetime.now(timezone.utc)
             today_str = str(now.date())
 
-            # Only run once per calendar day, at the configured sync time
+            # Run once per day, at OR AFTER the configured time (window, not exact minute).
+            # A missed minute (busy loop, GC) no longer skips the whole day; idempotency
+            # keys on the records make a catch-up/duplicate run safe.
             if last_run_date != today_str:
                 db = SessionLocal()
                 try:
                     cfg = get_config(db)
                     if cfg and cfg.get("is_enabled"):
-                        sync_h, sync_m = map(int, (cfg.get("sync_time") or "00:00").split(":"))
-                        if now.hour == sync_h and now.minute == sync_m:
+                        sync_parts = (cfg.get("sync_time") or "00:00").split(":")[:2]
+                        sync_h, sync_m = int(sync_parts[0]), int(sync_parts[1])
+                        scheduled_today = now.replace(hour=sync_h, minute=sync_m, second=0, microsecond=0)
+                        if now >= scheduled_today:
                             logger.info("SeamlessHR: nightly sync starting...")
-                            result = await push_attendance(db, triggered_by="scheduler")
+                            result = await asyncio.wait_for(
+                                push_attendance(db, triggered_by="scheduler"),
+                                timeout=120.0,
+                            )
                             logger.info(f"SeamlessHR nightly sync: {result['status']} — {result['message']}")
                             last_run_date = today_str
                 finally:
@@ -505,24 +626,45 @@ async def _bc_nightly_sync_loop():
     """Background loop: push attendance to Business Central at the configured sync time."""
     from .services.business_central_service import get_bc_config, push_attendance as bc_push
     from .core.database import SessionLocal
+    from sqlalchemy import text as _text
 
     logger.info("Business Central sync scheduler started — checking every 60 s")
+
+    # Seed last-run from the DB so a restart doesn't re-trigger a sync already done today.
     last_run_date = None
+    try:
+        _db = SessionLocal()
+        try:
+            _row = _db.execute(_text(
+                "SELECT MAX(created_at::date) FROM bc_sync_log WHERE triggered_by = 'scheduler'"
+            )).fetchone()
+            if _row and _row[0]:
+                last_run_date = str(_row[0])
+        finally:
+            _db.close()
+    except Exception:
+        pass
 
     while True:
         try:
             now       = datetime.now(timezone.utc)
             today_str = str(now.date())
 
+            # Window-based (run at OR AFTER scheduled time, once/day) — see SeamlessHR loop.
             if last_run_date != today_str:
                 db = SessionLocal()
                 try:
                     cfg = get_bc_config(db)
                     if cfg and cfg.get("is_enabled"):
-                        sync_h, sync_m = map(int, (cfg.get("sync_time") or "01:00").split(":"))
-                        if now.hour == sync_h and now.minute == sync_m:
+                        sync_parts = (cfg.get("sync_time") or "01:00").split(":")[:2]
+                        sync_h, sync_m = int(sync_parts[0]), int(sync_parts[1])
+                        scheduled_today = now.replace(hour=sync_h, minute=sync_m, second=0, microsecond=0)
+                        if now >= scheduled_today:
                             logger.info("Business Central: nightly sync starting...")
-                            result = await bc_push(db, triggered_by="scheduler")
+                            result = await asyncio.wait_for(
+                                bc_push(db, triggered_by="scheduler"),
+                                timeout=120.0,
+                            )
                             logger.info(f"Business Central nightly sync: {result['status']} — {result['message']}")
                             last_run_date = today_str
                 finally:
@@ -533,6 +675,65 @@ async def _bc_nightly_sync_loop():
             break
         except Exception as e:
             logger.error(f"Business Central sync loop error: {e}")
+
+        await asyncio.sleep(60)
+
+
+async def _drill_auto_end_loop():
+    """
+    Every 60 s: auto-end any active mustering event that has exceeded its
+    max_duration_minutes. This prevents forgotten drills from locking access
+    control in drill mode indefinitely.
+
+    Drills with max_duration_minutes=0 are never auto-ended.
+    """
+    await asyncio.sleep(60)  # brief startup delay
+    while True:
+        try:
+            def _check_and_end():
+                db = SessionLocal()
+                try:
+                    # max_duration_minutes column may not exist in older migrations — skip if absent
+                    has_col = db.execute(text("""
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name='mustering_event' AND column_name='max_duration_minutes'
+                    """)).fetchone()
+                    if not has_col:
+                        return
+
+                    now = datetime.now(timezone.utc)
+                    stale = db.execute(text("""
+                        SELECT id, start_time, max_duration_minutes, event_type
+                        FROM mustering_event
+                        WHERE status = 0
+                          AND max_duration_minutes > 0
+                          AND start_time + (max_duration_minutes || ' minutes')::interval < :now
+                    """), {"now": now}).fetchall()
+                    for row in stale:
+                        db.execute(text("""
+                            UPDATE mustering_event
+                            SET status = 2, end_time = :now,
+                                notes = COALESCE(notes,'') || ' [AUTO-ENDED: exceeded max_duration_minutes]'
+                            WHERE id = :eid
+                        """), {"now": now, "eid": row.id})
+                        logger.warning(
+                            "Auto-ended mustering event id=%s (event_type=%s, started=%s, max=%s min)",
+                            row.id, row.event_type, row.start_time, row.max_duration_minutes,
+                        )
+                    if stale:
+                        db.commit()
+                except Exception as exc:
+                    db.rollback()
+                    logger.error("Drill auto-end loop error: %s", exc)
+                finally:
+                    db.close()
+
+            await asyncio.to_thread(_check_and_end)
+        except asyncio.CancelledError:
+            logger.info("Drill auto-end loop stopped")
+            break
+        except Exception as exc:
+            logger.error("Drill auto-end outer error: %s", exc)
 
         await asyncio.sleep(60)
 
@@ -553,6 +754,84 @@ async def _drill_scheduler_loop():
         await asyncio.sleep(30)
 
 
+_LEADER_KEY = "pob:background_leader"
+_LEADER_TTL = 30   # seconds — leader must renew within this window
+# Renewal happens every _LEADER_RENEW_INTERVAL. Must be well under _LEADER_TTL
+# so the key does not expire if the event loop is briefly saturated.
+# At TTL=30s and interval=8s we have 3 full renewal cycles before expiry.
+_LEADER_RENEW_INTERVAL = 8
+
+
+_LEADER_RETRY_INTERVAL = 5   # how often a non-leader worker re-checks whether it can take over
+_leader_pid: Optional[str] = None  # set once this process becomes leader; used by shutdown to release cleanly
+
+
+async def _release_leader_lock() -> None:
+    """
+    Release the leader lock on clean shutdown so a restart/redeploy doesn't have
+    to wait out the full TTL before the new process can take over device
+    connectivity. Without this, restarting the backend (a normal deploy step)
+    left a stale lock in Redis pointing at the now-dead PID; every worker in the
+    new process would see "leader is PID=<dead>" and skip starting the
+    heartbeat/poller/discovery tasks entirely — with no error, just a quiet
+    INFO log — until the stale TTL happened to expire. This was caught live
+    during testing: a routine container restart silently disabled all device
+    monitoring.
+    """
+    global _leader_pid
+    if not _leader_pid:
+        return
+    try:
+        from .core.redis_client import get_redis_client
+        r = get_redis_client()
+        if r and r.get(_LEADER_KEY) == _leader_pid:
+            r.delete(_LEADER_KEY)
+            logger.info("Worker PID=%s released background-task leader lock", _leader_pid)
+    except Exception as exc:
+        logger.warning("Failed to release leader lock on shutdown: %s", exc)
+
+
+async def _leader_election_loop(start_device_tasks) -> None:
+    """
+    Runs on every worker for the lifetime of the process. Whoever holds the
+    leader lock renews it; everyone else retries acquisition every
+    _LEADER_RETRY_INTERVAL seconds. This makes leadership self-healing: if the
+    leader process dies without a clean shutdown (OOM-kill, crash, `kill -9`),
+    the Redis key simply expires after _LEADER_TTL seconds and the next
+    surviving worker to call SETNX takes over automatically — instead of the
+    old one-shot-at-startup design, where a crashed leader meant device
+    connectivity was gone for good until someone manually restarted every
+    worker in the fleet.
+    """
+    global _leader_pid
+    pid = str(os.getpid())
+    is_leader = False
+
+    while True:
+        try:
+            from .core.redis_client import get_redis_client
+            r = get_redis_client()
+            if not r:
+                if not is_leader:
+                    logger.warning("Redis unavailable — PID=%s running background tasks (fail-open)", pid)
+                    is_leader = True
+                    _leader_pid = None  # nothing to release — no real lock was taken
+                    await start_device_tasks()
+            elif is_leader:
+                r.expire(_LEADER_KEY, _LEADER_TTL)
+            elif r.set(_LEADER_KEY, pid, nx=True, ex=_LEADER_TTL):
+                logger.info("Worker PID=%s acquired background-task leader lock", pid)
+                is_leader = True
+                _leader_pid = pid
+                await start_device_tasks()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error("Leader election loop error: %s", exc)
+
+        await asyncio.sleep(_LEADER_RENEW_INTERVAL if is_leader else _LEADER_RETRY_INTERVAL)
+
+
 @app.on_event("startup")
 async def startup_event():
     """Application startup event"""
@@ -561,6 +840,17 @@ async def startup_event():
     # Test database connection (run sync check off the event loop)
     if await asyncio.to_thread(test_db_connection):
         logger.info("✅ Database connection successful")
+        # Apply performance indexes on every startup (idempotent)
+        try:
+            from .database.indexes import apply_indexes
+            from .core.database import SessionLocal as _SL
+            _idx_db = _SL()
+            try:
+                await asyncio.to_thread(apply_indexes, _idx_db)
+            finally:
+                _idx_db.close()
+        except Exception as _ie:
+            logger.warning("Index creation skipped: %s", _ie)
     else:
         logger.error("❌ Database connection failed")
 
@@ -570,33 +860,49 @@ async def startup_event():
     else:
         logger.error("❌ Redis connection failed")
 
-    # Start background drill scheduler
-    _background_tasks.append(asyncio.create_task(_drill_scheduler_loop()))
-    logger.info("✅ Drill scheduler task started")
+    # SSE Redis subscriber — runs on every worker so each worker delivers events
+    # to its own connected clients. Publishes via Redis Pub/Sub for cross-worker broadcast.
+    try:
+        from .api.notifications import start_redis_subscriber
+        _background_tasks.append(asyncio.create_task(start_redis_subscriber()))
+        logger.info("✅ SSE Redis subscriber started")
+    except Exception as _sse_exc:
+        logger.warning("SSE Redis subscriber not started: %s", _sse_exc)
 
-    # Start attendance auto-calculation loop
-    _background_tasks.append(asyncio.create_task(_attendance_auto_calc_loop()))
-    logger.info("✅ Attendance auto-calc loop started (device punches → att_report, every 15 min)")
+    # ── Leader election: only ONE worker runs ZKLib/device background tasks ──
+    # With --workers N, every worker would otherwise open 4x concurrent ZKLib
+    # connections per device (readers only accept 1) and quadruple-trigger
+    # drills/nightly syncs. _leader_election_loop runs on every worker for the
+    # process lifetime: whichever one holds the Redis lock starts the device
+    # tasks; if that worker ever dies without releasing the lock, another
+    # worker automatically takes over once the lease expires — no manual
+    # restart needed to restore device monitoring.
+    async def _start_leader_only_tasks() -> None:
+        _background_tasks.append(asyncio.create_task(_attendance_auto_calc_loop()))
+        _background_tasks.append(asyncio.create_task(_drill_auto_end_loop()))
+        logger.info("✅ Attendance auto-calc + drill auto-end started (leader)")
 
-    # Start reader time-sync loop
-    _background_tasks.append(asyncio.create_task(_time_sync_loop()))
-    logger.info("✅ Reader time-sync loop started (SET DATE TIME to all readers, every hour)")
+        _background_tasks.append(asyncio.create_task(_supervised("time_sync_loop", _time_sync_loop)))
+        logger.info("✅ Reader time-sync loop started (leader, auto-restart on crash)")
 
-    # Start ZKTeco direct-IP device poller (60 s catch-up for missed records)
-    from .services.zkteco.device_poller import poller_loop
-    _background_tasks.append(asyncio.create_task(poller_loop()))
-    logger.info("✅ ZKTeco device poller started")
+        from .services.zkteco.device_poller import poller_loop
+        _background_tasks.append(asyncio.create_task(_supervised("device_poller", poller_loop)))
+        logger.info("✅ ZKTeco device poller started (leader, auto-restart on crash)")
 
-    # Start live capture supervisor (sub-second real-time punch events via SSE)
-    from .services.zkteco.live_capture import live_capture_supervisor
-    _background_tasks.append(asyncio.create_task(live_capture_supervisor()))
-    logger.info("✅ ZKTeco live capture supervisor started")
+        from .services.zkteco.live_capture import live_capture_supervisor
+        _background_tasks.append(asyncio.create_task(_supervised("live_capture_supervisor", live_capture_supervisor)))
+        logger.info("✅ ZKTeco live capture supervisor started (leader, auto-restart on crash)")
 
-    # Start fast heartbeat — TCP reachability check every 5 s
-    from .services.zkteco.device_heartbeat import heartbeat_loop, reset_stale_states
-    reset_stale_states()   # mark all devices OFFLINE until heartbeat proves them reachable
-    _background_tasks.append(asyncio.create_task(heartbeat_loop()))
-    logger.info("✅ ZKTeco device heartbeat started")
+        from .services.zkteco.device_heartbeat import heartbeat_loop, reset_stale_states
+        reset_stale_states()
+        _background_tasks.append(asyncio.create_task(_supervised("device_heartbeat", heartbeat_loop)))
+        logger.info("✅ ZKTeco device heartbeat started (leader, auto-restart on crash)")
+
+        _background_tasks.append(asyncio.create_task(_seamlesshr_nightly_sync_loop()))
+        _background_tasks.append(asyncio.create_task(_bc_nightly_sync_loop()))
+        logger.info("✅ SeamlessHR + Business Central nightly sync schedulers started (leader)")
+
+    _background_tasks.append(asyncio.create_task(_leader_election_loop(_start_leader_only_tasks)))
 
     # Migrate subscription expiry columns to TIMESTAMPTZ for time-aware license control
     try:
@@ -628,36 +934,35 @@ async def startup_event():
 
     logger.info("🚀 Application startup complete")
 
-    # SeamlessHR nightly sync scheduler
-    _background_tasks.append(asyncio.create_task(_seamlesshr_nightly_sync_loop()))
-    logger.info("✅ SeamlessHR nightly sync scheduler started")
-
-    # Business Central nightly sync scheduler
-    _background_tasks.append(asyncio.create_task(_bc_nightly_sync_loop()))
-    logger.info("✅ Business Central nightly sync scheduler started")
-
-    # Prometheus metrics endpoint (/metrics) — scraped by Prometheus every 15s
-    try:
-        from prometheus_fastapi_instrumentator import Instrumentator
-        Instrumentator(
-            should_group_status_codes=True,
-            should_ignore_untemplated=True,
-            excluded_handlers=["/health", "/metrics"],
-        ).instrument(app).expose(app, include_in_schema=False)
-        logger.info("✅ Prometheus metrics endpoint active at /metrics")
-    except ImportError:
-        logger.debug("prometheus-fastapi-instrumentator not installed — /metrics disabled")
-
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    """Application shutdown event — cancel all background tasks gracefully."""
+    """Application shutdown event — cancel background tasks and close shared clients."""
     logger.info("🛑 Application shutting down — cancelling background tasks")
     for task in _background_tasks:
         task.cancel()
     if _background_tasks:
         await asyncio.gather(*_background_tasks, return_exceptions=True)
-    logger.info("✅ All background tasks stopped")
+
+    # Release the leader lock immediately so a restart/redeploy doesn't have to
+    # wait out the TTL before device connectivity resumes (see _release_leader_lock).
+    await _release_leader_lock()
+
+    # Close shared httpx clients used by integrations
+    try:
+        from .services.business_central_service import close_http_client
+        await close_http_client()
+        logger.info("✅ Business Central httpx client closed")
+    except Exception:
+        pass
+    try:
+        from .services.seamlesshr_service import close_shr_client
+        await close_shr_client()
+        logger.info("✅ SeamlessHR httpx client closed")
+    except Exception:
+        pass
+
+    logger.info("✅ Shutdown complete")
 
 
 @app.get("/")

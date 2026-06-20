@@ -348,10 +348,24 @@ class AttendanceCalculationService:
                 "WHERE is_active = true ORDER BY emp_code"
             )).fetchall()
 
+        # Pre-fetch all personnel_employee IDs in one query to avoid N+1 per employee
+        emp_codes = [emp.emp_code for emp in emp_rows]
+        pe_id_map: dict = {}
+        if emp_codes:
+            placeholders = ",".join([f":c{i}" for i in range(len(emp_codes))])
+            pe_params = {f"c{i}": c for i, c in enumerate(emp_codes)}
+            pe_rows = db.execute(
+                text(f"SELECT id, emp_code FROM personnel_employee WHERE emp_code IN ({placeholders})"),
+                pe_params,
+            ).fetchall()
+            pe_id_map = {row.emp_code: row.id for row in pe_rows}
+
         processed, errors = 0, []
         for emp in emp_rows:
             try:
-                self._process_employee(dict(emp._mapping), start_dt, end_dt, db, rules)
+                emp_dict = dict(emp._mapping)
+                emp_dict["_pe_id"] = pe_id_map.get(emp.emp_code)  # inject pre-fetched ID
+                self._process_employee(emp_dict, start_dt, end_dt, db, rules)
                 processed += 1
             except Exception as exc:
                 errors.append({"emp_code": emp.emp_code, "error": str(exc)})
@@ -412,14 +426,16 @@ class AttendanceCalculationService:
             d = p.punch_time.date()
             punches_by_date.setdefault(d, []).append(p)
 
-        pe = db.execute(
-            text("SELECT id FROM personnel_employee WHERE emp_code = :code"),
-            {"code": emp_code},
-        ).fetchone()
-        if not pe:
-            return  # employee not yet in the BioTime employee table
-
-        pe_id   = pe.id
+        # Use pre-fetched ID when available (injected by batch caller); fall back to query
+        pe_id = emp.get("_pe_id")
+        if pe_id is None:
+            pe = db.execute(
+                text("SELECT id FROM personnel_employee WHERE emp_code = :code"),
+                {"code": emp_code},
+            ).fetchone()
+            if not pe:
+                return
+            pe_id = pe.id
         dept_id = emp.get("department_id")
         r       = rules or {}
 

@@ -3,6 +3,7 @@ import {
   Tabs, Card, Table, Button, Space, Tag, App, Form, Modal, Drawer,
   Input, Select, Switch, Row, Col, Divider, Badge, Alert,
   Checkbox, Popconfirm, Typography, Statistic, Tooltip, Empty, Spin, Progress,
+  Avatar, Segmented, Dropdown,
 } from 'antd';
 import {
   UserOutlined, TeamOutlined, LockOutlined, AuditOutlined,
@@ -12,10 +13,17 @@ import {
   DatabaseOutlined, CloudServerOutlined, DownloadOutlined,
   CheckCircleOutlined, WarningOutlined, SyncOutlined,
   ApiOutlined, LinkOutlined,
+  FilterOutlined, EyeOutlined, CopyOutlined, IdcardOutlined,
+  InfoCircleOutlined, ThunderboltOutlined,
+  MailOutlined, MoreOutlined, StopOutlined,
+  SearchOutlined, DesktopOutlined, FileTextOutlined,
+  BarChartOutlined, AlertOutlined, RightOutlined, GlobalOutlined,
 } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import apiService from '../../services/api';
 import dayjs from 'dayjs';
+import relativeTime from 'dayjs/plugin/relativeTime';
+dayjs.extend(relativeTime);
 
 const { Title, Text } = Typography;
 const { Option } = Select;
@@ -33,32 +41,102 @@ const MODULE_LABEL = {
   pob: 'POB Status', emergency: 'Emergency', mustering: 'Mustering', settings: 'Settings',
 };
 
+// ── User helper utilities ─────────────────────────────────────────────────────
+const USER_AVATAR_COLORS = [
+  '#3B82F6','#10B981','#F59E0B','#EF4444','#8B5CF6',
+  '#EC4899','#06B6D4','#84CC16','#F97316','#6366F1',
+];
+const userAvatarColor = (str = '') =>
+  USER_AVATAR_COLORS[str.split('').reduce((a, c) => a + c.charCodeAt(0), 0) % USER_AVATAR_COLORS.length];
+
+const userInitials = (u) => {
+  if (u.first_name || u.last_name)
+    return `${u.first_name?.[0] || ''}${u.last_name?.[0] || ''}`.toUpperCase();
+  return u.username?.slice(0, 2).toUpperCase() || '??';
+};
+
+const activityBadge = (lastLogin) => {
+  if (!lastLogin) return { color: '#9CA3AF', dot: '#9CA3AF', label: 'Never logged in', relative: 'Never' };
+  const d = dayjs().diff(dayjs(lastLogin), 'day');
+  if (d < 1)  return { color: '#22C55E', dot: '#22C55E', label: 'Active today',     relative: 'Today' };
+  if (d < 7)  return { color: '#84CC16', dot: '#84CC16', label: `${d} days ago`,    relative: `${d}d ago` };
+  if (d < 30) return { color: '#F59E0B', dot: '#F59E0B', label: `${d} days ago`,    relative: `${d}d ago` };
+  return               { color: '#EF4444', dot: '#EF4444', label: `${d} days ago`,  relative: `${d}d ago` };
+};
+
+const pwStrength = (pw = '') => {
+  let s = 0;
+  if (pw.length >= 8)           s++;
+  if (pw.length >= 12)          s++;
+  if (/[A-Z]/.test(pw))         s++;
+  if (/[0-9]/.test(pw))         s++;
+  if (/[^A-Za-z0-9]/.test(pw))  s++;
+  const map = [
+    { label: '',            color: '#e5e7eb', pct: 0   },
+    { label: 'Weak',        color: '#EF4444', pct: 20  },
+    { label: 'Fair',        color: '#F59E0B', pct: 40  },
+    { label: 'Moderate',    color: '#84CC16', pct: 60  },
+    { label: 'Strong',      color: '#22C55E', pct: 80  },
+    { label: 'Very Strong', color: '#0EA5E9', pct: 100 },
+  ];
+  return map[Math.min(s, 5)];
+};
+
+const genPassword = () => {
+  const pool = 'ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789!@#$%^&*';
+  return Array.from({ length: 14 }, () => pool[Math.floor(Math.random() * pool.length)]).join('');
+};
+
+const exportUsersCSV = (users) => {
+  const header = ['Username','Full Name','Email','Roles','Status','Last Login','Joined'];
+  const rows = users.map(u => [
+    u.username,
+    `${u.first_name || ''} ${u.last_name || ''}`.trim() || u.username,
+    u.email || '',
+    (u.is_superuser ? ['Superuser'] : []).concat((u.roles || []).map(r => r.name)).join('; '),
+    u.is_active ? 'Active' : 'Inactive',
+    u.last_login ? dayjs(u.last_login).format('YYYY-MM-DD HH:mm') : 'Never',
+    u.created_at ? dayjs(u.created_at).format('YYYY-MM-DD') : '',
+  ]);
+  const csv = [header, ...rows].map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n');
+  const a = Object.assign(document.createElement('a'), {
+    href: URL.createObjectURL(new Blob([csv], { type: 'text/csv' })),
+    download: `users_${dayjs().format('YYYYMMDD_HHmm')}.csv`,
+  });
+  a.click(); URL.revokeObjectURL(a.href);
+};
+
 // ════════════════════════════════════════════════════════════════════════════
 // USERS TAB
 // ════════════════════════════════════════════════════════════════════════════
 const UsersTab = () => {
   const { message } = App.useApp();
   const qc = useQueryClient();
-  const [search, setSearch]         = useState('');
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const [editUser, setEditUser]     = useState(null);
-  const [pwOpen, setPwOpen]         = useState(false);
-  const [pwUser, setPwUser]         = useState(null);
-  const [rolesOpen, setRolesOpen]   = useState(false);
-  const [rolesUser, setRolesUser]   = useState(null);
+
+  // ── State ─────────────────────────────────────────────────────────────────
+  const [search,       setSearch]       = useState('');
+  const [statusFilter, setStatusFilter] = useState('all');
+  const [roleFilter,   setRoleFilter]   = useState(null);
+  const [selectedKeys, setSelectedKeys] = useState([]);
+  const [drawerOpen,   setDrawerOpen]   = useState(false);
+  const [editUser,     setEditUser]     = useState(null);
+  const [profileUser,  setProfileUser]  = useState(null); // side profile panel
+  const [pwOpen,       setPwOpen]       = useState(false);
+  const [pwUser,       setPwUser]       = useState(null);
+  const [pwVal,        setPwVal]        = useState('');
+  const [rolesOpen,    setRolesOpen]    = useState(false);
+  const [rolesUser,    setRolesUser]    = useState(null);
   const [form]   = Form.useForm();
   const [pwForm] = Form.useForm();
 
+  // ── Queries ───────────────────────────────────────────────────────────────
   const { data, isLoading, refetch } = useQuery({
-    queryKey: ['settings-users', search],
-    queryFn: () => {
-      const p = new URLSearchParams({ page: 1, page_size: 100 });
-      if (search) p.append('search', search);
-      return apiService.get(`/api/v1/settings/users?${p}`);
-    },
+    queryKey: ['settings-users'],
+    queryFn: () => apiService.get('/api/v1/settings/users', { page: 1, page_size: 100 }),
+    staleTime: 30000,
   });
-  const users = data?.data || [];
-  const total = data?.total || 0;
+  const users = data?.data ?? data ?? [];
+  const total = data?.total ?? users.length;
 
   const { data: rolesData } = useQuery({
     queryKey: ['settings-roles-list'],
@@ -66,140 +144,432 @@ const UsersTab = () => {
   });
   const allRoles = rolesData || [];
 
+  // ── Filtered data ─────────────────────────────────────────────────────────
+  const filteredUsers = useMemo(() => {
+    let list = [...users];
+    const q = search.toLowerCase().trim();
+    if (q) list = list.filter(u =>
+      u.username?.toLowerCase().includes(q) ||
+      u.email?.toLowerCase().includes(q) ||
+      u.first_name?.toLowerCase().includes(q) ||
+      u.last_name?.toLowerCase().includes(q)
+    );
+    if (statusFilter === 'active')   list = list.filter(u => u.is_active);
+    if (statusFilter === 'inactive') list = list.filter(u => !u.is_active);
+    if (statusFilter === 'super')    list = list.filter(u => u.is_superuser);
+    if (statusFilter === 'norole')   list = list.filter(u => !u.is_superuser && !u.roles?.length);
+    if (roleFilter) list = list.filter(u => u.roles?.some(r => r.id === roleFilter));
+    return list;
+  }, [users, search, statusFilter, roleFilter]);
+
+  // ── Mutations ─────────────────────────────────────────────────────────────
   const createM = useMutation({
     mutationFn: (body) => apiService.post('/api/v1/settings/users', body),
-    onSuccess: () => {
-      message.success('User created');
-      qc.invalidateQueries(['settings-users']);
-      setDrawerOpen(false);
-      form.resetFields();
-    },
-    onError: (e) => message.error(e?.message ||'Failed to create user'),
+    onSuccess: () => { message.success('User created'); qc.invalidateQueries(['settings-users']); setDrawerOpen(false); form.resetFields(); },
+    onError: (e) => message.error(e?.message || 'Failed to create user'),
   });
   const updateM = useMutation({
     mutationFn: ({ id, body }) => apiService.put(`/api/v1/settings/users/${id}`, body),
-    onSuccess: () => {
-      message.success('User updated');
-      qc.invalidateQueries(['settings-users']);
-      setDrawerOpen(false);
-    },
-    onError: (e) => message.error(e?.message ||'Failed to update user'),
+    onSuccess: () => { message.success('User updated'); qc.invalidateQueries(['settings-users']); setDrawerOpen(false); },
+    onError: (e) => message.error(e?.message || 'Failed to update user'),
+  });
+  const toggleM = useMutation({
+    mutationFn: ({ id, is_active }) => apiService.put(`/api/v1/settings/users/${id}`, { is_active }),
+    onSuccess: () => qc.invalidateQueries(['settings-users']),
+    onError: (e) => message.error(e?.message || 'Failed'),
   });
   const deleteM = useMutation({
     mutationFn: (id) => apiService.delete(`/api/v1/settings/users/${id}`),
     onSuccess: () => { message.success('User deleted'); qc.invalidateQueries(['settings-users']); },
-    onError: (e) => message.error(e?.message ||'Cannot delete user'),
+    onError: (e) => message.error(e?.message || 'Cannot delete user'),
   });
   const pwM = useMutation({
     mutationFn: ({ id, body }) => apiService.put(`/api/v1/settings/users/${id}/password`, body),
-    onSuccess: () => { message.success('Password changed'); setPwOpen(false); pwForm.resetFields(); },
-    onError: (e) => message.error(e?.message ||'Failed to change password'),
+    onSuccess: () => { message.success('Password changed'); setPwOpen(false); pwForm.resetFields(); setPwVal(''); },
+    onError: (e) => message.error(e?.message || 'Failed to change password'),
   });
   const rolesM = useMutation({
     mutationFn: ({ id, role_ids }) => apiService.put(`/api/v1/settings/users/${id}/roles`, { role_ids }),
     onSuccess: () => { message.success('Roles updated'); qc.invalidateQueries(['settings-users']); setRolesOpen(false); },
-    onError: (e) => message.error(e?.message ||'Failed to update roles'),
+    onError: (e) => message.error(e?.message || 'Failed to update roles'),
   });
 
+  // ── Bulk actions ──────────────────────────────────────────────────────────
+  const bulkToggle = async (is_active) => {
+    await Promise.all(selectedKeys.map(id => apiService.put(`/api/v1/settings/users/${id}`, { is_active })));
+    qc.invalidateQueries(['settings-users']);
+    setSelectedKeys([]);
+    message.success(`${selectedKeys.length} user(s) ${is_active ? 'activated' : 'deactivated'}`);
+  };
+  const bulkDelete = async () => {
+    await Promise.all(selectedKeys.map(id => apiService.delete(`/api/v1/settings/users/${id}`)));
+    qc.invalidateQueries(['settings-users']);
+    setSelectedKeys([]);
+    message.success(`${selectedKeys.length} user(s) deleted`);
+  };
+
+  // ── Handlers ──────────────────────────────────────────────────────────────
   const openCreate = () => { setEditUser(null); form.resetFields(); setDrawerOpen(true); };
-  const openEdit   = (u) => { setEditUser(u); form.setFieldsValue({ ...u }); setDrawerOpen(true); };
-  const openPw     = (u) => { setPwUser(u); pwForm.resetFields(); setPwOpen(true); };
+  const openEdit   = (u) => {
+    setEditUser(u);
+    form.setFieldsValue({ first_name: u.first_name, last_name: u.last_name, email: u.email, is_active: u.is_active, is_superuser: u.is_superuser });
+    setDrawerOpen(true);
+  };
+  const openPw     = (u) => { setPwUser(u); pwForm.resetFields(); setPwVal(''); setPwOpen(true); };
   const openRoles  = (u) => { setRolesUser(u); setRolesOpen(true); };
   const onSave     = (vals) => editUser ? updateM.mutate({ id: editUser.id, body: vals }) : createM.mutate(vals);
 
+  // ── Stats ─────────────────────────────────────────────────────────────────
+  const activeCount  = users.filter(u => u.is_active).length;
+  const superCount   = users.filter(u => u.is_superuser).length;
+  const noRoleCount  = users.filter(u => !u.is_superuser && !u.roles?.length).length;
+  const neverCount   = users.filter(u => !u.last_login).length;
+  const recentCount  = users.filter(u => u.last_login && dayjs().diff(dayjs(u.last_login), 'day') < 7).length;
+
+  // ── Table columns ─────────────────────────────────────────────────────────
   const cols = [
     {
-      title: 'User', key: 'user',
-      render: (_, r) => (
-        <Space>
-          <div style={{ width: 32, height: 32, borderRadius: '50%', background: '#1890ff22', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            <UserOutlined style={{ color: '#1890ff' }} />
-          </div>
-          <Space direction="vertical" size={0}>
-            <Text strong style={{ fontSize: 13 }}>
-              {r.first_name || r.last_name ? `${r.first_name || ''} ${r.last_name || ''}`.trim() : r.username}
-            </Text>
-            <Text type="secondary" style={{ fontSize: 11 }}>@{r.username}</Text>
+      title: 'User', key: 'user', ellipsis: true, minWidth: 200,
+      render: (_, r) => {
+        const act = activityBadge(r.last_login);
+        const color = userAvatarColor(r.username);
+        const initials = userInitials(r);
+        return (
+          <Space
+            style={{ cursor: 'pointer' }}
+            onClick={() => setProfileUser(r)}
+          >
+            <div style={{ position: 'relative', flexShrink: 0 }}>
+              <Avatar
+                size={36}
+                style={{ background: color, fontSize: 13, fontWeight: 700, flexShrink: 0 }}
+              >
+                {initials}
+              </Avatar>
+              <Tooltip title={act.label}>
+                <div style={{
+                  position: 'absolute', bottom: 0, right: 0,
+                  width: 10, height: 10, borderRadius: '50%',
+                  background: act.dot, border: '2px solid #fff',
+                }} />
+              </Tooltip>
+            </div>
+            <Space direction="vertical" size={0}>
+              <Text strong style={{ fontSize: 13, color: '#1F2937' }}>
+                {r.first_name || r.last_name ? `${r.first_name || ''} ${r.last_name || ''}`.trim() : r.username}
+              </Text>
+              <Text type="secondary" style={{ fontSize: 11 }}>@{r.username}</Text>
+            </Space>
           </Space>
-        </Space>
-      ),
+        );
+      },
     },
-    { title: 'Email', dataIndex: 'email', key: 'email', render: v => v || '—' },
+    {
+      title: 'Email', dataIndex: 'email', key: 'email', ellipsis: true,
+      render: (v) => v ? (
+        <Space size={4}>
+          <Text style={{ fontSize: 12 }}>{v}</Text>
+          <CopyOutlined
+            style={{ fontSize: 10, color: '#9CA3AF', cursor: 'pointer' }}
+            onClick={() => { navigator.clipboard?.writeText(v); message.success('Email copied'); }}
+          />
+        </Space>
+      ) : <Text type="secondary">—</Text>,
+    },
     {
       title: 'Roles', key: 'roles',
       render: (_, r) => (
         <Space wrap size={4}>
-          {r.is_superuser && <Tag color="red"><SafetyOutlined /> Superuser</Tag>}
-          {(r.roles || []).map(rl => <Tag key={rl.id} color="blue">{rl.name}</Tag>)}
-          {!r.is_superuser && !r.roles?.length && <Text type="secondary" style={{ fontSize: 11 }}>No roles</Text>}
+          {r.is_superuser && (
+            <Tag color="red" style={{ fontSize: 11 }}>
+              <SafetyOutlined /> Superuser
+            </Tag>
+          )}
+          {(r.roles || []).map(rl => (
+            <Tag key={rl.id} color="blue" style={{ fontSize: 11 }}>{rl.name}</Tag>
+          ))}
+          {!r.is_superuser && !r.roles?.length && (
+            <Tooltip title="No roles assigned — this user has limited or no access">
+              <Tag color="warning" icon={<WarningOutlined />} style={{ fontSize: 11 }}>
+                No roles
+              </Tag>
+            </Tooltip>
+          )}
         </Space>
       ),
     },
     {
-      title: 'Status', dataIndex: 'is_active', key: 'status', width: 90,
-      render: v => <Badge status={v ? 'success' : 'default'} text={v ? 'Active' : 'Inactive'} />,
+      title: 'Status', key: 'status', width: 100,
+      render: (_, r) => (
+        <Tooltip title={r.is_superuser ? 'Cannot deactivate superuser' : (r.is_active ? 'Click to deactivate' : 'Click to activate')}>
+          <Switch
+            size="small"
+            checked={r.is_active}
+            disabled={r.is_superuser || toggleM.isPending}
+            onChange={(val) => toggleM.mutate({ id: r.id, is_active: val })}
+            checkedChildren="Active"
+            unCheckedChildren="Off"
+          />
+        </Tooltip>
+      ),
     },
     {
-      title: 'Last Login', dataIndex: 'last_login', key: 'last_login', width: 150,
-      render: v => v ? dayjs(v).format('DD MMM YYYY HH:mm') : '—',
+      title: 'Last Login', dataIndex: 'last_login', key: 'last_login', width: 110,
+      render: (v) => {
+        const act = activityBadge(v);
+        return (
+          <Tooltip title={v ? dayjs(v).format('DD MMM YYYY HH:mm') : 'Never logged in'}>
+            <Space size={4}>
+              <div style={{ width: 6, height: 6, borderRadius: '50%', background: act.dot, flexShrink: 0 }} />
+              <Text style={{ fontSize: 12, color: act.color }}>{act.relative}</Text>
+            </Space>
+          </Tooltip>
+        );
+      },
+      sorter: (a, b) => dayjs(a.last_login || 0).unix() - dayjs(b.last_login || 0).unix(),
     },
     {
-      title: 'Actions', key: 'act', fixed: 'right', width: 160,
+      title: 'Joined', dataIndex: 'created_at', key: 'created_at', width: 90,
+      render: (v) => (
+        <Tooltip title={v ? dayjs(v).format('DD MMM YYYY') : '—'}>
+          <Text style={{ fontSize: 12, color: '#6B7A8D' }}>
+            {v ? dayjs(v).fromNow(true) + ' ago' : '—'}
+          </Text>
+        </Tooltip>
+      ),
+      sorter: (a, b) => dayjs(a.created_at || 0).unix() - dayjs(b.created_at || 0).unix(),
+    },
+    {
+      title: '', key: 'act', fixed: 'right', width: 120,
       render: (_, r) => (
         <Space size={4}>
-          <Tooltip title="Edit"><Button size="small" icon={<EditOutlined />} onClick={() => openEdit(r)} /></Tooltip>
-          <Tooltip title="Roles"><Button size="small" icon={<TeamOutlined />} onClick={() => openRoles(r)} /></Tooltip>
-          <Tooltip title="Password"><Button size="small" icon={<KeyOutlined />} onClick={() => openPw(r)} /></Tooltip>
-          <Popconfirm title="Delete this user?" onConfirm={() => deleteM.mutate(r.id)} okText="Delete" okType="danger">
-            <Tooltip title="Delete"><Button size="small" danger icon={<DeleteOutlined />} /></Tooltip>
-          </Popconfirm>
+          <Tooltip title="View Profile">
+            <Button size="small" icon={<EyeOutlined />} onClick={() => setProfileUser(r)} />
+          </Tooltip>
+          <Tooltip title="Edit">
+            <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(r)} />
+          </Tooltip>
+          <Tooltip title="Change Password">
+            <Button size="small" icon={<KeyOutlined />} onClick={() => openPw(r)} />
+          </Tooltip>
+          <Dropdown
+            trigger={['click']}
+            menu={{
+              items: [
+                { key: 'roles',  label: 'Manage Roles',  icon: <TeamOutlined /> },
+                { key: 'copy',   label: 'Copy Username', icon: <CopyOutlined /> },
+                { type: 'divider' },
+                { key: 'delete', label: 'Delete User', icon: <DeleteOutlined />, danger: true, disabled: r.is_superuser },
+              ],
+              onClick: ({ key }) => {
+                if (key === 'roles')  openRoles(r);
+                if (key === 'copy')   { navigator.clipboard?.writeText(r.username); message.success('Username copied'); }
+                if (key === 'delete') {
+                  Modal.confirm({
+                    title: `Delete "${r.username}"?`,
+                    content: 'This action cannot be undone.',
+                    okText: 'Delete', okType: 'danger',
+                    onOk: () => deleteM.mutate(r.id),
+                  });
+                }
+              },
+            }}
+          >
+            <Button size="small" icon={<MoreOutlined />} />
+          </Dropdown>
         </Space>
       ),
     },
   ];
 
+  const pwInfo = pwStrength(pwVal);
+
   return (
     <div style={{ padding: 24 }}>
-      <Row gutter={[16, 16]} style={{ marginBottom: 20 }}>
+
+      {/* ── Stats cards ─────────────────────────────────────────────────── */}
+      <Row gutter={[12, 12]} style={{ marginBottom: 20 }}>
         {[
-          { title: 'Total Users',  value: total,                                                              color: '#1890ff', icon: <UserOutlined /> },
-          { title: 'Active',       value: users.filter(u => u.is_active).length,                             color: '#52c41a', icon: <CheckOutlined /> },
-          { title: 'Superusers',   value: users.filter(u => u.is_superuser).length,                         color: '#f5222d', icon: <SafetyOutlined /> },
-          { title: 'Without Role', value: users.filter(u => !u.roles?.length && !u.is_superuser).length,    color: '#fa8c16', icon: <TeamOutlined /> },
+          { title: 'Total Users',      value: total,       color: '#3B82F6', bg: '#EFF6FF', icon: <UserOutlined />,       filter: 'all' },
+          { title: 'Active',           value: activeCount, color: '#10B981', bg: '#F0FDF4', icon: <CheckCircleOutlined />, filter: 'active' },
+          { title: 'Superusers',       value: superCount,  color: '#EF4444', bg: '#FFF1F2', icon: <SafetyOutlined />,      filter: 'super' },
+          { title: 'No Role Assigned', value: noRoleCount, color: '#F59E0B', bg: '#FFFBEB', icon: <WarningOutlined />,     filter: 'norole' },
+          { title: 'Never Logged In',  value: neverCount,  color: '#9CA3AF', bg: '#F9FAFB', icon: <ClockCircleOutlined />, filter: 'all' },
         ].map(s => (
-          <Col xs={12} sm={6} key={s.title}>
-            <Card styles={{ body: { padding: '14px 18px' } }} style={{ borderTop: `3px solid ${s.color}` }}>
-              <Statistic title={s.title} value={s.value} prefix={s.icon} valueStyle={{ color: s.color, fontSize: 24 }} />
+          <Col xs={12} sm={12} md={8} lg={24/5} key={s.title} style={{ minWidth: 140 }}>
+            <Card
+              size="small"
+              hoverable
+              onClick={() => setStatusFilter(s.filter)}
+              style={{
+                borderTop: `3px solid ${s.color}`,
+                cursor: 'pointer',
+                background: statusFilter === s.filter ? s.bg : undefined,
+                transition: 'all 0.2s',
+              }}
+              styles={{ body: { padding: '12px 16px' } }}
+            >
+              <Statistic
+                title={<Text style={{ fontSize: 12 }}>{s.title}</Text>}
+                value={s.value}
+                prefix={s.icon}
+                valueStyle={{ color: s.color, fontSize: 22 }}
+              />
             </Card>
           </Col>
         ))}
       </Row>
 
-      <Card styles={{ body: { padding: '12px 16px' } }} style={{ marginBottom: 16 }}>
-        <Row gutter={[12, 8]} align="middle">
-          <Col flex={1}>
-            <Search placeholder="Search users…" value={search} onChange={e => setSearch(e.target.value)}
-              onSearch={setSearch} allowClear style={{ maxWidth: 320 }} />
+      {/* ── Filter + action bar ──────────────────────────────────────────── */}
+      <Card size="small" styles={{ body: { padding: '10px 14px' } }} style={{ marginBottom: 12 }}>
+        <Row gutter={[10, 8]} align="middle" wrap>
+          <Col>
+            <Input.Search
+              placeholder="Search name, username, email…"
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              allowClear
+              style={{ width: 260 }}
+              size="middle"
+            />
           </Col>
           <Col>
+            <Segmented
+              size="middle"
+              value={statusFilter}
+              onChange={setStatusFilter}
+              options={[
+                { label: 'All',      value: 'all' },
+                { label: 'Active',   value: 'active' },
+                { label: 'Inactive', value: 'inactive' },
+                { label: 'Super',    value: 'super' },
+                { label: 'No Role',  value: 'norole' },
+              ]}
+            />
+          </Col>
+          <Col>
+            <Select
+              placeholder={<><FilterOutlined /> Filter by role</>}
+              value={roleFilter}
+              onChange={setRoleFilter}
+              allowClear
+              style={{ width: 180 }}
+              options={(allRoles || []).map(r => ({ value: r.id, label: r.name }))}
+            />
+          </Col>
+          <Col flex={1} />
+          <Col>
             <Space>
-              <Button icon={<ReloadOutlined />} onClick={() => refetch()} loading={isLoading}>Refresh</Button>
+              <Tooltip title="Export CSV">
+                <Button icon={<DownloadOutlined />} onClick={() => exportUsersCSV(filteredUsers)}>
+                  Export
+                </Button>
+              </Tooltip>
+              <Button icon={<ReloadOutlined />} onClick={() => refetch()} loading={isLoading} />
               <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>New User</Button>
             </Space>
           </Col>
         </Row>
       </Card>
 
+      {/* ── Bulk action bar ──────────────────────────────────────────────── */}
+      {selectedKeys.length > 0 && (
+        <Card
+          size="small"
+          style={{ marginBottom: 12, background: '#EFF6FF', border: '1px solid #BAE0FF' }}
+          styles={{ body: { padding: '8px 14px' } }}
+        >
+          <Row align="middle" gutter={8}>
+            <Col>
+              <Text strong style={{ color: '#1677ff' }}>{selectedKeys.length} user(s) selected</Text>
+            </Col>
+            <Col>
+              <Space>
+                <Button size="small" icon={<CheckCircleOutlined />} onClick={() => bulkToggle(true)}>
+                  Activate
+                </Button>
+                <Button size="small" icon={<StopOutlined />} onClick={() => bulkToggle(false)}>
+                  Deactivate
+                </Button>
+                <Popconfirm title={`Delete ${selectedKeys.length} user(s)?`} onConfirm={bulkDelete} okType="danger" okText="Delete All">
+                  <Button size="small" danger icon={<DeleteOutlined />}>Delete</Button>
+                </Popconfirm>
+                <Button size="small" onClick={() => setSelectedKeys([])}>Clear</Button>
+              </Space>
+            </Col>
+          </Row>
+        </Card>
+      )}
+
+      {/* ── Users table ──────────────────────────────────────────────────── */}
       <Card styles={{ body: { padding: 0 } }}>
-        <Table columns={cols} dataSource={users} loading={isLoading} rowKey="id" size="middle"
-          scroll={{ x: 900 }}
-          pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (t, r) => `${r[0]}–${r[1]} of ${t}` }} />
+        <Table
+          columns={cols}
+          dataSource={filteredUsers}
+          loading={isLoading}
+          rowKey="id"
+          size="middle"
+          scroll={{ x: 960 }}
+          rowSelection={{
+            selectedRowKeys: selectedKeys,
+            onChange: setSelectedKeys,
+            getCheckboxProps: (r) => ({ disabled: r.is_superuser }),
+          }}
+          pagination={{
+            pageSize: 20,
+            showSizeChanger: true,
+            showTotal: (t, [f, l]) => (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                Showing {f}–{l} of <strong>{t}</strong> users
+                {filteredUsers.length !== users.length && ` (filtered from ${users.length})`}
+              </Text>
+            ),
+          }}
+          locale={{ emptyText: <Empty description="No users found" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
+        />
       </Card>
 
-      {/* Create / Edit Drawer */}
+      {/* ── Create / Edit Drawer ─────────────────────────────────────────── */}
       <Drawer
-        title={<Space>{editUser ? <EditOutlined /> : <PlusOutlined />}{editUser ? `Edit User — ${editUser.username}` : 'New User'}</Space>}
-        open={drawerOpen} onClose={() => { setDrawerOpen(false); setEditUser(null); form.resetFields(); }} width={460} destroyOnHidden>
+        title={
+          <Space>
+            {editUser
+              ? <><EditOutlined /> Edit User</>
+              : <><PlusOutlined /> New User</>
+            }
+          </Space>
+        }
+        open={drawerOpen}
+        onClose={() => { setDrawerOpen(false); setEditUser(null); form.resetFields(); }}
+        width={480}
+        destroyOnHidden
+        footer={
+          <Space style={{ justifyContent: 'flex-end', width: '100%' }}>
+            <Button onClick={() => { setDrawerOpen(false); setEditUser(null); form.resetFields(); }}>
+              Cancel
+            </Button>
+            <Button type="primary" onClick={() => form.submit()} loading={createM.isPending || updateM.isPending}>
+              {editUser ? 'Save Changes' : 'Create User'}
+            </Button>
+          </Space>
+        }
+      >
+        {/* Avatar preview header */}
+        {(editUser || form.getFieldValue('first_name')) && (
+          <div style={{ textAlign: 'center', padding: '0 0 20px' }}>
+            <Avatar
+              size={64}
+              style={{
+                background: userAvatarColor(editUser?.username || ''),
+                fontSize: 24, fontWeight: 700,
+              }}
+            >
+              {editUser ? userInitials(editUser) : '?'}
+            </Avatar>
+            {editUser && <div style={{ marginTop: 8, color: '#6B7A8D', fontSize: 12 }}>@{editUser.username}</div>}
+          </div>
+        )}
+
         <Form
           key={editUser ? `edit-${editUser.id}` : 'create'}
           form={form}
@@ -207,90 +577,329 @@ const UsersTab = () => {
           onFinish={onSave}
           initialValues={{ is_active: true, is_superuser: false }}
         >
+          {/* Personal info */}
+          <Divider orientation="left" orientationMargin={0} style={{ fontSize: 12, color: '#9CA3AF' }}>Personal Info</Divider>
           <Row gutter={12}>
             <Col span={12}>
-              <Form.Item name="first_name" label="First Name"><Input /></Form.Item>
+              <Form.Item name="first_name" label="First Name">
+                <Input placeholder="John" />
+              </Form.Item>
             </Col>
             <Col span={12}>
-              <Form.Item name="last_name" label="Last Name"><Input /></Form.Item>
+              <Form.Item name="last_name" label="Last Name">
+                <Input placeholder="Doe" />
+              </Form.Item>
             </Col>
           </Row>
-          <Form.Item name="username" label="Username" rules={[{ required: !editUser, message: 'Required' }]}>
-            <Input prefix={<UserOutlined />} disabled={!!editUser} />
-          </Form.Item>
-          {!editUser && (
-            <Form.Item name="password" label="Password"
-              rules={[{ required: true, message: 'Required' }, { min: 6, message: 'Minimum 6 characters' }]}>
-              <Password prefix={<LockOutlined />} />
-            </Form.Item>
-          )}
           <Form.Item name="email" label="Email" rules={[{ type: 'email', message: 'Invalid email' }]}>
-            <Input />
+            <Input prefix={<MailOutlined />} placeholder="john.doe@company.com" />
           </Form.Item>
+
+          {/* Account */}
+          <Divider orientation="left" orientationMargin={0} style={{ fontSize: 12, color: '#9CA3AF' }}>Account</Divider>
+          <Form.Item
+            name="username"
+            label="Username"
+            rules={[{ required: !editUser, message: 'Username is required' }]}
+            extra={editUser ? 'Username cannot be changed after creation.' : undefined}
+          >
+            <Input prefix={<UserOutlined />} disabled={!!editUser} placeholder="johndoe" />
+          </Form.Item>
+
           {!editUser && (
-            <Form.Item name="role_ids" label="Roles">
-              <Select
-                mode="multiple"
-                placeholder="Assign roles (optional)"
-                optionFilterProp="label"
-                options={(allRoles || []).map(r => ({ value: r.id, label: r.name }))}
-                allowClear
-              />
+            <Form.Item
+              name="password"
+              label={
+                <Space>
+                  Password
+                  {pwVal && (
+                    <Tag color={pwInfo.pct >= 80 ? 'success' : pwInfo.pct >= 60 ? 'warning' : 'error'} style={{ fontSize: 10 }}>
+                      {pwInfo.label}
+                    </Tag>
+                  )}
+                </Space>
+              }
+              rules={[{ required: true, message: 'Required' }, { min: 6, message: 'Min 6 characters' }]}
+            >
+              <Space.Compact style={{ width: '100%' }}>
+                <Input.Password
+                  prefix={<LockOutlined />}
+                  placeholder="Min. 6 characters"
+                  value={pwVal}
+                  onChange={e => { setPwVal(e.target.value); form.setFieldValue('password', e.target.value); }}
+                  style={{ flex: 1 }}
+                />
+                <Tooltip title="Generate secure password">
+                  <Button
+                    icon={<ThunderboltOutlined />}
+                    onClick={() => {
+                      const p = genPassword();
+                      setPwVal(p);
+                      form.setFieldValue('password', p);
+                    }}
+                  />
+                </Tooltip>
+              </Space.Compact>
             </Form.Item>
           )}
-          <Row gutter={12}>
+
+          {!editUser && pwVal && (
+            <div style={{ marginTop: -16, marginBottom: 16 }}>
+              <Progress
+                percent={pwInfo.pct}
+                showInfo={false}
+                strokeColor={pwInfo.color}
+                trailColor="#e5e7eb"
+                size="small"
+              />
+            </div>
+          )}
+
+          {/* Roles */}
+          <Form.Item name="role_ids" label="Assign Roles">
+            <Select
+              mode="multiple"
+              placeholder="Select roles (optional)"
+              optionFilterProp="label"
+              options={(allRoles || []).map(r => ({ value: r.id, label: r.name }))}
+              allowClear
+            />
+          </Form.Item>
+
+          {/* Settings */}
+          <Divider orientation="left" orientationMargin={0} style={{ fontSize: 12, color: '#9CA3AF' }}>Settings</Divider>
+          <Row gutter={24}>
             <Col span={12}>
-              <Form.Item name="is_active" label="Active" valuePropName="checked">
+              <Form.Item name="is_active" label="Account Status" valuePropName="checked">
                 <Switch checkedChildren="Active" unCheckedChildren="Inactive" />
               </Form.Item>
             </Col>
             <Col span={12}>
-              <Form.Item name="is_superuser" label="Superuser" valuePropName="checked">
+              <Form.Item
+                name="is_superuser"
+                label={<Space>Superuser <Tooltip title="Superusers bypass all permission checks"><InfoCircleOutlined style={{ color: '#9CA3AF' }} /></Tooltip></Space>}
+                valuePropName="checked"
+              >
                 <Switch checkedChildren="Yes" unCheckedChildren="No" />
               </Form.Item>
             </Col>
           </Row>
-          <Divider />
-          <Space style={{ width: '100%', justifyContent: 'flex-end' }}>
-            <Button onClick={() => { setDrawerOpen(false); setEditUser(null); form.resetFields(); }}>Cancel</Button>
-            <Button type="primary" htmlType="submit" loading={createM.isPending || updateM.isPending}>
-              {editUser ? 'Save Changes' : 'Create User'}
-            </Button>
-          </Space>
         </Form>
       </Drawer>
 
-      {/* Change Password Modal */}
+      {/* ── User Profile Side Panel ───────────────────────────────────────── */}
+      <Drawer
+        title={
+          <Space>
+            <IdcardOutlined />
+            User Profile
+          </Space>
+        }
+        open={!!profileUser}
+        onClose={() => setProfileUser(null)}
+        width={400}
+        footer={
+          profileUser && (
+            <Space>
+              <Button icon={<EditOutlined />} onClick={() => { openEdit(profileUser); setProfileUser(null); }}>
+                Edit
+              </Button>
+              <Button icon={<KeyOutlined />} onClick={() => { openPw(profileUser); setProfileUser(null); }}>
+                Password
+              </Button>
+              <Button icon={<TeamOutlined />} onClick={() => { openRoles(profileUser); setProfileUser(null); }}>
+                Roles
+              </Button>
+            </Space>
+          )
+        }
+      >
+        {profileUser && (() => {
+          const u = profileUser;
+          const color = userAvatarColor(u.username);
+          const act = activityBadge(u.last_login);
+          return (
+            <>
+              {/* Profile header */}
+              <div style={{ textAlign: 'center', padding: '8px 0 24px' }}>
+                <div style={{ position: 'relative', display: 'inline-block' }}>
+                  <Avatar size={72} style={{ background: color, fontSize: 28, fontWeight: 800 }}>
+                    {userInitials(u)}
+                  </Avatar>
+                  <div style={{
+                    position: 'absolute', bottom: 2, right: 2,
+                    width: 14, height: 14, borderRadius: '50%',
+                    background: act.dot, border: '2.5px solid #fff',
+                  }} />
+                </div>
+                <div style={{ marginTop: 12, fontWeight: 700, fontSize: 17, color: '#1F2937' }}>
+                  {u.first_name || u.last_name ? `${u.first_name || ''} ${u.last_name || ''}`.trim() : u.username}
+                </div>
+                <div style={{ color: '#9CA3AF', fontSize: 12, marginTop: 2 }}>@{u.username}</div>
+                <div style={{ marginTop: 10, display: 'flex', justifyContent: 'center', gap: 6, flexWrap: 'wrap' }}>
+                  {u.is_superuser && <Tag color="red" icon={<SafetyOutlined />}>Superuser</Tag>}
+                  {(u.roles || []).map(r => <Tag key={r.id} color="blue">{r.name}</Tag>)}
+                  {!u.is_superuser && !u.roles?.length && <Tag color="warning" icon={<WarningOutlined />}>No roles</Tag>}
+                </div>
+              </div>
+
+              <Divider style={{ margin: '0 0 16px' }} />
+
+              {/* Details */}
+              <div style={{ marginBottom: 20 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.07em', color: '#9CA3AF', textTransform: 'uppercase', marginBottom: 10 }}>Contact</div>
+                {[
+                  { label: 'Email', value: u.email || '—', extra: u.email && <CopyOutlined style={{ cursor: 'pointer', color: '#9CA3AF' }} onClick={() => { navigator.clipboard?.writeText(u.email); message.success('Copied'); }} /> },
+                  { label: 'Username', value: `@${u.username}` },
+                  { label: 'User ID', value: `#${u.id}` },
+                ].map(row => (
+                  <div key={row.label} style={{ display: 'flex', justifyContent: 'space-between', padding: '7px 0', borderBottom: '1px solid #f0f0f0', alignItems: 'center' }}>
+                    <Text type="secondary" style={{ fontSize: 12 }}>{row.label}</Text>
+                    <Space size={6}>
+                      <Text style={{ fontSize: 12, fontWeight: 500 }}>{row.value}</Text>
+                      {row.extra}
+                    </Space>
+                  </div>
+                ))}
+              </div>
+
+              {/* Security */}
+              <div style={{ marginBottom: 20 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.07em', color: '#9CA3AF', textTransform: 'uppercase', marginBottom: 10 }}>Security & Activity</div>
+                {[
+                  { label: 'Status',      value: u.is_active ? <Badge status="success" text="Active" /> : <Badge status="default" text="Inactive" /> },
+                  { label: 'Last Login',  value: <span style={{ color: act.color }}>{act.relative === 'Never' ? 'Never logged in' : dayjs(u.last_login).format('DD MMM YYYY HH:mm')}</span> },
+                  { label: 'Joined',      value: u.created_at ? dayjs(u.created_at).format('DD MMM YYYY') : '—' },
+                  { label: 'Superuser',   value: u.is_superuser ? <Tag color="red">Yes</Tag> : <Tag>No</Tag> },
+                ].map(row => (
+                  <div key={row.label} style={{ display: 'flex', justifyContent: 'space-between', padding: '7px 0', borderBottom: '1px solid #f0f0f0', alignItems: 'center' }}>
+                    <Text type="secondary" style={{ fontSize: 12 }}>{row.label}</Text>
+                    <span style={{ fontSize: 12, fontWeight: 500 }}>{row.value}</span>
+                  </div>
+                ))}
+              </div>
+
+              {/* Permissions summary */}
+              {(u.roles?.length > 0 || u.is_superuser) && (
+                <div>
+                  <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.07em', color: '#9CA3AF', textTransform: 'uppercase', marginBottom: 10 }}>Access</div>
+                  {u.is_superuser ? (
+                    <Alert type="warning" showIcon icon={<SafetyOutlined />}
+                      message="Superuser — full system access, all permission checks bypassed."
+                      style={{ fontSize: 12 }}
+                    />
+                  ) : (
+                    <Space wrap size={4}>
+                      {(u.roles || []).map(r => (
+                        <Tag key={r.id} color="blue" style={{ fontSize: 11 }}>{r.name}</Tag>
+                      ))}
+                    </Space>
+                  )}
+                </div>
+              )}
+            </>
+          );
+        })()}
+      </Drawer>
+
+      {/* ── Change Password Modal ─────────────────────────────────────────── */}
       <Modal
-        title={<Space><KeyOutlined />Change Password — {pwUser?.username}</Space>}
-        open={pwOpen} onCancel={() => setPwOpen(false)} footer={null} destroyOnHidden>
-        <Form form={pwForm} layout="vertical"
-          onFinish={v => pwM.mutate({ id: pwUser.id, body: { new_password: v.new_password } })}>
-          <Form.Item name="new_password" label="New Password"
-            rules={[{ required: true, message: 'Required' }, { min: 6, message: 'Minimum 6 characters' }]}>
-            <Password prefix={<LockOutlined />} />
+        title={<Space><KeyOutlined />Change Password — <Text code>{pwUser?.username}</Text></Space>}
+        open={pwOpen}
+        onCancel={() => { setPwOpen(false); pwForm.resetFields(); setPwVal(''); }}
+        footer={null}
+        destroyOnHidden
+        width={420}
+      >
+        <Form
+          form={pwForm}
+          layout="vertical"
+          onFinish={v => pwM.mutate({ id: pwUser.id, body: { new_password: v.new_password } })}
+        >
+          <Form.Item
+            name="new_password"
+            label={
+              <Space>
+                New Password
+                {pwVal && (
+                  <Tag color={pwInfo.pct >= 80 ? 'success' : pwInfo.pct >= 60 ? 'warning' : 'error'} style={{ fontSize: 10 }}>
+                    {pwInfo.label}
+                  </Tag>
+                )}
+              </Space>
+            }
+            rules={[{ required: true, message: 'Required' }, { min: 6, message: 'Min 6 characters' }]}
+          >
+            <Space.Compact style={{ width: '100%' }}>
+              <Input.Password
+                prefix={<LockOutlined />}
+                value={pwVal}
+                onChange={e => { setPwVal(e.target.value); pwForm.setFieldValue('new_password', e.target.value); }}
+                placeholder="Enter new password"
+                style={{ flex: 1 }}
+              />
+              <Tooltip title="Generate password">
+                <Button
+                  icon={<ThunderboltOutlined />}
+                  onClick={() => {
+                    const p = genPassword();
+                    setPwVal(p);
+                    pwForm.setFieldValue('new_password', p);
+                  }}
+                />
+              </Tooltip>
+            </Space.Compact>
           </Form.Item>
-          <Form.Item name="confirm" label="Confirm Password"
+
+          {pwVal && (
+            <div style={{ marginTop: -12, marginBottom: 16 }}>
+              <Progress
+                percent={pwInfo.pct}
+                showInfo={false}
+                strokeColor={pwInfo.color}
+                trailColor="#e5e7eb"
+                size="small"
+                style={{ marginBottom: 4 }}
+              />
+              <Text style={{ fontSize: 11, color: pwInfo.color }}>{pwInfo.label} password</Text>
+            </div>
+          )}
+
+          <Form.Item
+            name="confirm"
+            label="Confirm Password"
             dependencies={['new_password']}
-            rules={[{ required: true }, ({ getFieldValue }) => ({
-              validator(_, v) {
-                if (!v || getFieldValue('new_password') === v) return Promise.resolve();
-                return Promise.reject(new Error('Passwords do not match'));
-              },
-            })]}>
-            <Password prefix={<LockOutlined />} />
+            rules={[
+              { required: true, message: 'Please confirm' },
+              ({ getFieldValue }) => ({
+                validator(_, v) {
+                  if (!v || getFieldValue('new_password') === v) return Promise.resolve();
+                  return Promise.reject(new Error('Passwords do not match'));
+                },
+              }),
+            ]}
+          >
+            <Input.Password prefix={<LockOutlined />} placeholder="Repeat password" />
           </Form.Item>
+
           <Space style={{ width: '100%', justifyContent: 'flex-end' }}>
-            <Button onClick={() => setPwOpen(false)}>Cancel</Button>
-            <Button type="primary" htmlType="submit" loading={pwM.isPending}>Change Password</Button>
+            <Button onClick={() => { setPwOpen(false); pwForm.resetFields(); setPwVal(''); }}>Cancel</Button>
+            <Button type="primary" htmlType="submit" loading={pwM.isPending} icon={<CheckOutlined />}>
+              Change Password
+            </Button>
           </Space>
         </Form>
       </Modal>
 
-      {/* Assign Roles Modal */}
+      {/* ── Assign Roles Modal ────────────────────────────────────────────── */}
       <Modal
-        title={<Space><TeamOutlined />Assign Roles — {rolesUser?.username}</Space>}
-        open={rolesOpen} onCancel={() => setRolesOpen(false)} footer={null} destroyOnHidden>
+        title={<Space><TeamOutlined />Manage Roles — <Text code>{rolesUser?.username}</Text></Space>}
+        open={rolesOpen}
+        onCancel={() => setRolesOpen(false)}
+        footer={null}
+        destroyOnHidden
+        width={440}
+      >
         {rolesUser && (
           <RolesSelector
             allRoles={allRoles}
@@ -331,36 +940,64 @@ const RolesSelector = ({ allRoles, currentRoles, onSave, onCancel, loading }) =>
 };
 
 
+// ── Role helpers ──────────────────────────────────────────────────────────────
+const ROLE_COLORS = [
+  '#3B82F6','#10B981','#8B5CF6','#EF4444','#F59E0B',
+  '#EC4899','#14B8A6','#6366F1','#84CC16','#F97316',
+];
+const roleColor = (name = '') =>
+  ROLE_COLORS[name.split('').reduce((a, c) => a + c.charCodeAt(0), 0) % ROLE_COLORS.length];
+
+const MODULE_CONFIG = {
+  personnel:      { label: 'Personnel',      color: '#3B82F6', icon: <TeamOutlined /> },
+  attendance:     { label: 'Attendance',      color: '#10B981', icon: <ClockCircleOutlined /> },
+  devices:        { label: 'Devices',         color: '#8B5CF6', icon: <DesktopOutlined /> },
+  access_control: { label: 'Access Control',  color: '#EF4444', icon: <LockOutlined /> },
+  visitors:       { label: 'Visitors',        color: '#F59E0B', icon: <IdcardOutlined /> },
+  reports:        { label: 'Reports',         color: '#EC4899', icon: <FileTextOutlined /> },
+  pob:            { label: 'POB Status',      color: '#14B8A6', icon: <BarChartOutlined /> },
+  emergency:      { label: 'Emergency',       color: '#DC2626', icon: <AlertOutlined /> },
+  mustering:      { label: 'Mustering',       color: '#6366F1', icon: <SafetyOutlined /> },
+  settings:       { label: 'Settings',        color: '#64748B', icon: <SettingOutlined /> },
+};
+
 // ════════════════════════════════════════════════════════════════════════════
 // ROLES & PERMISSIONS TAB
 // ════════════════════════════════════════════════════════════════════════════
 const RolesTab = () => {
   const { message } = App.useApp();
   const qc = useQueryClient();
-  const [selectedRole, setSelectedRole] = useState(null);
-  const [drawerOpen, setDrawerOpen]     = useState(false);
-  const [editRole, setEditRole]         = useState(null);
+
+  // ── State ─────────────────────────────────────────────────────────────────
+  const [selectedRole,    setSelectedRole]    = useState(null);
+  const [drawerOpen,      setDrawerOpen]      = useState(false);
+  const [editRole,        setEditRole]        = useState(null);
+  const [roleSearch,      setRoleSearch]      = useState('');
+  const [permSearch,      setPermSearch]      = useState('');
+  const [expandedModules, setExpandedModules] = useState(() => new Set(MODULE_ORDER));
   const [form] = Form.useForm();
 
+  // ── Queries ───────────────────────────────────────────────────────────────
   const { data: rolesData, isLoading: rolesLoading, refetch } = useQuery({
     queryKey: ['settings-roles'],
     queryFn: () => apiService.get('/api/v1/settings/roles'),
   });
-  const roles = Array.isArray(rolesData) ? rolesData : [];
+  const roles = Array.isArray(rolesData) ? rolesData : (rolesData?.data ?? []);
 
   const { data: permsData, isLoading: permsLoading } = useQuery({
     queryKey: ['settings-permissions'],
     queryFn: () => apiService.get('/api/v1/settings/permissions'),
   });
-  const allPerms = Array.isArray(permsData) ? permsData : [];
+  const allPerms = Array.isArray(permsData) ? permsData : (permsData?.data ?? []);
 
-  const { data: roleDetailData } = useQuery({
+  const { data: roleDetailData, isLoading: detailLoading } = useQuery({
     queryKey: ['settings-role-detail', selectedRole],
     queryFn: () => apiService.get(`/api/v1/settings/roles/${selectedRole}`),
     enabled: !!selectedRole,
   });
-  const roleDetail = roleDetailData;
+  const roleDetail = roleDetailData?.data ?? roleDetailData;
 
+  // ── Mutations ─────────────────────────────────────────────────────────────
   const createM = useMutation({
     mutationFn: (body) => apiService.post('/api/v1/settings/roles', body),
     onSuccess: () => {
@@ -371,11 +1008,9 @@ const RolesTab = () => {
     },
     onError: (e) => {
       const msg = e?.message || 'Failed to create role';
-      if (msg.toLowerCase().includes('already exists')) {
-        form.setFields([{ name: 'name', errors: [msg] }]);
-      } else {
-        message.error(msg);
-      }
+      msg.toLowerCase().includes('already exists')
+        ? form.setFields([{ name: 'name', errors: [msg] }])
+        : message.error(msg);
     },
   });
   const updateM = useMutation({
@@ -388,21 +1023,15 @@ const RolesTab = () => {
     },
     onError: (e) => {
       const msg = e?.message || 'Failed to update role';
-      if (msg.toLowerCase().includes('already exists')) {
-        form.setFields([{ name: 'name', errors: [msg] }]);
-      } else {
-        message.error(msg);
-      }
+      msg.toLowerCase().includes('already exists')
+        ? form.setFields([{ name: 'name', errors: [msg] }])
+        : message.error(msg);
     },
   });
   const deleteM = useMutation({
     mutationFn: (id) => apiService.delete(`/api/v1/settings/roles/${id}`),
-    onSuccess: () => {
-      message.success('Role deleted');
-      qc.invalidateQueries(['settings-roles']);
-      setSelectedRole(null);
-    },
-    onError: (e) => message.error(e?.message ||'Cannot delete role'),
+    onSuccess: () => { message.success('Role deleted'); qc.invalidateQueries(['settings-roles']); setSelectedRole(null); },
+    onError: (e) => message.error(e?.message || 'Cannot delete role (has assigned users)'),
   });
   const permsM = useMutation({
     mutationFn: ({ id, permission_ids }) =>
@@ -411,173 +1040,550 @@ const RolesTab = () => {
       qc.invalidateQueries(['settings-role-detail', selectedRole]);
       qc.invalidateQueries(['settings-roles']);
     },
-    onError: (e) => message.error(e?.message ||'Failed to save permissions'),
+    onError: (e) => message.error(e?.message || 'Failed to save permissions'),
+  });
+  const cloneM = useMutation({
+    mutationFn: async ({ sourceName, permIds }) => {
+      const res  = await apiService.post('/api/v1/settings/roles', {
+        name: `Copy of ${sourceName}`,
+        description: `Cloned from "${sourceName}"`,
+      });
+      const newId = res?.data?.id ?? res?.id;
+      if (newId && permIds.length > 0) {
+        await apiService.put(`/api/v1/settings/roles/${newId}/permissions`, { permission_ids: permIds });
+      }
+      return newId;
+    },
+    onSuccess: (newId) => {
+      message.success('Role cloned');
+      qc.invalidateQueries(['settings-roles']);
+      if (newId) setSelectedRole(newId);
+    },
+    onError: (e) => message.error(e?.message || 'Clone failed'),
   });
 
+  // ── Derived data ──────────────────────────────────────────────────────────
   const openCreate = () => { setEditRole(null); form.resetFields(); setDrawerOpen(true); };
-  const openEdit   = (r) => { setEditRole(r); form.setFieldsValue(r); setDrawerOpen(true); };
+  const openEdit   = (r) => {
+    setEditRole(r);
+    form.setFieldsValue({ name: r.name, description: r.description, is_active: r.is_active ?? true });
+    setDrawerOpen(true);
+  };
 
   const onSave = (v) => {
-    // Client-side duplicate check before hitting the server
     const trimmed = v.name?.trim() ?? '';
-    const conflict = roles.find(r =>
-      r.name.toLowerCase() === trimmed.toLowerCase() &&
-      r.id !== editRole?.id
-    );
-    if (conflict) {
-      form.setFields([{ name: 'name', errors: [`A role named "${conflict.name}" already exists`] }]);
-      return;
-    }
+    const conflict = roles.find(r => r.name.toLowerCase() === trimmed.toLowerCase() && r.id !== editRole?.id);
+    if (conflict) { form.setFields([{ name: 'name', errors: [`"${conflict.name}" already exists`] }]); return; }
     editRole ? updateM.mutate({ id: editRole.id, body: v }) : createM.mutate(v);
   };
 
   const permsByModule = useMemo(() => {
     const map = {};
     allPerms.forEach(p => {
-      if (!map[p.module]) map[p.module] = [];
-      map[p.module].push(p);
+      const mod = p.module ?? p.codename?.split('.')?.[0] ?? 'other';
+      if (!map[mod]) map[mod] = [];
+      map[mod].push(p);
     });
     return map;
   }, [allPerms]);
 
-  const rolePermIds = useMemo(() => new Set((roleDetail?.permissions || []).map(p => p.id)), [roleDetail]);
+  const rolePermIds = useMemo(
+    () => new Set((roleDetail?.permissions || []).map(p => p.id)),
+    [roleDetail],
+  );
+
+  const filteredPermsByModule = useMemo(() => {
+    if (!permSearch.trim()) return permsByModule;
+    const q = permSearch.toLowerCase();
+    const out = {};
+    Object.entries(permsByModule).forEach(([mod, perms]) => {
+      const matched = perms.filter(p =>
+        p.name?.toLowerCase().includes(q) ||
+        p.codename?.toLowerCase().includes(q) ||
+        p.description?.toLowerCase().includes(q)
+      );
+      if (matched.length) out[mod] = matched;
+    });
+    return out;
+  }, [permsByModule, permSearch]);
+
+  const grantedCount = rolePermIds.size;
+  const totalPerms   = allPerms.length;
+  const grantPct     = totalPerms ? Math.round((grantedCount / totalPerms) * 100) : 0;
 
   const togglePerm = (permId) => {
-    if (!selectedRole) return;
-    const newSet = new Set(rolePermIds);
-    if (newSet.has(permId)) newSet.delete(permId); else newSet.add(permId);
-    permsM.mutate({ id: selectedRole, permission_ids: Array.from(newSet) });
+    const next = new Set(rolePermIds);
+    next.has(permId) ? next.delete(permId) : next.add(permId);
+    permsM.mutate({ id: selectedRole, permission_ids: [...next] });
   };
 
   const toggleModule = (module) => {
-    if (!selectedRole) return;
-    const modulePerms = (permsByModule[module] || []).map(p => p.id);
-    const allChecked  = modulePerms.every(id => rolePermIds.has(id));
-    const newSet      = new Set(rolePermIds);
-    if (allChecked) modulePerms.forEach(id => newSet.delete(id));
-    else            modulePerms.forEach(id => newSet.add(id));
-    permsM.mutate({ id: selectedRole, permission_ids: Array.from(newSet) });
+    const ids     = (permsByModule[module] || []).map(p => p.id);
+    const allOn   = ids.every(id => rolePermIds.has(id));
+    const next    = new Set(rolePermIds);
+    ids.forEach(id => (allOn ? next.delete(id) : next.add(id)));
+    permsM.mutate({ id: selectedRole, permission_ids: [...next] });
   };
 
-  const roleCols = [
-    {
-      title: 'Role', key: 'role',
-      render: (_, r) => (
-        <Space direction="vertical" size={0}>
-          <Text strong style={{ color: selectedRole === r.id ? '#1890ff' : undefined }}>{r.name}</Text>
-          <Text type="secondary" style={{ fontSize: 11 }}>{r.description || '—'}</Text>
-        </Space>
-      ),
-    },
-    { title: 'Users', dataIndex: 'user_count',      key: 'users', width: 60,  render: v => <Tag>{v}</Tag> },
-    { title: 'Perms', dataIndex: 'permission_count', key: 'perms', width: 60,  render: v => <Tag color="blue">{v}</Tag> },
-    {
-      title: '', key: 'act', width: 90,
-      render: (_, r) => (
-        <Space size={4} onClick={e => e.stopPropagation()}>
-          <Tooltip title="Edit">
-            <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(r)} />
-          </Tooltip>
-          <Popconfirm title={`Delete "${r.name}"?`} onConfirm={() => deleteM.mutate(r.id)} okType="danger" okText="Delete">
-            <Tooltip title="Delete">
-              <Button size="small" danger icon={<DeleteOutlined />} disabled={r.user_count > 0} />
-            </Tooltip>
-          </Popconfirm>
-        </Space>
-      ),
-    },
-  ];
+  const toggleExpandModule = (mod) => {
+    setExpandedModules(prev => {
+      const s = new Set(prev);
+      s.has(mod) ? s.delete(mod) : s.add(mod);
+      return s;
+    });
+  };
 
+  const filteredRoles = roleSearch.trim()
+    ? roles.filter(r =>
+        r.name.toLowerCase().includes(roleSearch.toLowerCase()) ||
+        r.description?.toLowerCase().includes(roleSearch.toLowerCase())
+      )
+    : roles;
+
+  // stats
+  const unassignedRoles = roles.filter(r => !r.user_count).length;
+  const emptyRoles      = roles.filter(r => !r.permission_count).length;
+
+  // ── Render ────────────────────────────────────────────────────────────────
   return (
     <div style={{ padding: 24 }}>
-      <style>{`.role-row-selected td { background: #e6f4ff !important; } .role-row-hover { cursor: pointer; }`}</style>
+
+      {/* ── Stats mini row ──────────────────────────────────────────────── */}
+      <Row gutter={[12, 12]} style={{ marginBottom: 20 }}>
+        {[
+          { label: 'Total Roles',        value: roles.length,     color: '#3B82F6', icon: <TeamOutlined /> },
+          { label: 'Total Permissions',  value: totalPerms,       color: '#10B981', icon: <LockOutlined /> },
+          { label: 'No Users Assigned',  value: unassignedRoles,  color: '#F59E0B', icon: <WarningOutlined /> },
+          { label: 'No Permissions Set', value: emptyRoles,       color: '#EF4444', icon: <StopOutlined /> },
+        ].map(s => (
+          <Col xs={12} md={6} key={s.label}>
+            <Card size="small" styles={{ body: { padding: '10px 16px' } }} style={{ borderTop: `3px solid ${s.color}` }}>
+              <Statistic
+                title={<Text style={{ fontSize: 12 }}>{s.label}</Text>}
+                value={s.value}
+                prefix={<span style={{ color: s.color }}>{s.icon}</span>}
+                valueStyle={{ color: s.color, fontSize: 22 }}
+              />
+            </Card>
+          </Col>
+        ))}
+      </Row>
+
       <Row gutter={16}>
-        {/* Left: role list — click any row to manage its permissions */}
+        {/* ── Left: Role list ───────────────────────────────────────────── */}
         <Col xs={24} lg={8}>
           <Card
-            title={<Space><TeamOutlined />Roles ({roles.length})</Space>}
-            extra={<Button type="primary" size="small" icon={<PlusOutlined />} onClick={openCreate}>New</Button>}
             styles={{ body: { padding: 0 } }}
+            title={
+              <Space>
+                <TeamOutlined />
+                <span>Roles</span>
+                <Tag>{roles.length}</Tag>
+              </Space>
+            }
+            extra={
+              <Button type="primary" size="small" icon={<PlusOutlined />} onClick={openCreate}>
+                New Role
+              </Button>
+            }
           >
-            <Table
-              columns={roleCols}
-              dataSource={roles}
-              loading={rolesLoading}
-              rowKey="id"
-              size="small"
-              pagination={false}
-              rowClassName={r => `role-row-hover${r.id === selectedRole ? ' role-row-selected' : ''}`}
-              onRow={r => ({ onClick: () => setSelectedRole(r.id) })}
-            />
+            {/* Search */}
+            <div style={{ padding: '10px 12px', borderBottom: '1px solid #f0f0f0' }}>
+              <Input
+                prefix={<SearchOutlined style={{ color: '#9CA3AF' }} />}
+                placeholder="Search roles…"
+                value={roleSearch}
+                onChange={e => setRoleSearch(e.target.value)}
+                allowClear
+                size="small"
+              />
+            </div>
+
+            {/* Role cards */}
+            <div style={{ maxHeight: 560, overflowY: 'auto' }}>
+              {rolesLoading ? (
+                <div style={{ padding: 32, textAlign: 'center' }}><Spin /></div>
+              ) : filteredRoles.length === 0 ? (
+                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No roles found" style={{ padding: 24 }} />
+              ) : (
+                filteredRoles.map(r => {
+                  const color    = roleColor(r.name);
+                  const isActive = selectedRole === r.id;
+                  return (
+                    <div
+                      key={r.id}
+                      onClick={() => setSelectedRole(r.id)}
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: 10,
+                        padding: '11px 14px',
+                        borderLeft: `4px solid ${isActive ? color : 'transparent'}`,
+                        background: isActive ? `${color}0e` : 'transparent',
+                        borderBottom: '1px solid #f5f5f5',
+                        cursor: 'pointer', transition: 'all 0.15s',
+                      }}
+                      onMouseEnter={e => { if (!isActive) e.currentTarget.style.background = '#fafafa'; }}
+                      onMouseLeave={e => { if (!isActive) e.currentTarget.style.background = 'transparent'; }}
+                    >
+                      <Avatar
+                        size={36}
+                        style={{ background: color, fontSize: 13, fontWeight: 800, flexShrink: 0 }}
+                      >
+                        {r.name.slice(0, 2).toUpperCase()}
+                      </Avatar>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{
+                          fontWeight: 600, fontSize: 13,
+                          color: isActive ? color : '#1F2937',
+                          whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                        }}>
+                          {r.name}
+                          {r.is_active === false && (
+                            <Tag color="default" style={{ marginLeft: 6, fontSize: 9 }}>INACTIVE</Tag>
+                          )}
+                        </div>
+                        <div style={{
+                          fontSize: 11, color: '#9CA3AF', marginTop: 2,
+                          whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                        }}>
+                          {r.description || 'No description'}
+                        </div>
+                        <Space size={4} style={{ marginTop: 5 }}>
+                          <Tag style={{ fontSize: 10, padding: '0 5px' }}>
+                            <UserOutlined /> {r.user_count ?? 0} users
+                          </Tag>
+                          <Tag color="blue" style={{ fontSize: 10, padding: '0 5px' }}>
+                            <LockOutlined /> {r.permission_count ?? 0} perms
+                          </Tag>
+                        </Space>
+                      </div>
+                      <Dropdown
+                        trigger={['click']}
+                        menu={{
+                          items: [
+                            { key: 'edit',   label: 'Edit',        icon: <EditOutlined /> },
+                            { key: 'clone',  label: 'Clone Role',  icon: <CopyOutlined />, disabled: cloneM.isPending },
+                            { type: 'divider' },
+                            {
+                              key: 'delete', label: 'Delete', icon: <DeleteOutlined />, danger: true,
+                              disabled: (r.user_count ?? 0) > 0,
+                            },
+                          ],
+                          onClick: ({ key, domEvent }) => {
+                            domEvent.stopPropagation();
+                            if (key === 'edit') openEdit(r);
+                            if (key === 'clone') {
+                              setSelectedRole(r.id);
+                              cloneM.mutate({ sourceName: r.name, permIds: Array.from(rolePermIds) });
+                            }
+                            if (key === 'delete') {
+                              Modal.confirm({
+                                title: `Delete role "${r.name}"?`,
+                                content: (r.user_count ?? 0) > 0
+                                  ? 'This role has assigned users and cannot be deleted.'
+                                  : 'This action cannot be undone.',
+                                okText: 'Delete', okType: 'danger',
+                                onOk: () => deleteM.mutate(r.id),
+                              });
+                            }
+                          },
+                        }}
+                      >
+                        <Button
+                          type="text"
+                          size="small"
+                          icon={<MoreOutlined />}
+                          onClick={e => e.stopPropagation()}
+                          style={{ flexShrink: 0 }}
+                        />
+                      </Dropdown>
+                    </div>
+                  );
+                })
+              )}
+            </div>
           </Card>
         </Col>
 
-        {/* Right: permission matrix */}
+        {/* ── Right: Permission matrix ───────────────────────────────────── */}
         <Col xs={24} lg={16}>
-          <Card
-            title={
-              <Space>
-                <LockOutlined />
-                {selectedRole && roleDetail
-                  ? `Permissions — ${roleDetail.name}`
-                  : selectedRole
-                  ? 'Loading permissions…'
-                  : 'Select a role to manage its permissions'}
-              </Space>
-            }
-            styles={{ body: { padding: '16px 20px' } }}
-          >
+          <Card styles={{ body: { padding: '16px 18px' } }}>
             {!selectedRole ? (
               <Empty
                 image={Empty.PRESENTED_IMAGE_SIMPLE}
                 description={
-                  <span>
-                    Click any row in the role list on the left<br />to view and edit its permissions
-                  </span>
+                  <Space direction="vertical" size={4}>
+                    <Text>Click a role on the left to view and manage its permissions</Text>
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      Or create a new role using the "New Role" button
+                    </Text>
+                  </Space>
                 }
+                style={{ padding: '60px 0' }}
               />
-            ) : permsLoading ? (
-              <div style={{ textAlign: 'center', padding: 32, color: '#8c8c8c' }}>Loading permissions…</div>
-            ) : allPerms.length === 0 ? (
-              <Empty description="No permissions found. Check the backend." />
+            ) : detailLoading || permsLoading ? (
+              <div style={{ textAlign: 'center', padding: 48 }}><Spin size="large" /></div>
             ) : (
-              MODULE_ORDER.map(module => {
-                const perms = permsByModule[module];
-                if (!perms || perms.length === 0) return null;
-                const allChecked  = perms.every(p => rolePermIds.has(p.id));
-                const someChecked = perms.some(p => rolePermIds.has(p.id));
-                return (
-                  <div key={module} style={{ marginBottom: 16 }}>
-                    <Checkbox
-                      checked={allChecked}
-                      indeterminate={someChecked && !allChecked}
-                      onChange={() => toggleModule(module)}
-                      style={{ fontWeight: 600, fontSize: 13, marginBottom: 8, display: 'block' }}
-                    >
-                      {MODULE_LABEL[module] || module}
-                    </Checkbox>
-                    <Row gutter={[8, 4]} style={{ paddingLeft: 24 }}>
-                      {perms.map(p => (
-                        <Col xs={24} sm={12} md={8} key={p.id}>
-                          <Checkbox checked={rolePermIds.has(p.id)} onChange={() => togglePerm(p.id)}>
-                            <Tooltip title={p.description}>
-                              <span style={{ fontSize: 12 }}>{p.name}</span>
-                            </Tooltip>
-                          </Checkbox>
-                        </Col>
-                      ))}
-                    </Row>
-                    <Divider style={{ margin: '10px 0' }} />
+              <>
+                {/* Role header */}
+                {roleDetail && (() => {
+                  const rc = roleColor(roleDetail.name);
+                  return (
+                    <div style={{
+                      display: 'flex', alignItems: 'center', gap: 14,
+                      padding: '0 0 14px', marginBottom: 14,
+                      borderBottom: '1px solid #f0f0f0',
+                    }}>
+                      <Avatar size={48} style={{ background: rc, fontSize: 18, fontWeight: 800, flexShrink: 0 }}>
+                        {roleDetail.name?.slice(0, 2).toUpperCase()}
+                      </Avatar>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontWeight: 700, fontSize: 16, color: '#1F2937' }}>{roleDetail.name}</div>
+                        {roleDetail.description && (
+                          <div style={{ fontSize: 12, color: '#9CA3AF', marginTop: 2 }}>{roleDetail.description}</div>
+                        )}
+                        <Space size={6} style={{ marginTop: 6 }}>
+                          <Tag icon={<UserOutlined />}>{roleDetail.user_count ?? 0} users</Tag>
+                          <Tag icon={<LockOutlined />} color="blue">{grantedCount} / {totalPerms} permissions</Tag>
+                          <Tag color={grantPct >= 80 ? 'success' : grantPct >= 40 ? 'warning' : 'default'}>
+                            {grantPct}% access
+                          </Tag>
+                        </Space>
+                      </div>
+                      <Space>
+                        <Tooltip title="Clone this role with all its permissions">
+                          <Button
+                            size="small"
+                            icon={<CopyOutlined />}
+                            loading={cloneM.isPending}
+                            onClick={() => cloneM.mutate({ sourceName: roleDetail.name, permIds: [...rolePermIds] })}
+                          >
+                            Clone
+                          </Button>
+                        </Tooltip>
+                        <Button
+                          size="small"
+                          icon={<EditOutlined />}
+                          onClick={() => openEdit(roles.find(r => r.id === selectedRole) || roleDetail)}
+                        >
+                          Edit
+                        </Button>
+                      </Space>
+                    </div>
+                  );
+                })()}
+
+                {/* Overall progress */}
+                <div style={{ marginBottom: 14 }}>
+                  <Progress
+                    percent={grantPct}
+                    format={p => <Text style={{ fontSize: 11 }}>{grantedCount}/{totalPerms} granted</Text>}
+                    strokeColor={{ '0%': '#3B82F6', '100%': '#10B981' }}
+                    size="small"
+                    status={permsM.isPending ? 'active' : undefined}
+                  />
+                </div>
+
+                {/* Search + bulk controls */}
+                <Row gutter={8} style={{ marginBottom: 14 }} align="middle">
+                  <Col flex={1}>
+                    <Input
+                      prefix={<SearchOutlined style={{ color: '#9CA3AF' }} />}
+                      placeholder="Search permissions…"
+                      value={permSearch}
+                      onChange={e => setPermSearch(e.target.value)}
+                      allowClear
+                      size="small"
+                    />
+                  </Col>
+                  <Col>
+                    <Space>
+                      <Button
+                        size="small"
+                        icon={<CheckCircleOutlined />}
+                        onClick={() => permsM.mutate({ id: selectedRole, permission_ids: allPerms.map(p => p.id) })}
+                        loading={permsM.isPending}
+                      >
+                        All
+                      </Button>
+                      <Button
+                        size="small"
+                        icon={<CloseOutlined />}
+                        onClick={() => permsM.mutate({ id: selectedRole, permission_ids: [] })}
+                        loading={permsM.isPending}
+                      >
+                        None
+                      </Button>
+                      <Button
+                        size="small"
+                        onClick={() => setExpandedModules(new Set(MODULE_ORDER))}
+                      >
+                        Expand All
+                      </Button>
+                      <Button
+                        size="small"
+                        onClick={() => setExpandedModules(new Set())}
+                      >
+                        Collapse
+                      </Button>
+                    </Space>
+                  </Col>
+                </Row>
+
+                {/* Module sections */}
+                {allPerms.length === 0 ? (
+                  <Empty description="No permissions configured in the system." />
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    {MODULE_ORDER.map(mod => {
+                      const cfg      = MODULE_CONFIG[mod] || { label: mod, color: '#9CA3AF', icon: <GlobalOutlined /> };
+                      const perms    = filteredPermsByModule[mod];
+                      if (!perms || perms.length === 0) return null;
+                      const modGranted  = perms.filter(p => rolePermIds.has(p.id)).length;
+                      const allOn       = modGranted === perms.length;
+                      const someOn      = modGranted > 0 && !allOn;
+                      const modPct      = Math.round((modGranted / perms.length) * 100);
+                      const isExpanded  = expandedModules.has(mod);
+
+                      return (
+                        <div
+                          key={mod}
+                          style={{
+                            border: '1px solid #f0f0f0', borderRadius: 8,
+                            overflow: 'hidden',
+                          }}
+                        >
+                          {/* Module header */}
+                          <div
+                            onClick={() => toggleExpandModule(mod)}
+                            style={{
+                              display: 'flex', alignItems: 'center', gap: 10,
+                              padding: '10px 14px',
+                              background: isExpanded ? `${cfg.color}0a` : '#fafafa',
+                              borderLeft: `4px solid ${cfg.color}`,
+                              cursor: 'pointer',
+                              userSelect: 'none',
+                            }}
+                          >
+                            <span style={{ color: cfg.color, fontSize: 16 }}>{cfg.icon}</span>
+                            <span style={{ fontWeight: 600, fontSize: 13, flex: 1 }}>{cfg.label}</span>
+                            <Tag
+                              color={allOn ? 'success' : someOn ? 'warning' : 'default'}
+                              style={{ fontSize: 10 }}
+                            >
+                              {modGranted}/{perms.length}
+                            </Tag>
+                            <div style={{ width: 56 }}>
+                              <Progress
+                                percent={modPct}
+                                showInfo={false}
+                                size="small"
+                                strokeColor={cfg.color}
+                              />
+                            </div>
+                            <Checkbox
+                              checked={allOn}
+                              indeterminate={someOn}
+                              onClick={e => e.stopPropagation()}
+                              onChange={() => toggleModule(mod)}
+                              style={{ flexShrink: 0 }}
+                            />
+                            <RightOutlined
+                              style={{
+                                fontSize: 10, color: '#9CA3AF',
+                                transform: isExpanded ? 'rotate(90deg)' : 'rotate(0)',
+                                transition: 'transform 0.2s',
+                                flexShrink: 0,
+                              }}
+                            />
+                          </div>
+
+                          {/* Permission list */}
+                          {isExpanded && (
+                            <div style={{ padding: '10px 14px 12px', borderTop: '1px solid #f0f0f0' }}>
+                              <Row gutter={[8, 6]}>
+                                {perms.map(p => (
+                                  <Col xs={24} sm={12} key={p.id}>
+                                    <div style={{
+                                      display: 'flex', alignItems: 'flex-start', gap: 8,
+                                      padding: '6px 8px', borderRadius: 6,
+                                      background: rolePermIds.has(p.id) ? `${cfg.color}0a` : 'transparent',
+                                      border: `1px solid ${rolePermIds.has(p.id) ? cfg.color + '30' : 'transparent'}`,
+                                      transition: 'all 0.15s',
+                                    }}>
+                                      <Checkbox
+                                        checked={rolePermIds.has(p.id)}
+                                        onChange={() => togglePerm(p.id)}
+                                        disabled={permsM.isPending}
+                                        style={{ marginTop: 1, flexShrink: 0 }}
+                                      />
+                                      <div style={{ minWidth: 0 }}>
+                                        <div style={{ fontSize: 12, fontWeight: 500, color: '#1F2937', lineHeight: 1.3 }}>
+                                          {p.name}
+                                        </div>
+                                        <div style={{ fontSize: 10, color: '#9CA3AF', fontFamily: 'monospace', marginTop: 1 }}>
+                                          {p.codename}
+                                        </div>
+                                        {p.description && (
+                                          <div style={{ fontSize: 10, color: '#B8BCC5', marginTop: 2, lineHeight: 1.4 }}>
+                                            {p.description}
+                                          </div>
+                                        )}
+                                      </div>
+                                    </div>
+                                  </Col>
+                                ))}
+                              </Row>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
-                );
-              })
+                )}
+              </>
             )}
           </Card>
         </Col>
       </Row>
 
-      <Drawer title={editRole ? `Edit Role — ${editRole.name}` : 'New Role'} open={drawerOpen}
-        onClose={() => { setDrawerOpen(false); setEditRole(null); form.resetFields(); }} width={400} destroyOnHidden>
+      {/* ── Create / Edit Drawer ─────────────────────────────────────────── */}
+      <Drawer
+        title={
+          <Space>
+            {editRole ? <EditOutlined /> : <PlusOutlined />}
+            {editRole ? `Edit Role — ${editRole.name}` : 'New Role'}
+          </Space>
+        }
+        open={drawerOpen}
+        onClose={() => { setDrawerOpen(false); setEditRole(null); form.resetFields(); }}
+        width={420}
+        destroyOnHidden
+        footer={
+          <Space style={{ justifyContent: 'flex-end', width: '100%' }}>
+            <Button onClick={() => { setDrawerOpen(false); setEditRole(null); form.resetFields(); }}>
+              Cancel
+            </Button>
+            <Button type="primary" onClick={() => form.submit()} loading={createM.isPending || updateM.isPending}>
+              {editRole ? 'Save Changes' : 'Create Role'}
+            </Button>
+          </Space>
+        }
+      >
+        {/* Avatar preview */}
+        <div style={{ textAlign: 'center', padding: '4px 0 20px' }}>
+          <Form.Item noStyle shouldUpdate={(prev, cur) => prev.name !== cur.name}>
+            {({ getFieldValue }) => {
+              const name = editRole?.name || getFieldValue('name') || '';
+              const rc   = roleColor(name);
+              return (
+                <Avatar size={56} style={{ background: rc, fontSize: 20, fontWeight: 800 }}>
+                  {name ? name.slice(0, 2).toUpperCase() : '?'}
+                </Avatar>
+              );
+            }}
+          </Form.Item>
+        </div>
+
         <Form
           key={editRole ? `edit-${editRole.id}` : 'create'}
           form={form}
@@ -585,22 +1591,51 @@ const RolesTab = () => {
           onFinish={onSave}
           initialValues={{ is_active: true }}
         >
-          <Form.Item name="name" label="Role Name" rules={[{ required: true, message: 'Required' }]}>
-            <Input placeholder="e.g. Site Manager" />
+          <Form.Item
+            name="name"
+            label="Role Name"
+            rules={[{ required: true, message: 'Role name is required' }]}
+          >
+            <Input
+              prefix={<TeamOutlined style={{ color: '#9CA3AF' }} />}
+              placeholder="e.g. Site Manager, HR Officer"
+              onChange={() => form.validateFields(['name'])}
+            />
           </Form.Item>
+
           <Form.Item name="description" label="Description">
-            <Input.TextArea rows={3} placeholder="Brief description of this role's responsibilities" />
+            <Input.TextArea
+              rows={3}
+              placeholder="Describe the responsibilities and scope of this role…"
+              showCount
+              maxLength={255}
+            />
           </Form.Item>
-          <Form.Item name="is_active" label="Active" valuePropName="checked">
+
+          <Divider orientation="left" orientationMargin={0} style={{ fontSize: 12, color: '#9CA3AF' }}>Settings</Divider>
+          <Form.Item
+            name="is_active"
+            label={
+              <Space>
+                Status
+                <Tooltip title="Inactive roles cannot be assigned to new users">
+                  <InfoCircleOutlined style={{ color: '#9CA3AF' }} />
+                </Tooltip>
+              </Space>
+            }
+            valuePropName="checked"
+          >
             <Switch checkedChildren="Active" unCheckedChildren="Inactive" />
           </Form.Item>
-          <Divider />
-          <Space style={{ width: '100%', justifyContent: 'flex-end' }}>
-            <Button onClick={() => { setDrawerOpen(false); setEditRole(null); form.resetFields(); }}>Cancel</Button>
-            <Button type="primary" htmlType="submit" loading={createM.isPending || updateM.isPending}>
-              {editRole ? 'Save Changes' : 'Create Role'}
-            </Button>
-          </Space>
+
+          {editRole && (
+            <Alert
+              type="info"
+              showIcon
+              message={`${editRole.user_count ?? 0} user(s) currently have this role.`}
+              style={{ marginTop: 8 }}
+            />
+          )}
         </Form>
       </Drawer>
     </div>
@@ -939,7 +1974,141 @@ const SecurityTab = () => {
           </Form.Item>
         </Form>
       </Card>
+
+      <MFAPanel />
     </div>
+  );
+};
+
+
+// ════════════════════════════════════════════════════════════════════════════
+// MFA PANEL — rendered inside SecurityTab
+// ════════════════════════════════════════════════════════════════════════════
+const MFAPanel = () => {
+  const { message } = App.useApp();
+  const qc = useQueryClient();
+  const [step, setStep] = useState('idle'); // idle | setup | verify | enabled
+  const [qrData, setQrData] = useState(null);
+  const [secret, setSecret] = useState('');
+  const [code, setCode] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const { data: mfaStatus, isLoading: statusLoading } = useQuery({
+    queryKey: ['mfa-status'],
+    queryFn: () => apiService.get('/api/v1/mfa/status'),
+    staleTime: 60000,
+  });
+  const isEnabled = mfaStatus?.mfa_enabled ?? false;
+
+  const beginSetup = async () => {
+    setLoading(true);
+    try {
+      const res = await apiService.post('/api/v1/mfa/setup/begin', {});
+      setQrData(res.qr_code);
+      setSecret(res.secret);
+      setStep('setup');
+    } catch (e) { message.error(e?.message || 'Failed to start MFA setup'); }
+    finally { setLoading(false); }
+  };
+
+  const verifyCode = async () => {
+    setLoading(true);
+    try {
+      await apiService.post('/api/v1/mfa/setup/verify', { code });
+      message.success('2FA activated!');
+      qc.invalidateQueries(['mfa-status']);
+      setStep('idle'); setCode('');
+    } catch (e) { message.error(e?.message || 'Invalid code'); }
+    finally { setLoading(false); }
+  };
+
+  const disableMFA = async () => {
+    setLoading(true);
+    try {
+      await apiService.delete('/api/v1/mfa/disable', { data: { code } });
+      message.success('2FA disabled');
+      qc.invalidateQueries(['mfa-status']);
+      setStep('idle'); setCode('');
+    } catch (e) { message.error(e?.message || 'Invalid code'); }
+    finally { setLoading(false); }
+  };
+
+  if (statusLoading) return <Spin />;
+
+  return (
+    <Card
+      title={<Space><SafetyOutlined style={{ color: '#7C3AED' }} />Two-Factor Authentication (TOTP)</Space>}
+      styles={{ body: { padding: '20px 24px' } }}
+      style={{ marginTop: 16, borderTop: '3px solid #7C3AED' }}
+    >
+      {isEnabled ? (
+        <Space direction="vertical" style={{ width: '100%' }}>
+          <Alert
+            type="success" showIcon
+            message="2FA is active"
+            description="Your account is protected by a TOTP authenticator app."
+          />
+          {step === 'idle' ? (
+            <Button danger icon={<StopOutlined />} onClick={() => setStep('disable')}>
+              Disable 2FA
+            </Button>
+          ) : (
+            <Space direction="vertical" style={{ maxWidth: 360 }}>
+              <Text>Enter your authenticator code to confirm disabling 2FA:</Text>
+              <Space.Compact>
+                <Input
+                  value={code} onChange={e => setCode(e.target.value)}
+                  placeholder="6-digit code" maxLength={6}
+                  onPressEnter={disableMFA}
+                  style={{ width: 180 }}
+                />
+                <Button danger loading={loading} onClick={disableMFA}>Confirm Disable</Button>
+              </Space.Compact>
+              <Button size="small" onClick={() => { setStep('idle'); setCode(''); }}>Cancel</Button>
+            </Space>
+          )}
+        </Space>
+      ) : step === 'idle' ? (
+        <Space direction="vertical" style={{ width: '100%' }}>
+          <Alert
+            type="warning" showIcon
+            message="2FA not enabled"
+            description="Enable two-factor authentication to add an extra layer of security to your account."
+          />
+          <Button type="primary" icon={<SafetyOutlined />} loading={loading} onClick={beginSetup}>
+            Set Up 2FA
+          </Button>
+        </Space>
+      ) : step === 'setup' ? (
+        <Space direction="vertical" style={{ width: '100%' }}>
+          <Alert type="info" showIcon
+            message="Scan the QR code with your authenticator app (Google Authenticator, Authy, etc.), then enter the code below."
+          />
+          {qrData && (
+            <img src={qrData} alt="TOTP QR Code"
+              style={{ border: '1px solid #e5e7eb', borderRadius: 8, padding: 8, maxWidth: 200 }} />
+          )}
+          <div>
+            <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>
+              Manual key (if QR doesn't work):
+            </Text>
+            <Text code style={{ fontSize: 11 }}>{secret}</Text>
+          </div>
+          <Space.Compact>
+            <Input
+              value={code} onChange={e => setCode(e.target.value)}
+              placeholder="Enter 6-digit code" maxLength={6}
+              onPressEnter={verifyCode}
+              style={{ width: 200 }}
+            />
+            <Button type="primary" loading={loading} onClick={verifyCode} icon={<CheckOutlined />}>
+              Activate
+            </Button>
+          </Space.Compact>
+          <Button size="small" onClick={() => { setStep('idle'); setCode(''); }}>Cancel</Button>
+        </Space>
+      ) : null}
+    </Card>
   );
 };
 
@@ -951,9 +2120,6 @@ const BackupTab = () => {
   const { message: msg } = App.useApp();
   const queryClient = useQueryClient();
   const [triggering, setTriggering] = useState(false);
-
-  const token = localStorage.getItem('token') || localStorage.getItem('authToken');
-  const headers = { Authorization: `Bearer ${token}` };
 
   const { data: statusRaw, isLoading: statusLoading, refetch: refetchStatus } = useQuery({
     queryKey: ['backup-status'],
@@ -973,12 +2139,10 @@ const BackupTab = () => {
   const handleTrigger = async () => {
     setTriggering(true);
     try {
-      const res = await fetch('/api/v1/backup/trigger', { method: 'POST', headers });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || 'Backup failed');
+      const data = await apiService.post('/api/v1/backup/trigger');
       msg.success(`Backup completed: ${data.filename} (${data.size})`);
-      queryClient.invalidateQueries(['backup-list']);
-      queryClient.invalidateQueries(['backup-status']);
+      queryClient.invalidateQueries({ queryKey: ['backup-list'] });
+      queryClient.invalidateQueries({ queryKey: ['backup-status'] });
     } catch (e) {
       msg.error(e.message);
     } finally {
@@ -987,27 +2151,25 @@ const BackupTab = () => {
   };
 
   const handleDownload = async (filename) => {
+    let objectUrl = null;
     try {
-      const res = await fetch(`/api/v1/backup/download/${encodeURIComponent(filename)}`, { headers });
-      if (!res.ok) throw new Error('Download failed');
-      const blob = await res.blob();
-      const url  = URL.createObjectURL(blob);
-      const a    = document.createElement('a');
-      a.href = url; a.download = filename; a.click();
-      URL.revokeObjectURL(url);
+      const blob = await apiService.downloadFile(`/api/v1/backup/download/${encodeURIComponent(filename)}`);
+      objectUrl = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = objectUrl; a.download = filename; a.click();
     } catch (e) {
-      msg.error(e.message);
+      msg.error(e.message || 'Download failed');
+    } finally {
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
     }
   };
 
   const deleteMutation = useMutation({
-    mutationFn: (filename) =>
-      fetch(`/api/v1/backup/${encodeURIComponent(filename)}`, { method: 'DELETE', headers })
-        .then(r => r.json()),
+    mutationFn: (filename) => apiService.delete(`/api/v1/backup/${encodeURIComponent(filename)}`),
     onSuccess: () => {
       msg.success('Backup deleted');
-      queryClient.invalidateQueries(['backup-list']);
-      queryClient.invalidateQueries(['backup-status']);
+      queryClient.invalidateQueries({ queryKey: ['backup-list'] });
+      queryClient.invalidateQueries({ queryKey: ['backup-status'] });
     },
     onError: (e) => msg.error(e.message),
   });
@@ -1248,17 +2410,16 @@ const HRIntegrationTab = () => {
 
   const handleSave = async (values) => {
     setSaving(true);
+    const payload = { ...values };
+    if (cfgRaw?.configured && !apiKeyEditing) {
+      delete payload.api_key;
+    }
     try {
-      const res = await fetch('/api/v1/hr-integration/config', {
-        method: 'PUT', headers,
-        body: JSON.stringify(values),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || 'Save failed');
+      await apiService.put('/api/v1/hr-integration/config', payload);
       msg.success('Configuration saved');
       setApiKeyEditing(false);
-      queryClient.invalidateQueries(['hr-config']);
-      queryClient.invalidateQueries(['hr-status']);
+      queryClient.invalidateQueries({ queryKey: ['hr-config'] });
+      queryClient.invalidateQueries({ queryKey: ['hr-status'] });
     } catch (e) { msg.error(e.message); }
     finally { setSaving(false); }
   };
@@ -1266,8 +2427,7 @@ const HRIntegrationTab = () => {
   const handleTest = async () => {
     setTesting(true);
     try {
-      const res  = await fetch('/api/v1/hr-integration/test-connection', { method: 'POST', headers });
-      const data = await res.json();
+      const data = await apiService.post('/api/v1/hr-integration/test-connection');
       if (data.success) msg.success(`✓ ${data.message}`);
       else              msg.error(`✗ ${data.message}`);
     } catch (e) { msg.error(e.message); }
@@ -1277,15 +2437,11 @@ const HRIntegrationTab = () => {
   const handleSync = async (syncDate) => {
     setSyncing(true);
     try {
-      const res  = await fetch('/api/v1/hr-integration/sync', {
-        method: 'POST', headers,
-        body: JSON.stringify({ sync_date: syncDate || null }),
-      });
-      const data = await res.json();
+      const data = await apiService.post('/api/v1/hr-integration/sync', { sync_date: syncDate || null });
       const level = data.status === 'success' ? 'success' : data.status === 'partial' ? 'warning' : 'error';
       msg[level](`${data.message}`);
-      queryClient.invalidateQueries(['hr-history']);
-      queryClient.invalidateQueries(['hr-status']);
+      queryClient.invalidateQueries({ queryKey: ['hr-history'] });
+      queryClient.invalidateQueries({ queryKey: ['hr-status'] });
     } catch (e) { msg.error(e.message); }
     finally { setSyncing(false); }
   };
@@ -1293,8 +2449,7 @@ const HRIntegrationTab = () => {
   const handlePreview = async () => {
     if (!previewDate) return;
     try {
-      const res  = await fetch(`/api/v1/hr-integration/preview/${previewDate}`, { headers });
-      const data = await res.json();
+      const data = await apiService.get(`/api/v1/hr-integration/preview/${previewDate}`);
       setPreviewData(data);
     } catch (e) { msg.error(e.message); }
   };
@@ -1431,8 +2586,17 @@ const HRIntegrationTab = () => {
                   </Form.Item>
                 </Col>
                 <Col span={10}>
+                  <Form.Item label="Employee Endpoint" name="employee_endpoint"
+                    extra="Path used for connection test">
+                    <Input placeholder="/v1/employees" />
+                  </Form.Item>
+                </Col>
+              </Row>
+
+              <Row gutter={12}>
+                <Col span={10}>
                   <Form.Item label="Daily Sync Time (UTC)" name="sync_time"
-                    extra="Time to run the nightly sync">
+                    extra="Time to run the nightly sync (HH:MM)">
                     <Input placeholder="00:00" maxLength={5} />
                   </Form.Item>
                 </Col>
@@ -1471,7 +2635,7 @@ const HRIntegrationTab = () => {
                 <Button
                   type="primary" loading={syncing}
                   onClick={() => handleSync(previewDate || null)}
-                  disabled={!status.configured}
+                  disabled={syncing || !status.configured}
                 >
                   Sync
                 </Button>
@@ -1479,7 +2643,7 @@ const HRIntegrationTab = () => {
               <Button
                 block style={{ marginTop: 8 }} size="small"
                 onClick={() => handleSync(null)} loading={syncing}
-                disabled={!status.configured}
+                disabled={syncing || !status.configured}
               >
                 Sync Yesterday (default)
               </Button>
@@ -1593,8 +2757,7 @@ const BCIntegrationTab = () => {
   const handleTest = async () => {
     setTesting(true);
     try {
-      const res  = await fetch('/api/v1/bc-integration/test-connection', { method: 'POST', headers });
-      const data = await res.json();
+      const data = await apiService.post('/api/v1/bc-integration/test-connection');
       if (data.success) {
         msg.success(`✓ ${data.message}`);
         if (data.companies?.length) setCompanies(data.companies);
@@ -1609,16 +2772,14 @@ const BCIntegrationTab = () => {
     setSaving(true);
     try {
       const payload = { ...values };
-      if (cfgRaw?.configured && !secretEditing) payload.client_secret = cfgRaw.client_secret_masked;
+      if (cfgRaw?.configured && !secretEditing) delete payload.client_secret;
       const selected = companies.find(c => c.id === values.company_id);
       if (selected) payload.company_name = selected.name;
-      const res  = await fetch('/api/v1/bc-integration/config', { method: 'PUT', headers, body: JSON.stringify(payload) });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || 'Save failed');
+      await apiService.put('/api/v1/bc-integration/config', payload);
       msg.success('Configuration saved');
       setSecretEditing(false);
-      queryClient.invalidateQueries(['bc-config']);
-      queryClient.invalidateQueries(['bc-status']);
+      queryClient.invalidateQueries({ queryKey: ['bc-config'] });
+      queryClient.invalidateQueries({ queryKey: ['bc-status'] });
     } catch (e) { msg.error(e.message); }
     finally { setSaving(false); }
   };
@@ -1626,12 +2787,11 @@ const BCIntegrationTab = () => {
   const handleSync = async (syncDate) => {
     setSyncing(true);
     try {
-      const res  = await fetch('/api/v1/bc-integration/sync', { method: 'POST', headers, body: JSON.stringify({ sync_date: syncDate || null }) });
-      const data = await res.json();
+      const data = await apiService.post('/api/v1/bc-integration/sync', { sync_date: syncDate || null });
       const level = data.status === 'success' ? 'success' : data.status === 'partial' ? 'warning' : 'error';
       msg[level](data.message);
-      queryClient.invalidateQueries(['bc-history']);
-      queryClient.invalidateQueries(['bc-status']);
+      queryClient.invalidateQueries({ queryKey: ['bc-history'] });
+      queryClient.invalidateQueries({ queryKey: ['bc-status'] });
     } catch (e) { msg.error(e.message); }
     finally { setSyncing(false); }
   };
@@ -1639,8 +2799,7 @@ const BCIntegrationTab = () => {
   const handlePreview = async () => {
     if (!previewDate) return;
     try {
-      const res  = await fetch(`/api/v1/bc-integration/preview/${previewDate}`, { headers });
-      const data = await res.json();
+      const data = await apiService.get(`/api/v1/bc-integration/preview/${previewDate}`);
       setPreviewData(data);
     } catch (e) { msg.error(e.message); }
   };
@@ -1683,7 +2842,7 @@ const BCIntegrationTab = () => {
             ? `Last sync: ${status.last_sync.status?.toUpperCase()} · ${status.last_sync.records_sent} entries sent · ${dayjs(status.last_sync.created_at).fromNow()}`
             : 'No syncs have run yet'}
           style={{ marginBottom: 20 }}
-          action={<Button size="small" loading={syncing} onClick={() => handleSync(null)}>Sync Yesterday</Button>}
+          action={<Button size="small" loading={syncing} disabled={syncing} onClick={() => handleSync(null)}>Sync Yesterday</Button>}
         />
       )}
       {!status.configured && (
@@ -1789,11 +2948,29 @@ const BCIntegrationTab = () => {
               </Text>
               <Space.Compact style={{ width: '100%' }}>
                 <Input type="date" value={previewDate} onChange={e => setPreviewDate(e.target.value)} style={{ flex: 1 }} />
-                <Button type="primary" loading={syncing} onClick={() => handleSync(previewDate || null)} disabled={!status.configured}>Sync</Button>
+                <Button type="primary" loading={syncing} onClick={() => handleSync(previewDate || null)} disabled={syncing || !status.configured}>Sync</Button>
               </Space.Compact>
-              <Button block style={{ marginTop: 8 }} size="small" onClick={() => handleSync(null)} loading={syncing} disabled={!status.configured}>
-                Sync Yesterday (default)
-              </Button>
+              <Space style={{ marginTop: 8, width: '100%' }} direction="vertical">
+                <Button block size="small" onClick={() => handleSync(null)} loading={syncing} disabled={syncing || !status.configured}>
+                  Sync Yesterday (default)
+                </Button>
+                <Button
+                  block size="small" type="primary" ghost
+                  disabled={syncing || !status.configured}
+                  loading={syncing}
+                  icon={<ThunderboltOutlined />}
+                  onClick={async () => {
+                    setSyncing(true);
+                    try {
+                      const d = await apiService.post('/api/v1/bc-integration/sync/trigger-today');
+                      msg.success(`Today synced: ${d.records_sent ?? 0} records sent`);
+                    } catch (e) { msg.error(e.message); }
+                    finally { setSyncing(false); }
+                  }}
+                >
+                  Sync Today (Real-time)
+                </Button>
+              </Space>
             </Card>
 
             <Card title="Preview Entries" size="small">
@@ -1841,6 +3018,163 @@ const BCIntegrationTab = () => {
 };
 
 
+// ════════════════════════════════════════════════════════════════════════════
+// SESSIONS TAB — view and revoke active login sessions
+// ════════════════════════════════════════════════════════════════════════════
+const SessionsTab = () => {
+  const { message } = App.useApp();
+  const qc = useQueryClient();
+
+  const { data, isLoading, refetch } = useQuery({
+    queryKey: ['settings-sessions'],
+    queryFn: () => apiService.get('/api/v1/sessions/'),
+    refetchInterval: 30_000,
+  });
+  const sessions = data?.sessions ?? [];
+
+  const revokeM = useMutation({
+    mutationFn: (session_id) => apiService.delete(`/api/v1/sessions/${session_id}`),
+    onSuccess: () => { message.success('Session revoked'); qc.invalidateQueries(['settings-sessions']); },
+    onError: (e) => message.error(e?.message || 'Failed to revoke session'),
+  });
+
+  const revokeAllM = useMutation({
+    mutationFn: () => apiService.delete('/api/v1/sessions/'),
+    onSuccess: (res) => {
+      message.success(`All sessions revoked (${res?.revoked ?? 0})`);
+      qc.invalidateQueries(['settings-sessions']);
+    },
+    onError: (e) => message.error(e?.message || 'Failed'),
+  });
+
+  const uaIcon = (ua = '') => {
+    if (/mobile|android|iphone/i.test(ua)) return '📱';
+    if (/tablet|ipad/i.test(ua))           return '📟';
+    return '💻';
+  };
+
+  const cols = [
+    {
+      title: 'Device / Browser', key: 'ua',
+      render: (_, r) => (
+        <Space>
+          <span style={{ fontSize: 18 }}>{uaIcon(r.user_agent)}</span>
+          <Space direction="vertical" size={0}>
+            <Text style={{ fontSize: 12 }}>
+              {r.user_agent ? r.user_agent.slice(0, 60) + (r.user_agent.length > 60 ? '…' : '') : 'Unknown'}
+            </Text>
+            <Text type="secondary" style={{ fontSize: 11 }}>
+              IP: {r.ip_address || '—'}
+            </Text>
+          </Space>
+        </Space>
+      ),
+    },
+    {
+      title: 'Started', dataIndex: 'created_at', key: 'started', width: 140,
+      render: v => v ? (
+        <Tooltip title={dayjs(v).format('DD MMM YYYY HH:mm:ss')}>
+          <Text style={{ fontSize: 12 }}>{dayjs(v).fromNow()}</Text>
+        </Tooltip>
+      ) : '—',
+    },
+    {
+      title: 'Last Active', dataIndex: 'last_active', key: 'active', width: 140,
+      render: v => v ? (
+        <Tooltip title={dayjs(v).format('DD MMM YYYY HH:mm:ss')}>
+          <Text style={{ fontSize: 12, color: '#10B981' }}>{dayjs(v).fromNow()}</Text>
+        </Tooltip>
+      ) : '—',
+    },
+    {
+      title: '', key: 'action', width: 80,
+      render: (_, r) => (
+        <Popconfirm
+          title="Revoke this session?"
+          description="The user will be logged out of this device."
+          onConfirm={() => revokeM.mutate(r.session_id)}
+          okText="Revoke" okType="danger"
+        >
+          <Button size="small" danger icon={<StopOutlined />} loading={revokeM.isPending}>
+            Revoke
+          </Button>
+        </Popconfirm>
+      ),
+    },
+  ];
+
+  return (
+    <div style={{ padding: 24 }}>
+      <Alert
+        type="info"
+        showIcon
+        message="Active Sessions"
+        description="These are your currently active login sessions. Revoking a session will log out that device immediately. Sessions shown here are stored in Redis and expire automatically when the session timeout is reached."
+        style={{ marginBottom: 16 }}
+      />
+
+      <Card
+        styles={{ body: { padding: '10px 14px' } }}
+        style={{ marginBottom: 12 }}
+      >
+        <Row align="middle" justify="space-between">
+          <Col>
+            <Space>
+              <DesktopOutlined style={{ color: '#3B82F6' }} />
+              <Text strong>{sessions.length} active session{sessions.length !== 1 ? 's' : ''}</Text>
+            </Space>
+          </Col>
+          <Col>
+            <Space>
+              <Button icon={<ReloadOutlined />} onClick={() => refetch()} loading={isLoading} size="small">
+                Refresh
+              </Button>
+              <Popconfirm
+                title="Revoke ALL sessions?"
+                description="You will be logged out of all devices including this one."
+                onConfirm={() => revokeAllM.mutate()}
+                okText="Revoke All" okType="danger"
+              >
+                <Button danger icon={<StopOutlined />} loading={revokeAllM.isPending} size="small">
+                  Revoke All
+                </Button>
+              </Popconfirm>
+            </Space>
+          </Col>
+        </Row>
+      </Card>
+
+      <Card styles={{ body: { padding: 0 } }}>
+        {sessions.length === 0 && !isLoading ? (
+          <Empty
+            image={Empty.PRESENTED_IMAGE_SIMPLE}
+            description={
+              <Space direction="vertical" size={4}>
+                <Text>No active sessions tracked in Redis.</Text>
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  Sessions are recorded on login and visible here until they expire.
+                </Text>
+              </Space>
+            }
+            style={{ padding: 48 }}
+          />
+        ) : (
+          <Table
+            columns={cols}
+            dataSource={sessions}
+            loading={isLoading}
+            rowKey="session_id"
+            size="middle"
+            pagination={false}
+            locale={{ emptyText: <Empty description="No sessions" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
+          />
+        )}
+      </Card>
+    </div>
+  );
+};
+
+
 const Settings = () => {
   const [activeTab, setActiveTab] = useState('users');
 
@@ -1849,6 +3183,7 @@ const Settings = () => {
     { key: 'roles',     label: <Space><LockOutlined />Roles & Permissions</Space>, children: <RolesTab /> },
     { key: 'company',   label: <Space><BankOutlined />Company</Space>,             children: <CompanyTab /> },
     { key: 'security',  label: <Space><ClockCircleOutlined />Security</Space>,     children: <SecurityTab /> },
+    { key: 'sessions',  label: <Space><DesktopOutlined />Active Sessions</Space>,  children: <SessionsTab /> },
     { key: 'audit-log', label: <Space><AuditOutlined />Audit Log</Space>,          children: <AuditLogTab /> },
     { key: 'backup',         label: <Space><DatabaseOutlined />Database Backup</Space>,    children: <BackupTab /> },
     { key: 'hr-integration', label: <Space><ApiOutlined />HR Integration</Space>,          children: <HRIntegrationTab /> },

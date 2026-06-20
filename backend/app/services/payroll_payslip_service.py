@@ -321,7 +321,7 @@ class PayrollPayslipService:
                 'status': salary.calc_status.value
             },
             'company': {
-                'name': 'POB System',
+                'name': 'Apex POB',
                 'logo': '/static/logo.png',
                 'address': 'Oil & Gas Operations Center',
                 'phone': '+234-XXX-XXXX',

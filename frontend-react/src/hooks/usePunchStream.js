@@ -10,9 +10,21 @@ import { useQueryClient } from '@tanstack/react-query';
 const STREAM_BASE = '/api/v1/attendance/punch-stream';
 const RECONNECT_DELAY_MS = 3000;
 
-function getStreamUrl() {
-  const token = localStorage.getItem('authToken') || localStorage.getItem('token');
-  return token ? `${STREAM_BASE}?token=${encodeURIComponent(token)}` : STREAM_BASE;
+async function getStreamUrl() {
+  const token = localStorage.getItem('token');
+  if (!token) return null;
+  // Prefer short-lived ticket so the full JWT never appears in server logs
+  try {
+    const res = await fetch('/api/v1/auth/sse-ticket', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (res.ok) {
+      const { ticket } = await res.json();
+      return `${STREAM_BASE}?ticket=${encodeURIComponent(ticket)}`;
+    }
+  } catch (_) { /* fall through */ }
+  return `${STREAM_BASE}?token=${encodeURIComponent(token)}`;
 }
 
 export function usePunchStream() {
@@ -23,10 +35,13 @@ export function usePunchStream() {
   useEffect(() => {
     let active = true;
 
-    function connect() {
+    async function connect() {
       if (!active) return;
 
-      const es = new EventSource(getStreamUrl());
+      const url = await getStreamUrl();
+      if (!url) return;
+
+      const es = new EventSource(url);
       esRef.current = es;
 
       es.onmessage = (e) => {

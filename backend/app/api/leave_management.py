@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Body
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 from typing import List, Optional, Any, Dict
 from datetime import date, datetime
 from decimal import Decimal
@@ -28,10 +29,11 @@ class InitializeBalancesRequest(BaseModel):
 
 
 def _enrich_leave(leave: LeaveManagement) -> LeaveManagement:
-    """Attach personnel_name / personnel_emp_code as transient attrs for the response schema."""
+    """Attach personnel_name, personnel_emp_code, approved_by_name as transient attrs."""
     p = leave.personnel
     leave.personnel_name = p.full_name if p else None
     leave.personnel_emp_code = (p.badge_id or p.emp_code) if p else None
+    leave.approved_by_name = leave.approver.username if leave.approver else None
     return leave
 
 
@@ -51,6 +53,26 @@ async def get_leave_types(
     current_user: User = Depends(get_current_user)
 ):
     return LEAVE_TYPE_CATALOGUE
+
+
+@router.get("/leave/stats")
+async def get_leave_stats(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Unfiltered aggregate counts for the stat cards — always reflects the full dataset."""
+    rows = db.execute(text(
+        "SELECT status, COUNT(*) AS cnt FROM leave_management GROUP BY status"
+    )).fetchall()
+    counts: Dict[str, int] = {r.status: int(r.cnt) for r in rows}
+    total = sum(counts.values())
+    return {
+        "total":    total,
+        "pending":  counts.get("pending",  0),
+        "approved": counts.get("approved", 0) + counts.get("on_leave", 0),
+        "rejected": counts.get("rejected", 0),
+        "cancelled": counts.get("cancelled", 0),
+    }
 
 
 # ==================== Leave Balance Endpoints ====================
@@ -83,10 +105,11 @@ async def create_leave_balance(
 @router.get("/leave/balance", response_model=List[LeaveBalanceResponse])
 async def get_leave_balances(
     skip: int = Query(0, ge=0),
-    limit: int = Query(100, ge=1, le=1000),
+    limit: int = Query(5000, ge=1, le=10000),
     personnel_id: Optional[int] = Query(None),
     leave_type: Optional[str] = Query(None),
     year: Optional[int] = Query(None),
+    department_id: Optional[int] = Query(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -97,6 +120,10 @@ async def get_leave_balances(
         query = query.filter(LeaveBalance.leave_type == leave_type)
     if year:
         query = query.filter(LeaveBalance.year == year)
+    if department_id:
+        query = query.join(Personnel, Personnel.id == LeaveBalance.personnel_id).filter(
+            Personnel.department_id == department_id
+        )
     balances = query.order_by(LeaveBalance.personnel_id, LeaveBalance.leave_type).offset(skip).limit(limit).all()
     return [_enrich_balance(b) for b in balances]
 
@@ -124,48 +151,64 @@ async def initialize_leave_balances(
         else LEAVE_TYPE_CATALOGUE
     )
 
-    created = 0
-    skipped = 0
+    personnel_ids = [p.id for p in all_personnel]
+
+    # Fetch all existing balance records for this year in one query
+    existing_set: set = set()
+    if personnel_ids:
+        existing_rows = db.execute(text(
+            "SELECT personnel_id, leave_type FROM leave_balance "
+            "WHERE year = :yr AND personnel_id = ANY(:pids)"
+        ), {"yr": body.year, "pids": personnel_ids}).fetchall()
+        existing_set = {(r.personnel_id, r.leave_type) for r in existing_rows}
+
+    # If carry-forward, fetch previous year balances in one query
+    prev_balances: Dict[tuple, Decimal] = {}
+    if body.carry_forward and personnel_ids:
+        prev_rows = db.execute(text(
+            "SELECT personnel_id, leave_type, balance_days FROM leave_balance "
+            "WHERE year = :yr AND personnel_id = ANY(:pids) AND balance_days > 0"
+        ), {"yr": body.year - 1, "pids": personnel_ids}).fetchall()
+        prev_balances = {(r.personnel_id, r.leave_type): Decimal(str(r.balance_days)) for r in prev_rows}
+
+    rows_to_insert = []
+    now = datetime.utcnow()
     for p in all_personnel:
         for lt in types_to_init:
-            existing = db.query(LeaveBalance).filter(
-                LeaveBalance.personnel_id == p.id,
-                LeaveBalance.leave_type == lt["code"],
-                LeaveBalance.year == body.year,
-            ).first()
-            if existing:
-                skipped += 1
+            key = (p.id, lt["code"])
+            if key in existing_set:
                 continue
-
-            carry_fwd = Decimal("0")
-            if body.carry_forward:
-                prev = db.query(LeaveBalance).filter(
-                    LeaveBalance.personnel_id == p.id,
-                    LeaveBalance.leave_type == lt["code"],
-                    LeaveBalance.year == body.year - 1,
-                ).first()
-                if prev and prev.balance_days > 0:
-                    carry_fwd = prev.balance_days
-
+            carry_fwd = prev_balances.get(key, Decimal("0"))
             total = Decimal(str(lt["default_days"]))
-            db.add(LeaveBalance(
-                personnel_id=p.id,
-                leave_type=lt["code"],
-                year=body.year,
-                total_days=total,
-                used_days=Decimal("0"),
-                balance_days=total + carry_fwd,
-                carry_forward_days=carry_fwd,
-            ))
-            created += 1
+            rows_to_insert.append({
+                "personnel_id": p.id,
+                "leave_type": lt["code"],
+                "year": body.year,
+                "total_days": float(total),
+                "used_days": 0.0,
+                "balance_days": float(total + carry_fwd),
+                "carry_forward_days": float(carry_fwd),
+                "created_at": now,
+                "updated_at": now,
+            })
 
-    db.commit()
+    if rows_to_insert:
+        db.execute(text("""
+            INSERT INTO leave_balance
+                (personnel_id, leave_type, year, total_days, used_days,
+                 balance_days, carry_forward_days, created_at, updated_at)
+            VALUES
+                (:personnel_id, :leave_type, :year, :total_days, :used_days,
+                 :balance_days, :carry_forward_days, :created_at, :updated_at)
+        """), rows_to_insert)
+        db.commit()
+
     return {
         "year": body.year,
         "personnel_count": len(all_personnel),
         "types_count": len(types_to_init),
-        "created": created,
-        "skipped": skipped,
+        "created": len(rows_to_insert),
+        "skipped": len(existing_set),
     }
 
 
@@ -323,6 +366,8 @@ async def get_leave_calendar(
     start_date: date = Query(...),
     end_date: date = Query(...),
     personnel_id: Optional[int] = Query(None),
+    department_id: Optional[int] = Query(None),
+    leave_type: Optional[str] = Query(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -333,23 +378,52 @@ async def get_leave_calendar(
     )
     if personnel_id:
         query = query.filter(LeaveManagement.personnel_id == personnel_id)
+    if leave_type:
+        query = query.filter(LeaveManagement.leave_type == leave_type)
 
     leaves = query.all()
+
+    # Filter by department via personnel relationship
+    if department_id:
+        leaves = [l for l in leaves if l.personnel and l.personnel.department_id == department_id]
+
+    # Build per-day map AND a flat list of unique leave spans for Gantt view
     calendar_data: Dict[str, list] = {}
+    spans: Dict[int, dict] = {}  # keyed by leave.id for deduplication
+
     for leave in leaves:
         p = leave.personnel
-        cur = leave.start_date
-        while cur <= leave.end_date:
+        dept = p.department if p else None
+        emp_code = (p.badge_id or p.emp_code) if p else None
+        entry = {
+            "id": leave.id,
+            "personnel_id": leave.personnel_id,
+            "personnel_name": p.full_name if p else None,
+            "emp_code": emp_code,
+            "department_id": p.department_id if p else None,
+            "department_name": dept.name if dept else None,
+            "leave_type": leave.leave_type,
+            "status": leave.status,
+            "start_date": leave.start_date.isoformat(),
+            "end_date": leave.end_date.isoformat(),
+            "days_count": float(leave.days_count),
+            "reason": leave.reason,
+        }
+
+        # Populate per-day map (clipped to requested range)
+        cur = max(leave.start_date, start_date)
+        clip_end = min(leave.end_date, end_date)
+        while cur <= clip_end:
             key = cur.isoformat()
-            calendar_data.setdefault(key, []).append({
-                "id": leave.id,
-                "personnel_id": leave.personnel_id,
-                "personnel_name": p.full_name if p else None,
-                "leave_type": leave.leave_type,
-                "status": leave.status,
-            })
+            calendar_data.setdefault(key, []).append(entry)
             cur = datetime.fromordinal(cur.toordinal() + 1).date()
-    return calendar_data
+
+        spans[leave.id] = entry
+
+    return {
+        "days": calendar_data,
+        "spans": list(spans.values()),
+    }
 
 
 # ==================== Leave Request CRUD ====================
@@ -364,13 +438,16 @@ async def create_leave_request(
     if not personnel:
         raise HTTPException(status_code=404, detail=f"Personnel {leave_data.personnel_id} not found")
 
-    # Blackout check — applies_to is "all" or a department name string
+    # Blackout check
     blackouts = db.query(LeaveBlackout).filter(
         LeaveBlackout.start_date <= leave_data.end_date,
         LeaveBlackout.end_date >= leave_data.start_date,
     ).all()
     for bo in blackouts:
-        if bo.applies_to == "all":
+        applies = bo.applies_to == "all"
+        if not applies and bo.department_id:
+            applies = (personnel.department_id == bo.department_id)
+        if applies:
             raise HTTPException(status_code=400, detail=f"Dates fall within blackout period: {bo.name}")
 
     # Overlap check
@@ -409,12 +486,13 @@ async def create_leave_request(
 @router.get("/leave", response_model=List[LeaveManagementResponse])
 async def get_leave_requests(
     skip: int = Query(0, ge=0),
-    limit: int = Query(100, ge=1, le=1000),
+    limit: int = Query(500, ge=1, le=2000),
     personnel_id: Optional[int] = Query(None),
     leave_type: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
     start_date: Optional[date] = Query(None),
     end_date: Optional[date] = Query(None),
+    department_id: Optional[int] = Query(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -426,9 +504,13 @@ async def get_leave_requests(
     if status:
         query = query.filter(LeaveManagement.status == status)
     if start_date:
-        query = query.filter(LeaveManagement.start_date >= start_date)
+        query = query.filter(LeaveManagement.end_date >= start_date)
     if end_date:
-        query = query.filter(LeaveManagement.end_date <= end_date)
+        query = query.filter(LeaveManagement.start_date <= end_date)
+    if department_id:
+        query = query.join(Personnel, Personnel.id == LeaveManagement.personnel_id).filter(
+            Personnel.department_id == department_id
+        )
     leaves = query.order_by(LeaveManagement.created_at.desc()).offset(skip).limit(limit).all()
     return [_enrich_leave(l) for l in leaves]
 

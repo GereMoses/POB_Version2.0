@@ -34,9 +34,7 @@ scrape_configs:
 alerting:
   alertmanagers:
     - static_configs:
-        - targets: []
-        # Add Alertmanager when email/Slack alerts are configured:
-        # - targets: ['alertmanager:9093']
+        - targets: ['alertmanager:9093']
 
 # Alert rules — fires when critical thresholds are crossed
 rule_files:

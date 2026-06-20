@@ -31,7 +31,10 @@ backend/app.log
 .env
 .env.local
 .env.*.local
+/.env.prod
 backend/.env
+# TLS private keys / certs (self-signed or Let's Encrypt) must never be committed
+nginx/certs/
 
 # ── OS ───────────────────────────────────────────────────────────────────────
 .DS_Store

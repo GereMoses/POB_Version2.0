@@ -21,7 +21,7 @@ const SelfServiceDashboard = () => {
   const fetchDashboardSummary = async () => {
     setLoading(true);
     try {
-      const token = localStorage.getItem('authToken');
+      const token = localStorage.getItem('token');
       const response = await axios.get('/api/v1/self-service/dashboard-summary', {
         headers: { Authorization: `Bearer ${token}` }
       });
@@ -38,7 +38,7 @@ const SelfServiceDashboard = () => {
     
     setLoading(true);
     try {
-      const token = localStorage.getItem('authToken');
+      const token = localStorage.getItem('token');
       const [start, end] = dates;
       const response = await axios.get('/api/v1/self-service/my-attendance', {
         headers: { Authorization: `Bearer ${token}` },
@@ -57,7 +57,7 @@ const SelfServiceDashboard = () => {
 
   const fetchLeaveRequests = async () => {
     try {
-      const token = localStorage.getItem('authToken');
+      const token = localStorage.getItem('token');
       const response = await axios.get('/api/v1/self-service/my-leave-requests', {
         headers: { Authorization: `Bearer ${token}` }
       });

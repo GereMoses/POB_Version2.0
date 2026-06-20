@@ -113,6 +113,12 @@ class ReportService:
         'zone.person_trail':        {'emp_code': str, 'date_from': str, 'date_to': str},
         'zone.current_occupancy':   {},
         'zone.security_events':     {'zone_id': int, 'date_from': str, 'date_to': str, 'event_type': str},
+        # POB Operations Reports
+        'pob.daily_manifest':           {'department': str, 'company': str, 'personnel_type': str, 'zone_id': int},
+        'pob.crew_change':              {'date': str, 'change_type': str},
+        'pob.rotation_overdue':         {'threshold_days': int, 'department': str, 'company': str},
+        'pob.zone_occupancy_history':   {'zone_id': int, 'date_from': str, 'date_to': str},
+        'pob.headcount_by_company':     {'company': str},
     }
     
     def __init__(self, db: Session):
@@ -283,6 +289,15 @@ class ReportService:
             'zone.person_trail':      self.zone_person_trail,
             'zone.current_occupancy': self.zone_current_occupancy,
             'zone.security_events':   self.zone_security_events,
+        })
+
+        # POB Operations Reports
+        self.REPORT_REGISTRY.update({
+            'pob.daily_manifest':           self.pob_daily_manifest,
+            'pob.crew_change':              self.pob_crew_change,
+            'pob.rotation_overdue':         self.pob_rotation_overdue,
+            'pob.zone_occupancy_history':   self.pob_zone_occupancy_history,
+            'pob.headcount_by_company':     self.pob_headcount_by_company,
         })
     
     def get_report_data(self, report_code: str, filters: Dict[str, Any], 
@@ -5131,4 +5146,461 @@ class ReportService:
                 'duress_count':    event_type_counts.get('Duress', 0),
             },
             'timezone': 'UTC',
+        }
+
+    # ==================== POB OPERATIONS REPORTS ====================
+
+    def pob_daily_manifest(self, filters: Dict[str, Any]) -> Dict[str, Any]:
+        """Current onboard personnel manifest — who is on the platform right now."""
+        from ..models.zone import Zone
+        params: Dict[str, Any] = {}
+        where_clauses = ["p.is_onboard = TRUE"]
+
+        if filters.get('department'):
+            where_clauses.append("COALESCE(NULLIF(p.department,''), 'Unassigned') = :department")
+            params['department'] = filters['department']
+        if filters.get('company'):
+            where_clauses.append("COALESCE(NULLIF(p.company,''), 'Unknown') = :company")
+            params['company'] = filters['company']
+        if filters.get('personnel_type'):
+            where_clauses.append("p.personnel_type = :personnel_type")
+            params['personnel_type'] = filters['personnel_type']
+        if filters.get('zone_id'):
+            where_clauses.append("p.current_zone_id = :zone_id")
+            params['zone_id'] = filters['zone_id']
+
+        where_sql = " AND ".join(where_clauses)
+        rows = self.db.execute(text(f"""
+            SELECT
+                p.emp_code,
+                COALESCE(p.badge_id, p.emp_code)                        AS badge_id,
+                COALESCE(p.full_name, TRIM(p.first_name || ' ' || p.last_name)) AS full_name,
+                COALESCE(NULLIF(p.department, ''), 'Unassigned')         AS department,
+                COALESCE(NULLIF(p.position, ''), '—')                    AS position,
+                COALESCE(NULLIF(p.company, ''), 'Unknown')               AS company,
+                p.personnel_type,
+                p.employment_type,
+                COALESCE(z.name, 'Unknown Zone')                         AS current_zone,
+                p.pob_since,
+                CASE
+                    WHEN p.pob_since IS NOT NULL
+                    THEN ROUND(EXTRACT(EPOCH FROM (NOW() - p.pob_since)) / 86400, 1)
+                    ELSE NULL
+                END                                                       AS days_onboard
+            FROM personnel p
+            LEFT JOIN zones z ON z.id = p.current_zone_id
+            WHERE {where_sql}
+            ORDER BY days_onboard DESC NULLS LAST, p.full_name
+        """), params).fetchall()
+
+        total = len(rows)
+        start = (self._page - 1) * self._page_size
+        page_rows = rows[start:start + self._page_size]
+
+        data = []
+        by_zone: Dict[str, int] = {}
+        by_type: Dict[str, int] = {}
+        by_company: Dict[str, int] = {}
+        total_days = 0.0
+        days_count = 0
+
+        for r in rows:
+            by_zone[r.current_zone] = by_zone.get(r.current_zone, 0) + 1
+            by_type[r.personnel_type or 'STAFF'] = by_type.get(r.personnel_type or 'STAFF', 0) + 1
+            by_company[r.company] = by_company.get(r.company, 0) + 1
+            if r.days_onboard is not None:
+                total_days += float(r.days_onboard)
+                days_count += 1
+
+        for r in page_rows:
+            data.append({
+                'emp_code':       r.emp_code,
+                'badge_id':       r.badge_id,
+                'full_name':      r.full_name,
+                'department':     r.department,
+                'position':       r.position,
+                'company':        r.company,
+                'personnel_type': r.personnel_type or 'STAFF',
+                'employment_type': r.employment_type or '—',
+                'current_zone':   r.current_zone,
+                'pob_since':      self._fmt_dt(r.pob_since),
+                'days_onboard':   float(r.days_onboard) if r.days_onboard is not None else None,
+            })
+
+        columns = [
+            {'field': 'badge_id',       'label': 'Badge',        'type': 'text'},
+            {'field': 'full_name',       'label': 'Name',         'type': 'text'},
+            {'field': 'department',      'label': 'Department',   'type': 'text'},
+            {'field': 'position',        'label': 'Position',     'type': 'text'},
+            {'field': 'company',         'label': 'Company',      'type': 'text'},
+            {'field': 'personnel_type',  'label': 'Type',         'type': 'text'},
+            {'field': 'current_zone',    'label': 'Zone',         'type': 'text'},
+            {'field': 'pob_since',       'label': 'Mobilized',    'type': 'datetime'},
+            {'field': 'days_onboard',    'label': 'Days Onboard', 'type': 'number'},
+        ]
+        chart_data = {
+            'labels': list(by_zone.keys()),
+            'datasets': [{'label': 'Onboard by Zone', 'data': list(by_zone.values()),
+                          'backgroundColor': '#3B82F6'}],
+        }
+        avg_days = round(total_days / days_count, 1) if days_count else 0
+        return {
+            'columns': columns, 'data': data, 'total': total,
+            'chart_data': chart_data,
+            'summary': {
+                'total_onboard': total,
+                'by_zone':       by_zone,
+                'by_type':       by_type,
+                'by_company':    by_company,
+                'avg_days_onboard': avg_days,
+            },
+        }
+
+    def pob_crew_change(self, filters: Dict[str, Any]) -> Dict[str, Any]:
+        """Personnel who mobilized or demobilized on a given date."""
+        target_date = filters.get('date', str(date.today()))
+        change_type_filter = filters.get('change_type', '').upper()  # MOBILIZE or DEMOBILIZE
+
+        params: Dict[str, Any] = {'d': target_date}
+
+        mobilize_sql = text("""
+            SELECT DISTINCT ON (t.emp_code)
+                t.emp_code,
+                t.punch_time,
+                'MOBILIZE' AS change_type,
+                term.alias AS terminal_alias
+            FROM iclock_transaction t
+            LEFT JOIN iclock_terminal term ON term.sn = t.terminal_sn
+            WHERE t.punch_time::date = :d
+              AND t.punch_state IN (0, 4)
+            ORDER BY t.emp_code, t.punch_time
+        """)
+
+        demobilize_sql = text("""
+            SELECT DISTINCT ON (t.emp_code)
+                t.emp_code,
+                t.punch_time,
+                'DEMOBILIZE' AS change_type,
+                term.alias AS terminal_alias
+            FROM iclock_transaction t
+            LEFT JOIN iclock_terminal term ON term.sn = t.terminal_sn
+            WHERE t.punch_time::date = :d
+              AND t.punch_state = 1
+            ORDER BY t.emp_code, t.punch_time DESC
+        """)
+
+        mobilize_rows = self.db.execute(mobilize_sql, params).fetchall() if change_type_filter != 'DEMOBILIZE' else []
+        demobilize_rows = self.db.execute(demobilize_sql, params).fetchall() if change_type_filter != 'MOBILIZE' else []
+
+        all_emp_codes = list({r.emp_code for r in list(mobilize_rows) + list(demobilize_rows)})
+        personnel_map: Dict[str, Any] = {}
+        if all_emp_codes:
+            p_rows = self.db.execute(text("""
+                SELECT emp_code,
+                       COALESCE(full_name, TRIM(first_name || ' ' || last_name)) AS full_name,
+                       COALESCE(NULLIF(department,''), 'Unassigned') AS department,
+                       COALESCE(NULLIF(company,''), 'Unknown') AS company,
+                       COALESCE(NULLIF(position,''), '—') AS position,
+                       personnel_type
+                FROM personnel WHERE emp_code = ANY(:codes)
+            """), {"codes": all_emp_codes}).fetchall()
+            for p in p_rows:
+                personnel_map[p.emp_code] = p
+
+        data = []
+        mobilize_count = 0
+        demobilize_count = 0
+        for r in mobilize_rows:
+            p = personnel_map.get(r.emp_code)
+            data.append({
+                'emp_code':       r.emp_code,
+                'full_name':      p.full_name if p else r.emp_code,
+                'department':     p.department if p else '—',
+                'company':        p.company if p else '—',
+                'position':       p.position if p else '—',
+                'personnel_type': p.personnel_type if p else '—',
+                'change_type':    'MOBILIZE',
+                'change_time':    self._fmt_dt(r.punch_time),
+                'terminal':       r.terminal_alias or '',
+            })
+            mobilize_count += 1
+        for r in demobilize_rows:
+            p = personnel_map.get(r.emp_code)
+            data.append({
+                'emp_code':       r.emp_code,
+                'full_name':      p.full_name if p else r.emp_code,
+                'department':     p.department if p else '—',
+                'company':        p.company if p else '—',
+                'position':       p.position if p else '—',
+                'personnel_type': p.personnel_type if p else '—',
+                'change_type':    'DEMOBILIZE',
+                'change_time':    self._fmt_dt(r.punch_time),
+                'terminal':       r.terminal_alias or '',
+            })
+            demobilize_count += 1
+
+        data.sort(key=lambda x: x['change_time'])
+        total = len(data)
+        start = (self._page - 1) * self._page_size
+        page_data = data[start:start + self._page_size]
+
+        columns = [
+            {'field': 'full_name',      'label': 'Name',         'type': 'text'},
+            {'field': 'change_type',    'label': 'Change',       'type': 'text'},
+            {'field': 'change_time',    'label': 'Time',         'type': 'datetime'},
+            {'field': 'department',     'label': 'Department',   'type': 'text'},
+            {'field': 'company',        'label': 'Company',      'type': 'text'},
+            {'field': 'position',       'label': 'Position',     'type': 'text'},
+            {'field': 'personnel_type', 'label': 'Type',         'type': 'text'},
+            {'field': 'terminal',       'label': 'Terminal',     'type': 'text'},
+        ]
+        chart_data = {
+            'labels': ['Mobilized', 'Demobilized'],
+            'datasets': [{'label': f'Crew Change {target_date}',
+                          'data': [mobilize_count, demobilize_count],
+                          'backgroundColor': ['#10B981', '#EF4444']}],
+        }
+        return {
+            'columns': columns, 'data': page_data, 'total': total,
+            'chart_data': chart_data,
+            'summary': {
+                'date':              target_date,
+                'mobilize_count':    mobilize_count,
+                'demobilize_count':  demobilize_count,
+                'net_change':        mobilize_count - demobilize_count,
+            },
+        }
+
+    def pob_rotation_overdue(self, filters: Dict[str, Any]) -> Dict[str, Any]:
+        """Personnel who have been onboard longer than the rotation threshold."""
+        threshold_days = int(filters.get('threshold_days') or 28)
+        params: Dict[str, Any] = {'threshold': threshold_days}
+        where_clauses = [
+            "p.is_onboard = TRUE",
+            "p.pob_since IS NOT NULL",
+            "EXTRACT(EPOCH FROM (NOW() - p.pob_since)) / 86400 > :threshold",
+        ]
+        if filters.get('department'):
+            where_clauses.append("COALESCE(NULLIF(p.department,''), 'Unassigned') = :department")
+            params['department'] = filters['department']
+        if filters.get('company'):
+            where_clauses.append("COALESCE(NULLIF(p.company,''), 'Unknown') = :company")
+            params['company'] = filters['company']
+
+        where_sql = " AND ".join(where_clauses)
+        rows = self.db.execute(text(f"""
+            SELECT
+                p.emp_code,
+                COALESCE(p.badge_id, p.emp_code) AS badge_id,
+                COALESCE(p.full_name, TRIM(p.first_name || ' ' || p.last_name)) AS full_name,
+                COALESCE(NULLIF(p.department,''), 'Unassigned') AS department,
+                COALESCE(NULLIF(p.position,''), '—') AS position,
+                COALESCE(NULLIF(p.company,''), 'Unknown') AS company,
+                p.personnel_type,
+                COALESCE(z.name, 'Unknown Zone') AS current_zone,
+                p.pob_since,
+                ROUND(EXTRACT(EPOCH FROM (NOW() - p.pob_since)) / 86400, 1) AS days_onboard,
+                ROUND(EXTRACT(EPOCH FROM (NOW() - p.pob_since)) / 86400, 1) - :threshold AS days_overdue
+            FROM personnel p
+            LEFT JOIN zones z ON z.id = p.current_zone_id
+            WHERE {where_sql}
+            ORDER BY days_onboard DESC
+        """), params).fetchall()
+
+        total = len(rows)
+        start = (self._page - 1) * self._page_size
+        page_rows = rows[start:start + self._page_size]
+
+        data = []
+        by_dept: Dict[str, int] = {}
+        critical_count = 0  # > threshold * 1.5
+        for r in rows:
+            by_dept[r.department] = by_dept.get(r.department, 0) + 1
+            if float(r.days_onboard) > threshold_days * 1.5:
+                critical_count += 1
+
+        for r in page_rows:
+            data.append({
+                'badge_id':      r.badge_id,
+                'full_name':     r.full_name,
+                'department':    r.department,
+                'position':      r.position,
+                'company':       r.company,
+                'personnel_type': r.personnel_type or 'STAFF',
+                'current_zone':  r.current_zone,
+                'pob_since':     self._fmt_dt(r.pob_since),
+                'days_onboard':  float(r.days_onboard),
+                'days_overdue':  float(r.days_overdue),
+            })
+
+        columns = [
+            {'field': 'badge_id',      'label': 'Badge',         'type': 'text'},
+            {'field': 'full_name',     'label': 'Name',          'type': 'text'},
+            {'field': 'department',    'label': 'Department',    'type': 'text'},
+            {'field': 'company',       'label': 'Company',       'type': 'text'},
+            {'field': 'current_zone',  'label': 'Zone',          'type': 'text'},
+            {'field': 'pob_since',     'label': 'Mobilized',     'type': 'datetime'},
+            {'field': 'days_onboard',  'label': 'Days Onboard',  'type': 'number'},
+            {'field': 'days_overdue',  'label': 'Days Overdue',  'type': 'number'},
+        ]
+        chart_data = {
+            'labels': list(by_dept.keys()),
+            'datasets': [{'label': 'Overdue by Department', 'data': list(by_dept.values()),
+                          'backgroundColor': '#F59E0B'}],
+        }
+        return {
+            'columns': columns, 'data': data, 'total': total,
+            'chart_data': chart_data,
+            'summary': {
+                'total_overdue':   total,
+                'threshold_days':  threshold_days,
+                'critical_count':  critical_count,
+                'by_department':   by_dept,
+            },
+        }
+
+    def pob_zone_occupancy_history(self, filters: Dict[str, Any]) -> Dict[str, Any]:
+        """Daily check-in and check-out counts per zone over a date range."""
+        date_from = filters.get('date_from', str(date.today() - timedelta(days=6)))
+        date_to   = filters.get('date_to',   str(date.today()))
+        params: Dict[str, Any] = {'df': date_from, 'dt': date_to}
+        zone_clause = ""
+        if filters.get('zone_id'):
+            zone_clause = "AND term.zone_id = :zone_id"
+            params['zone_id'] = filters['zone_id']
+
+        rows = self.db.execute(text(f"""
+            SELECT
+                z.id   AS zone_id,
+                z.name AS zone_name,
+                t.punch_time::date AS punch_date,
+                COUNT(CASE WHEN t.punch_state IN (0, 4) THEN 1 END) AS checkin_count,
+                COUNT(CASE WHEN t.punch_state = 1 THEN 1 END)       AS checkout_count,
+                COUNT(DISTINCT CASE WHEN t.punch_state IN (0, 4) THEN t.emp_code END) AS unique_entrants
+            FROM iclock_transaction t
+            JOIN iclock_terminal term ON term.sn = t.terminal_sn
+            JOIN zones z ON z.id = term.zone_id
+            WHERE t.punch_time::date BETWEEN :df AND :dt
+              AND term.zone_id IS NOT NULL
+              {zone_clause}
+            GROUP BY z.id, z.name, t.punch_time::date
+            ORDER BY punch_date, z.name
+        """), params).fetchall()
+
+        total = len(rows)
+        start = (self._page - 1) * self._page_size
+        page_rows = rows[start:start + self._page_size]
+
+        data = []
+        zone_totals: Dict[str, int] = {}
+        for r in page_rows:
+            data.append({
+                'zone_name':      r.zone_name,
+                'punch_date':     str(r.punch_date),
+                'checkin_count':  int(r.checkin_count),
+                'checkout_count': int(r.checkout_count),
+                'unique_entrants': int(r.unique_entrants),
+            })
+        for r in rows:
+            zone_totals[r.zone_name] = zone_totals.get(r.zone_name, 0) + int(r.checkin_count)
+
+        columns = [
+            {'field': 'zone_name',      'label': 'Zone',            'type': 'text'},
+            {'field': 'punch_date',     'label': 'Date',            'type': 'text'},
+            {'field': 'checkin_count',  'label': 'Check-Ins',       'type': 'number'},
+            {'field': 'checkout_count', 'label': 'Check-Outs',      'type': 'number'},
+            {'field': 'unique_entrants','label': 'Unique Entrants',  'type': 'number'},
+        ]
+        chart_data = {
+            'labels': list(zone_totals.keys()),
+            'datasets': [{'label': 'Total Check-Ins', 'data': list(zone_totals.values()),
+                          'backgroundColor': '#6366F1'}],
+        }
+        return {
+            'columns': columns, 'data': data, 'total': total,
+            'chart_data': chart_data,
+            'summary': {
+                'date_range':    f'{date_from} to {date_to}',
+                'by_zone':       zone_totals,
+                'total_events':  sum(zone_totals.values()),
+            },
+        }
+
+    def pob_headcount_by_company(self, filters: Dict[str, Any]) -> Dict[str, Any]:
+        """Onboard headcount broken down by company, department, and personnel type."""
+        params: Dict[str, Any] = {}
+        where_clauses = ["p.is_onboard = TRUE"]
+        if filters.get('company'):
+            where_clauses.append("COALESCE(NULLIF(p.company,''), 'Unknown') = :company")
+            params['company'] = filters['company']
+
+        where_sql = " AND ".join(where_clauses)
+        rows = self.db.execute(text(f"""
+            SELECT
+                COALESCE(NULLIF(p.company,''), 'Unknown')               AS company,
+                COALESCE(NULLIF(p.department,''), 'Unassigned')         AS department,
+                COALESCE(p.personnel_type, 'STAFF')                     AS personnel_type,
+                COUNT(*)                                                 AS headcount,
+                COUNT(CASE WHEN p.pob_since IS NOT NULL THEN 1 END)     AS with_pob_since,
+                ROUND(AVG(CASE
+                    WHEN p.pob_since IS NOT NULL
+                    THEN EXTRACT(EPOCH FROM (NOW() - p.pob_since)) / 86400
+                    ELSE NULL
+                END), 1)                                                  AS avg_days_onboard,
+                MIN(p.pob_since)                                          AS earliest_mobilization,
+                MAX(p.pob_since)                                          AS latest_mobilization
+            FROM personnel p
+            WHERE {where_sql}
+            GROUP BY company, department, personnel_type
+            ORDER BY headcount DESC, company, department
+        """), params).fetchall()
+
+        total = len(rows)
+        start = (self._page - 1) * self._page_size
+        page_rows = rows[start:start + self._page_size]
+
+        data = []
+        by_company: Dict[str, int] = {}
+        by_type: Dict[str, int] = {}
+        grand_total = 0
+
+        for r in rows:
+            by_company[r.company] = by_company.get(r.company, 0) + int(r.headcount)
+            by_type[r.personnel_type] = by_type.get(r.personnel_type, 0) + int(r.headcount)
+            grand_total += int(r.headcount)
+
+        for r in page_rows:
+            data.append({
+                'company':             r.company,
+                'department':          r.department,
+                'personnel_type':      r.personnel_type,
+                'headcount':           int(r.headcount),
+                'avg_days_onboard':    float(r.avg_days_onboard) if r.avg_days_onboard is not None else None,
+                'earliest_mobilization': self._fmt_dt(r.earliest_mobilization),
+                'latest_mobilization':   self._fmt_dt(r.latest_mobilization),
+            })
+
+        columns = [
+            {'field': 'company',               'label': 'Company',            'type': 'text'},
+            {'field': 'department',             'label': 'Department',         'type': 'text'},
+            {'field': 'personnel_type',         'label': 'Type',               'type': 'text'},
+            {'field': 'headcount',              'label': 'Headcount',          'type': 'number'},
+            {'field': 'avg_days_onboard',       'label': 'Avg Days Onboard',   'type': 'number'},
+            {'field': 'earliest_mobilization',  'label': 'Earliest Mobilized', 'type': 'datetime'},
+            {'field': 'latest_mobilization',    'label': 'Latest Mobilized',   'type': 'datetime'},
+        ]
+        chart_data = {
+            'labels': list(by_company.keys()),
+            'datasets': [{'label': 'Onboard by Company', 'data': list(by_company.values()),
+                          'backgroundColor': '#10B981'}],
+        }
+        return {
+            'columns': columns, 'data': data, 'total': total,
+            'chart_data': chart_data,
+            'summary': {
+                'grand_total_onboard': grand_total,
+                'by_company':          by_company,
+                'by_type':             by_type,
+                'company_count':       len(by_company),
+            },
         }

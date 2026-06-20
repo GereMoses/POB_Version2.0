@@ -600,7 +600,7 @@ class ReportEmailService:
         try:
             # Get company information for branding
             company = self.db.query(BaseCompany).first()
-            company_name = company.company_name if company else "POB System"
+            company_name = company.company_name if company else "Apex POB"
             company_logo = company.logo_path if company and company.logo_path else None
             
             # Prepare recipient list
@@ -698,7 +698,7 @@ class ReportEmailService:
                 </div>
                 
                 <div class="footer">
-                    <p>This is an automated email from the {company_name} POB System.</p>
+                    <p>This is an automated email from the {company_name} Apex POB.</p>
                     <p>For questions about this report, contact your administrator.</p>
                 </div>
             </div>

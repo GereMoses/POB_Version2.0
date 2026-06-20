@@ -1,7 +1,12 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { useTheme } from '../../contexts/ThemeContext';
+import ThemeSwitcher from '../ThemeSwitcher/ThemeSwitcher';
+import ARIAWidget from '../ARIA/ARIAWidget';
+import GlobalSearch from '../GlobalSearch/GlobalSearch';
+import useNotificationStream from '../../hooks/useNotificationStream';
 import {
-  Avatar, Badge, Space, Tooltip, Popover, Input, List,
-  Empty, Divider, Button, Tag, Modal, Descriptions,
+  App, Avatar, Badge, Space, Tooltip, Popover, Input, List,
+  Empty, Divider, Button, Tag, Modal, Descriptions, Typography, message,
 } from 'antd';
 import {
   DashboardOutlined, TeamOutlined, ClockCircleOutlined, DesktopOutlined,
@@ -17,12 +22,18 @@ import {
   ExclamationCircleOutlined, InfoCircleOutlined, CheckOutlined,
   ReloadOutlined, ThunderboltOutlined, IdcardOutlined,
   RightOutlined, QuestionCircleOutlined, CrownOutlined,
+  BgColorsOutlined, EditOutlined, CopyOutlined, KeyOutlined,
+  HistoryOutlined, NotificationOutlined, FireOutlined,
 } from '@ant-design/icons';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import apiService from '../../services/api';
 
-const COLORS = {
+const { Text } = Typography;
+
+// COLORS is now supplied dynamically by the theme context (see Layout component body).
+// This fallback is only used by the static iconBtnStyle below; real COLORS come from useTheme().
+const COLORS_FALLBACK = {
   sidebarBg: '#1E2A3B',
   sidebarBgHover: 'rgba(255,255,255,0.07)',
   sidebarActive: 'rgba(0,120,212,0.18)',
@@ -35,6 +46,10 @@ const COLORS = {
   contentBg: '#F3F4F8',
   accentBlue: '#0078D4',
   accentBlueDark: '#005A9E',
+  topbarIconColor: '#6B7A8D',
+  topbarTextColor: '#1F2937',
+  topbarMutedColor: '#9CA3AF',
+  menuHoverBg: '#F5F7FA',
   headerHeight: 56,
   sidebarWidth: 240,
   sidebarCollapsed: 56,
@@ -138,18 +153,53 @@ const timeAgo = (dateStr) => {
 };
 
 const Layout = ({ user, onLogout, children }) => {
+  const { COLORS: themeColors, theme: activeTheme, themes: allThemes, applyTheme } = useTheme();
+  const COLORS = themeColors ?? COLORS_FALLBACK;
+
+  const [sidebarStyle, setSidebarStyle] = useState(() => localStorage.getItem('pob_sidebar_style') || 'dark');
+  const sidebarIsLight = sidebarStyle === 'light';
+
+  const SIDEBAR = {
+    bg:               sidebarIsLight ? COLORS.topbarBg        : COLORS.sidebarBg,
+    bgHover:          sidebarIsLight ? COLORS.menuHoverBg     : COLORS.sidebarBgHover,
+    active:           COLORS.sidebarActive,
+    activeBorder:     COLORS.sidebarActiveBorder,
+    text:             sidebarIsLight ? COLORS.topbarTextColor  : COLORS.sidebarText,
+    textActive:       sidebarIsLight ? COLORS.accentBlue       : '#FFFFFF',
+    groupLabel:       sidebarIsLight ? COLORS.topbarMutedColor : COLORS.sidebarGroupLabel,
+    border:           sidebarIsLight ? COLORS.topbarBorder     : 'rgba(255,255,255,0.06)',
+    shadow:           sidebarIsLight ? '2px 0 8px rgba(0,0,0,0.06)' : '2px 0 8px rgba(0,0,0,0.18)',
+    scrollThumb:      sidebarIsLight ? 'rgba(0,0,0,0.15)'     : 'rgba(255,255,255,0.12)',
+    scrollThumbHover: sidebarIsLight ? 'rgba(0,0,0,0.25)'     : 'rgba(255,255,255,0.2)',
+    logoText:         sidebarIsLight ? COLORS.topbarTextColor  : '#fff',
+    logoSubtext:      sidebarIsLight ? COLORS.topbarMutedColor : '#6B7A8D',
+    groupActive1:     sidebarIsLight ? COLORS.accentBlue       : '#90B8E0',
+    groupActive2:     sidebarIsLight ? COLORS.accentBlue       : '#B8D4F0',
+  };
+
+  const toggleSidebarStyle = () => {
+    const next = sidebarStyle === 'dark' ? 'light' : 'dark';
+    setSidebarStyle(next);
+    localStorage.setItem('pob_sidebar_style', next);
+  };
+  const { latest: streamNotif } = useNotificationStream({ enabled: !!user });
+
   const [collapsed,      setCollapsed]     = useState(false);
   const [expandedItems,  setExpandedItems] = useState({ 'personnel-group': true });
   const [notifOpen,      setNotifOpen]     = useState(false);
   const [appsOpen,       setAppsOpen]      = useState(false);
   const [searchOpen,     setSearchOpen]    = useState(false);
   const [searchVal,      setSearchVal]     = useState('');
+  const [globalSearchOpen, setGlobalSearchOpen] = useState(false);
   const [isFullscreen,   setIsFullscreen]  = useState(false);
   const [clockDate,      setClockDate]     = useState('');
   const [clockTime,      setClockTime]     = useState('');
   const [profileOpen,    setProfileOpen]   = useState(false);
   const [userPopOpen,    setUserPopOpen]   = useState(false);
-  const searchRef = useRef(null);
+  const [userStatus,     setUserStatus]    = useState('online');
+  const [shortcutsOpen,  setShortcutsOpen] = useState(false);
+  const searchRef    = useRef(null);
+  const sessionStart = useRef(Date.now());
   const qc = useQueryClient();
   const navigate  = useNavigate();
   const location  = useLocation();
@@ -222,6 +272,39 @@ const Layout = ({ user, onLogout, children }) => {
     return () => document.removeEventListener('fullscreenchange', onChange);
   }, []);
 
+  /* ── Auto-collapse sidebar on small screens ── */
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 1024px)');
+    const handler = (e) => { if (e.matches) setCollapsed(true); };
+    if (mq.matches) setCollapsed(true);
+    mq.addEventListener('change', handler);
+    return () => mq.removeEventListener('change', handler);
+  }, []);
+
+  /* ── Real-time SSE notification → toast ── */
+  const { message: appMessage } = App.useApp();
+  useEffect(() => {
+    if (!streamNotif) return;
+    const text_  = streamNotif.message || streamNotif.title || 'New notification';
+    const p      = streamNotif.priority;
+    const dur    = (p === 'high' || p === 'critical') ? 0 : p === 'medium' ? 6 : 4;
+    if (p === 'high' || p === 'critical') appMessage.error({ content: text_, duration: dur });
+    else if (p === 'medium') appMessage.warning({ content: text_, duration: dur });
+    else appMessage.info({ content: text_, duration: dur });
+  }, [streamNotif]);
+
+  /* ── Ctrl+K / Cmd+K global search shortcut ── */
+  useEffect(() => {
+    const handler = (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+        e.preventDefault();
+        setGlobalSearchOpen(true);
+      }
+    };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, []);
+
   const toggleFullscreen = () => {
     if (!document.fullscreenElement) document.documentElement.requestFullscreen?.();
     else document.exitFullscreen?.();
@@ -270,10 +353,7 @@ const Layout = ({ user, onLogout, children }) => {
     ? allNavItems.filter(i => i.label.toLowerCase().includes(searchVal.toLowerCase()) && i.key !== 'personnel-group')
     : [];
 
-  const openSearch = () => {
-    setSearchOpen(true);
-    setTimeout(() => searchRef.current?.focus(), 50);
-  };
+  const openSearch = () => setGlobalSearchOpen(true);
 
   /* ── nav helpers ── */
   const isActive = key => {
@@ -325,9 +405,9 @@ const Layout = ({ user, onLogout, children }) => {
       borderRadius: 6, margin: '1px 6px', transition: 'all 0.15s ease',
       position: 'relative',
       padding: collapsed ? '10px 0' : depth === 1 ? '7px 16px 7px 44px' : '10px 16px',
-      background: active ? COLORS.sidebarActive : 'transparent',
+      background: active ? SIDEBAR.active : 'transparent',
       borderLeft: active && depth === 0
-        ? `3px solid ${COLORS.sidebarActiveBorder}`
+        ? `3px solid ${SIDEBAR.activeBorder}`
         : depth === 0 ? '3px solid transparent' : 'none',
       justifyContent: collapsed ? 'center' : 'flex-start',
       gap: 10,
@@ -337,25 +417,25 @@ const Layout = ({ user, onLogout, children }) => {
       <div
         style={itemStyle}
         onClick={() => hasChildren ? toggleExpand(item.key) : navigate(item.key)}
-        onMouseEnter={e => { if (!active) e.currentTarget.style.background = COLORS.sidebarBgHover; }}
+        onMouseEnter={e => { if (!active) e.currentTarget.style.background = SIDEBAR.bgHover; }}
         onMouseLeave={e => { if (!active) e.currentTarget.style.background = 'transparent'; }}
       >
         <span style={{
           fontSize: depth === 1 ? 13 : 16,
-          color: active ? '#fff' : groupActive ? '#90B8E0' : COLORS.sidebarText,
+          color: active ? SIDEBAR.textActive : groupActive ? SIDEBAR.groupActive1 : SIDEBAR.text,
           flexShrink: 0, width: 18, textAlign: 'center',
         }}>{item.icon}</span>
         {!collapsed && (
           <span style={{
             fontSize: depth === 1 ? 12.5 : 13.5,
             fontWeight: active ? 600 : 400,
-            color: active ? '#fff' : groupActive && depth === 0 ? '#B8D4F0' : COLORS.sidebarText,
+            color: active ? SIDEBAR.textActive : groupActive && depth === 0 ? SIDEBAR.groupActive2 : SIDEBAR.text,
             flex: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
           }}>{item.label}</span>
         )}
         {!collapsed && hasChildren && (
           <DownOutlined style={{
-            fontSize: 10, color: COLORS.sidebarGroupLabel, flexShrink: 0,
+            fontSize: 10, color: SIDEBAR.groupLabel, flexShrink: 0,
             transform: expanded ? 'rotate(0deg)' : 'rotate(-90deg)', transition: 'transform 0.2s',
           }} />
         )}
@@ -540,147 +620,372 @@ const Layout = ({ user, onLogout, children }) => {
     </div>
   );
 
+  /* ── icon button style (theme-aware) ── */
+  const iconBtnStyle = {
+    width: 34, height: 34, borderRadius: 6,
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    cursor: 'pointer', color: COLORS.topbarIconColor, transition: 'all 0.15s',
+  };
+
   /* ── user popover panel ── */
   const displayName = user?.first_name
     ? `${user.first_name} ${user.last_name || ''}`.trim()
     : user?.username || 'Admin';
-  const initials = (user?.first_name?.[0] || user?.username?.[0] || 'A').toUpperCase();
+  const initials = displayName.split(' ').map(w => w[0]).slice(0, 2).join('').toUpperCase();
+
+  const STATUS_OPTIONS = [
+    { key: 'online',    dot: '#22C55E', label: 'Active',           hint: 'Available to others' },
+    { key: 'away',      dot: '#F59E0B', label: 'Away',             hint: 'Temporarily unavailable' },
+    { key: 'dnd',       dot: '#EF4444', label: 'Do Not Disturb',   hint: 'Silence all alerts' },
+    { key: 'invisible', dot: '#9CA3AF', label: 'Appear Offline',   hint: 'Hidden from others' },
+  ];
+  const currentStatus = STATUS_OPTIONS.find(s => s.key === userStatus) ?? STATUS_OPTIONS[0];
+
+  const sessionMinutes = Math.floor((Date.now() - sessionStart.current) / 60000);
+  const sessionText = sessionMinutes < 1 ? 'Just started'
+    : sessionMinutes < 60 ? `${sessionMinutes}m`
+    : `${Math.floor(sessionMinutes / 60)}h ${sessionMinutes % 60}m`;
+
+  /* helper: section label */
+  const SectionLabel = ({ label }) => (
+    <div style={{
+      padding: '10px 16px 4px',
+      fontSize: 10, fontWeight: 700, letterSpacing: '0.08em',
+      color: '#9CA3AF', textTransform: 'uppercase', userSelect: 'none',
+    }}>{label}</div>
+  );
+
+  /* helper: single menu row */
+  const MenuItem = ({ icon, color, label, sub, shortcut, badge, right, onClick: act }) => (
+    <div
+      onClick={act}
+      style={{
+        display: 'flex', alignItems: 'center', gap: 11,
+        padding: '8px 14px', cursor: 'pointer', transition: 'background 0.13s',
+      }}
+      onMouseEnter={e => e.currentTarget.style.background = COLORS.menuHoverBg}
+      onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
+    >
+      <div style={{
+        width: 32, height: 32, borderRadius: 8, flexShrink: 0,
+        background: `${color}14`, border: `1px solid ${color}20`,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        color, fontSize: 14,
+      }}>{icon}</div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <span style={{ fontSize: 13, fontWeight: 500, color: COLORS.topbarTextColor, lineHeight: 1.3 }}>{label}</span>
+          {badge != null && (
+            <span style={{
+              background: '#EF4444', color: '#fff',
+              fontSize: 9, fontWeight: 700, borderRadius: 8,
+              padding: '1px 5px', lineHeight: 1.4,
+            }}>{badge}</span>
+          )}
+        </div>
+        {sub && <div style={{ fontSize: 11, color: COLORS.topbarMutedColor, marginTop: 1 }}>{sub}</div>}
+      </div>
+      {shortcut && (
+        <kbd style={{
+          background: COLORS.menuHoverBg, border: `1px solid #e5e7eb`,
+          borderRadius: 4, padding: '1px 5px',
+          fontSize: 10, color: COLORS.topbarMutedColor, fontFamily: 'monospace',
+          flexShrink: 0,
+        }}>{shortcut}</kbd>
+      )}
+      {right || <RightOutlined style={{ fontSize: 9, color: '#D1D5DB', flexShrink: 0 }} />}
+    </div>
+  );
 
   const userPopPanel = (
-    <div style={{ width: 288 }}>
-      {/* Profile header */}
+    <div style={{ width: 316 }}>
+
+      {/* ── Profile Header ───────────────────────────────── */}
       <div style={{
-        background: 'linear-gradient(145deg, #0d1b2e 0%, #1a2d45 55%, #0f2137 100%)',
-        borderRadius: '8px 8px 0 0', padding: '20px 18px 16px',
+        background: `linear-gradient(145deg, ${COLORS.sidebarBg} 0%, ${COLORS.accentBlueDark}cc 100%)`,
+        borderRadius: '10px 10px 0 0', padding: '18px 16px 14px',
         position: 'relative', overflow: 'hidden',
       }}>
-        <div style={{ position:'absolute', top:-24, right:-24, width:90, height:90, borderRadius:'50%', background:'rgba(0,120,212,0.12)' }} />
-        <div style={{ position:'absolute', bottom:-16, left:40, width:60, height:60, borderRadius:'50%', background:'rgba(0,120,212,0.07)' }} />
+        {/* decorative circles */}
+        <div style={{ position:'absolute', top:-30, right:-20, width:100, height:100, borderRadius:'50%', background:`${COLORS.accentBlue}18`, pointerEvents:'none' }} />
+        <div style={{ position:'absolute', bottom:-20, left:60, width:70, height:70, borderRadius:'50%', background:`${COLORS.accentBlue}0e`, pointerEvents:'none' }} />
 
-        <div style={{ display:'flex', alignItems:'center', gap:14, position:'relative' }}>
-          {/* Avatar */}
-          <div style={{
-            width:56, height:56, borderRadius:14, flexShrink:0,
-            background:'linear-gradient(135deg, #0078D4 0%, #005A9E 100%)',
-            display:'flex', alignItems:'center', justifyContent:'center',
-            fontSize:22, fontWeight:800, color:'white',
-            boxShadow:'0 4px 16px rgba(0,120,212,0.45)',
-            border:'2px solid rgba(255,255,255,0.15)',
-          }}>{initials}</div>
-
-          <div style={{ minWidth:0, flex:1 }}>
+        {/* Top row: avatar + info + edit button */}
+        <div style={{ display:'flex', alignItems:'flex-start', gap:13, position:'relative' }}>
+          {/* Avatar with status ring */}
+          <div style={{ position:'relative', flexShrink:0 }}>
             <div style={{
-              color:'white', fontWeight:700, fontSize:15, lineHeight:1.25,
-              whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis',
-            }}>{displayName}</div>
-            <div style={{ marginTop:5 }}>
-              <span style={{
-                background: user?.is_superuser ? 'rgba(0,120,212,0.28)' : 'rgba(255,255,255,0.1)',
-                color: user?.is_superuser ? '#60A5FA' : 'rgba(255,255,255,0.65)',
-                fontSize:10, fontWeight:700, letterSpacing:'0.06em',
-                padding:'2px 8px', borderRadius:10,
-                border:`1px solid ${user?.is_superuser ? 'rgba(96,165,250,0.3)' : 'rgba(255,255,255,0.12)'}`,
-              }}>
-                {user?.is_superuser ? 'SUPER ADMIN' : 'USER'}
-              </span>
+              width:54, height:54, borderRadius:14,
+              background:`linear-gradient(135deg, ${COLORS.accentBlue} 0%, ${COLORS.accentBlueDark} 100%)`,
+              display:'flex', alignItems:'center', justifyContent:'center',
+              fontSize:20, fontWeight:800, color:'white',
+              boxShadow:`0 4px 14px ${COLORS.accentBlue}55`,
+              border:'2px solid rgba(255,255,255,0.18)',
+            }}>{initials}</div>
+            {/* Status badge on avatar */}
+            <Tooltip title={currentStatus.label}>
+              <div style={{
+                position:'absolute', bottom:-2, right:-2,
+                width:14, height:14, borderRadius:'50%',
+                background: currentStatus.dot,
+                border:'2px solid rgba(255,255,255,0.9)',
+                cursor:'pointer', transition:'transform 0.15s',
+              }}
+                onClick={e => { e.stopPropagation(); setUserStatus(s => { const i = STATUS_OPTIONS.findIndex(o => o.key === s); return STATUS_OPTIONS[(i+1) % STATUS_OPTIONS.length].key; }); }}
+                onMouseEnter={e => { e.currentTarget.style.transform='scale(1.25)'; }}
+                onMouseLeave={e => { e.currentTarget.style.transform='scale(1)'; }}
+              />
+            </Tooltip>
+          </div>
+
+          {/* Name + role + email */}
+          <div style={{ flex:1, minWidth:0, paddingTop:2 }}>
+            <div style={{ color:'#fff', fontWeight:700, fontSize:15, lineHeight:1.25, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
+              {displayName}
+            </div>
+            <div style={{ marginTop:5, display:'flex', alignItems:'center', gap:6, flexWrap:'wrap' }}>
+              {user?.is_superuser && (
+                <span style={{
+                  background:'rgba(250,204,21,0.18)', color:'#FCD34D',
+                  fontSize:9, fontWeight:800, letterSpacing:'0.07em',
+                  padding:'2px 7px', borderRadius:10,
+                  border:'1px solid rgba(250,204,21,0.28)',
+                  display:'inline-flex', alignItems:'center', gap:3,
+                }}>
+                  <CrownOutlined style={{ fontSize:8 }} /> SUPER ADMIN
+                </span>
+              )}
+              {user?.is_global_admin && (
+                <span style={{
+                  background:'rgba(167,139,250,0.2)', color:'#C4B5FD',
+                  fontSize:9, fontWeight:800, letterSpacing:'0.07em',
+                  padding:'2px 7px', borderRadius:10,
+                  border:'1px solid rgba(167,139,250,0.28)',
+                }}>GLOBAL ADMIN</span>
+              )}
+              {!user?.is_superuser && !user?.is_global_admin && (
+                <span style={{
+                  background:'rgba(255,255,255,0.1)', color:'rgba(255,255,255,0.6)',
+                  fontSize:9, fontWeight:700, letterSpacing:'0.06em',
+                  padding:'2px 7px', borderRadius:10,
+                  border:'1px solid rgba(255,255,255,0.12)',
+                }}>USER</span>
+              )}
             </div>
             {user?.email && (
-              <div style={{
-                color:'rgba(255,255,255,0.42)', fontSize:11, marginTop:6,
-                whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis',
-              }}>{user.email}</div>
+              <Tooltip title="Click to copy email">
+                <div
+                  onClick={() => { navigator.clipboard?.writeText(user.email); message.success('Email copied'); }}
+                  style={{
+                    color:'rgba(255,255,255,0.42)', fontSize:11, marginTop:6,
+                    whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis',
+                    cursor:'pointer', display:'flex', alignItems:'center', gap:4, maxWidth:160,
+                    transition:'color 0.15s',
+                  }}
+                  onMouseEnter={e => e.currentTarget.style.color='rgba(255,255,255,0.75)'}
+                  onMouseLeave={e => e.currentTarget.style.color='rgba(255,255,255,0.42)'}
+                >
+                  <span style={{ overflow:'hidden', textOverflow:'ellipsis' }}>{user.email}</span>
+                  <CopyOutlined style={{ fontSize:10, flexShrink:0 }} />
+                </div>
+              </Tooltip>
             )}
+          </div>
+
+          {/* Edit profile button */}
+          <Tooltip title="Edit profile">
+            <div
+              onClick={() => { setUserPopOpen(false); setProfileOpen(true); }}
+              style={{
+                width:28, height:28, borderRadius:8, flexShrink:0,
+                background:'rgba(255,255,255,0.1)', border:'1px solid rgba(255,255,255,0.15)',
+                display:'flex', alignItems:'center', justifyContent:'center',
+                cursor:'pointer', transition:'all 0.15s', color:'rgba(255,255,255,0.65)',
+                fontSize:13,
+              }}
+              onMouseEnter={e => { e.currentTarget.style.background='rgba(255,255,255,0.2)'; e.currentTarget.style.color='#fff'; }}
+              onMouseLeave={e => { e.currentTarget.style.background='rgba(255,255,255,0.1)'; e.currentTarget.style.color='rgba(255,255,255,0.65)'; }}
+            >
+              <EditOutlined />
+            </div>
+          </Tooltip>
+        </div>
+
+        {/* Status selector row */}
+        <div style={{
+          display:'flex', alignItems:'center', justifyContent:'space-between',
+          marginTop:14, paddingTop:12,
+          borderTop:'1px solid rgba(255,255,255,0.08)',
+        }}>
+          <div style={{ display:'flex', gap:6 }}>
+            {STATUS_OPTIONS.map(opt => (
+              <Tooltip key={opt.key} title={opt.hint}>
+                <div
+                  onClick={() => setUserStatus(opt.key)}
+                  style={{
+                    display:'flex', alignItems:'center', gap:5,
+                    padding:'4px 9px', borderRadius:20, cursor:'pointer',
+                    background: userStatus === opt.key ? 'rgba(255,255,255,0.14)' : 'transparent',
+                    border: userStatus === opt.key ? '1px solid rgba(255,255,255,0.2)' : '1px solid transparent',
+                    transition:'all 0.15s',
+                  }}
+                  onMouseEnter={e => { if (userStatus !== opt.key) e.currentTarget.style.background='rgba(255,255,255,0.07)'; }}
+                  onMouseLeave={e => { if (userStatus !== opt.key) e.currentTarget.style.background='transparent'; }}
+                >
+                  <div style={{ width:7, height:7, borderRadius:'50%', background:opt.dot, flexShrink:0,
+                    ...(userStatus === opt.key && opt.key === 'online' ? { animation:'statusPulse 2s infinite' } : {})
+                  }} />
+                  <span style={{ fontSize:10.5, color: userStatus === opt.key ? '#fff' : 'rgba(255,255,255,0.45)', fontWeight: userStatus === opt.key ? 600 : 400, whiteSpace:'nowrap' }}>
+                    {opt.label}
+                  </span>
+                </div>
+              </Tooltip>
+            ))}
           </div>
         </div>
 
-        {/* Status bar */}
+        {/* Session info bar */}
         <div style={{
-          display:'flex', alignItems:'center', gap:6,
-          marginTop:13, paddingTop:11,
-          borderTop:'1px solid rgba(255,255,255,0.07)',
-          position:'relative',
+          display:'flex', alignItems:'center', gap:16,
+          marginTop:10,
         }}>
-          <div style={{
-            width:7, height:7, borderRadius:'50%', background:'#22C55E',
-            animation:'statusPulse 2s infinite', flexShrink:0,
-          }} />
-          <span style={{ color:'rgba(255,255,255,0.45)', fontSize:11 }}>Active now</span>
+          <div style={{ display:'flex', alignItems:'center', gap:4 }}>
+            <ClockCircleOutlined style={{ fontSize:10, color:'rgba(255,255,255,0.3)' }} />
+            <span style={{ fontSize:10.5, color:'rgba(255,255,255,0.38)' }}>Session: </span>
+            <span style={{ fontSize:10.5, color:'rgba(255,255,255,0.6)', fontWeight:600 }}>{sessionText}</span>
+          </div>
           {user?.username && (
-            <span style={{
-              marginLeft:'auto', color:'rgba(255,255,255,0.28)',
-              fontSize:10.5, fontFamily:'monospace',
-            }}>@{user.username}</span>
+            <span style={{ fontSize:10, color:'rgba(255,255,255,0.25)', fontFamily:'monospace', marginLeft:'auto' }}>
+              @{user.username}
+            </span>
           )}
         </div>
       </div>
 
-      {/* Menu items */}
-      <div style={{ padding:'6px 0' }}>
-        {[
-          {
-            icon:<UserOutlined />, label:'My Profile',
-            sub:'View & edit your details', color:'#0078D4',
-            action:() => { setUserPopOpen(false); setProfileOpen(true); },
-          },
-          {
-            icon:<SettingOutlined />, label:'Account Settings',
-            sub:'Preferences & security', color:'#7C3AED',
-            action:() => { setUserPopOpen(false); navigate('/settings'); },
-          },
-          {
-            icon:<LockOutlined />, label:'Change Password',
-            sub:'Update your credentials', color:'#047857',
-            action:() => { setUserPopOpen(false); navigate('/settings'); },
-          },
-          {
-            icon:<QuestionCircleOutlined />, label:'Help & Support',
-            sub:'Docs, guides & contact', color:'#B45309',
-            action:() => {},
-          },
-        ].map(item => (
-          <div
-            key={item.label}
-            onClick={item.action}
-            style={{
-              display:'flex', alignItems:'center', gap:12,
-              padding:'9px 16px', cursor:'pointer', transition:'background 0.15s',
-            }}
-            onMouseEnter={e => e.currentTarget.style.background='#F5F7FA'}
-            onMouseLeave={e => e.currentTarget.style.background='transparent'}
-          >
-            <div style={{
-              width:36, height:36, borderRadius:9, flexShrink:0,
-              background:`${item.color}12`, border:`1px solid ${item.color}22`,
-              display:'flex', alignItems:'center', justifyContent:'center',
-              color:item.color, fontSize:15,
-            }}>{item.icon}</div>
-            <div style={{ flex:1, minWidth:0 }}>
-              <div style={{ fontSize:13, fontWeight:500, color:'#1F2937', lineHeight:1.3 }}>{item.label}</div>
-              <div style={{ fontSize:11, color:'#9CA3AF', marginTop:1 }}>{item.sub}</div>
-            </div>
-            <RightOutlined style={{ fontSize:10, color:'#D1D5DB', flexShrink:0 }} />
-          </div>
-        ))}
+      {/* ── ACCOUNT section ─────────────────────────────── */}
+      <SectionLabel label="Account" />
+      <MenuItem
+        icon={<IdcardOutlined />} color={COLORS.accentBlue}
+        label="My Profile" sub="View & edit your details"
+        onClick={() => { setUserPopOpen(false); setProfileOpen(true); }}
+      />
+      <MenuItem
+        icon={<SettingOutlined />} color="#7C3AED"
+        label="Account Settings" sub="Preferences & security"
+        shortcut="⌘,"
+        onClick={() => { setUserPopOpen(false); navigate('/settings'); }}
+      />
+      <MenuItem
+        icon={<LockOutlined />} color="#047857"
+        label="Change Password" sub="Update your credentials"
+        onClick={() => { setUserPopOpen(false); navigate('/settings'); }}
+      />
+
+      {/* ── WORKSPACE section ───────────────────────────── */}
+      <Divider style={{ margin:'4px 0' }} />
+      <SectionLabel label="Workspace" />
+      <MenuItem
+        icon={<NotificationOutlined />} color="#D97706"
+        label="Notification Preferences" sub="Manage alert channels"
+        onClick={() => { setUserPopOpen(false); navigate('/settings'); }}
+      />
+      <MenuItem
+        icon={<KeyOutlined />} color="#0891B2"
+        label="Keyboard Shortcuts" sub="Speed up your workflow"
+        shortcut="⌘K"
+        onClick={() => { setUserPopOpen(false); setShortcutsOpen(true); }}
+        right={null}
+      />
+
+      {/* ── APPEARANCE section ──────────────────────────── */}
+      <Divider style={{ margin:'4px 0' }} />
+      <SectionLabel label="Appearance" />
+      <div style={{ padding:'4px 14px 10px' }}>
+        <div style={{
+          display:'flex', alignItems:'center', gap:6,
+          marginBottom:8,
+        }}>
+          <BgColorsOutlined style={{ fontSize:13, color:COLORS.accentBlue }} />
+          <span style={{ fontSize:12, fontWeight:500, color:COLORS.topbarTextColor }}>Theme</span>
+          <span style={{
+            marginLeft:'auto', fontSize:11,
+            color: COLORS.topbarMutedColor,
+          }}>{activeTheme?.name}</span>
+        </div>
+        <div style={{ display:'flex', gap:6, flexWrap:'wrap' }}>
+          {allThemes.map(t => {
+            const [sidebar, accent] = t.preview;
+            const isActive = t.key === activeTheme?.key;
+            return (
+              <Tooltip key={t.key} title={t.name}>
+                <div
+                  onClick={() => applyTheme(t.key)}
+                  style={{
+                    width:28, height:28, borderRadius:8, cursor:'pointer',
+                    border: isActive ? `2px solid ${accent}` : '2px solid transparent',
+                    boxShadow: isActive ? `0 0 0 3px ${accent}35` : 'none',
+                    overflow:'hidden', transition:'all 0.15s', position:'relative',
+                    display:'flex',
+                  }}
+                  onMouseEnter={e => { if (!isActive) e.currentTarget.style.border=`2px solid ${accent}80`; }}
+                  onMouseLeave={e => { if (!isActive) e.currentTarget.style.border='2px solid transparent'; }}
+                >
+                  <div style={{ width:'40%', background:sidebar }} />
+                  <div style={{ flex:1, background:t.preview[3] }} />
+                  {isActive && (
+                    <div style={{
+                      position:'absolute', inset:0,
+                      display:'flex', alignItems:'center', justifyContent:'center',
+                    }}>
+                      <CheckOutlined style={{ fontSize:10, color:accent, fontWeight:900 }} />
+                    </div>
+                  )}
+                </div>
+              </Tooltip>
+            );
+          })}
+        </div>
       </div>
 
+      {/* ── HELP section ────────────────────────────────── */}
       <Divider style={{ margin:'4px 0' }} />
+      <SectionLabel label="Help" />
+      <MenuItem
+        icon={<QuestionCircleOutlined />} color="#B45309"
+        label="Help & Support" sub="Docs, guides & contact"
+        onClick={() => {}}
+      />
+      <MenuItem
+        icon={<FireOutlined />} color="#DC2626"
+        label="What's New" sub="Latest updates & features"
+        badge={3}
+        onClick={() => {}}
+      />
 
-      {/* Sign out */}
-      <div style={{ padding:'8px 12px 12px' }}>
+      {/* ── Footer: sign out + version ──────────────────── */}
+      <Divider style={{ margin:'6px 0 0' }} />
+      <div style={{ padding:'10px 14px 12px', display:'flex', alignItems:'center', gap:10 }}>
         <div
           onClick={() => { setUserPopOpen(false); onLogout(); }}
           style={{
-            display:'flex', alignItems:'center', justifyContent:'center', gap:8,
-            padding:'9px 0', borderRadius:8, cursor:'pointer',
+            flex:1, display:'flex', alignItems:'center', justifyContent:'center', gap:8,
+            padding:'8px 0', borderRadius:8, cursor:'pointer',
             background:'#FEF2F2', border:'1px solid #FECACA',
             color:'#DC2626', fontWeight:600, fontSize:13,
             transition:'all 0.15s',
           }}
-          onMouseEnter={e => { e.currentTarget.style.background='#FEE2E2'; e.currentTarget.style.borderColor='#FCA5A5'; }}
+          onMouseEnter={e => { e.currentTarget.style.background='#FEE2E2'; e.currentTarget.style.borderColor='#EF4444'; }}
           onMouseLeave={e => { e.currentTarget.style.background='#FEF2F2'; e.currentTarget.style.borderColor='#FECACA'; }}
         >
           <LogoutOutlined style={{ fontSize:14 }} />
           Sign Out
+        </div>
+        <div style={{
+          fontSize:10, color:COLORS.topbarMutedColor, lineHeight:1.5,
+          textAlign:'right', flexShrink:0,
+        }}>
+          <div style={{ fontWeight:600 }}>POB v2.0</div>
+          <div style={{ opacity:.7 }}>Build 2025</div>
         </div>
       </div>
     </div>
@@ -695,11 +1000,11 @@ const Layout = ({ user, onLogout, children }) => {
       <div style={{
         width: collapsed ? COLORS.sidebarCollapsed : COLORS.sidebarWidth,
         minWidth: collapsed ? COLORS.sidebarCollapsed : COLORS.sidebarWidth,
-        background: COLORS.sidebarBg,
+        background: SIDEBAR.bg,
         display: 'flex', flexDirection: 'column',
         transition: 'width 0.25s cubic-bezier(0.4,0,0.2,1)',
         overflow: 'hidden',
-        boxShadow: '2px 0 8px rgba(0,0,0,0.18)',
+        boxShadow: SIDEBAR.shadow,
         zIndex: 100,
       }}>
 
@@ -708,19 +1013,19 @@ const Layout = ({ user, onLogout, children }) => {
           height: COLORS.headerHeight,
           display: 'flex', alignItems: 'center',
           padding: collapsed ? '0 12px' : '0 16px',
-          borderBottom: '1px solid rgba(255,255,255,0.06)',
+          borderBottom: `1px solid ${SIDEBAR.border}`,
           gap: 10, flexShrink: 0,
         }}>
-          <img src="/logo/image.png" alt="Marconi.ng EPC Limited"
+          <img src="/logo/apex-pob.png" alt="Apex POB"
             style={{ width: collapsed ? 32 : 36, height: collapsed ? 32 : 36,
               borderRadius: 6, objectFit: 'contain', flexShrink: 0, background: '#fff', padding: 2 }} />
           {!collapsed && (
             <div>
-              <div style={{ color: '#fff', fontWeight: 700, fontSize: 13, lineHeight: 1.2, letterSpacing: '0.01em' }}>
-                Marconi.ng EPC
+              <div style={{ color: SIDEBAR.logoText, fontWeight: 700, fontSize: 13, lineHeight: 1.2, letterSpacing: '0.01em' }}>
+                Apex POB
               </div>
-              <div style={{ color: '#6B7A8D', fontSize: 10, letterSpacing: '0.06em', textTransform: 'uppercase' }}>
-                POB Management
+              <div style={{ color: SIDEBAR.logoSubtext, fontSize: 10, letterSpacing: '0.06em', textTransform: 'uppercase' }}>
+                Marconi.ng EPC
               </div>
             </div>
           )}
@@ -737,7 +1042,7 @@ const Layout = ({ user, onLogout, children }) => {
                 {!collapsed && (
                   <div style={{
                     padding: '4px 16px', fontSize: 10, fontWeight: 700,
-                    color: COLORS.sidebarGroupLabel, letterSpacing: '0.1em',
+                    color: SIDEBAR.groupLabel, letterSpacing: '0.1em',
                     textTransform: 'uppercase', marginBottom: 2,
                   }}>{group.label}</div>
                 )}
@@ -748,18 +1053,37 @@ const Layout = ({ user, onLogout, children }) => {
           })}
         </div>
 
-        {/* Collapse toggle */}
+        {/* Sidebar footer: style toggle + collapse */}
         <div style={{
-          borderTop: '1px solid rgba(255,255,255,0.06)',
-          padding: '10px 8px',
-          display: 'flex', justifyContent: collapsed ? 'center' : 'flex-end',
+          borderTop: `1px solid ${SIDEBAR.border}`,
+          padding: '8px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: collapsed ? 'center' : 'space-between',
+          gap: 4,
         }}>
+          {!collapsed && (
+            <Tooltip title={sidebarIsLight ? 'Switch to dark sidebar' : 'Switch to light sidebar'} placement="top">
+              <div
+                onClick={toggleSidebarStyle}
+                style={{
+                  cursor: 'pointer', width: 32, height: 32, borderRadius: 6,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  color: SIDEBAR.groupLabel, transition: 'all 0.15s',
+                }}
+                onMouseEnter={e => { e.currentTarget.style.background = SIDEBAR.bgHover; e.currentTarget.style.color = SIDEBAR.text; }}
+                onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = SIDEBAR.groupLabel; }}
+              >
+                <BgColorsOutlined style={{ fontSize: 15 }} />
+              </div>
+            </Tooltip>
+          )}
           <div onClick={() => setCollapsed(!collapsed)} style={{
             cursor: 'pointer', width: 32, height: 32, borderRadius: 6,
             display: 'flex', alignItems: 'center', justifyContent: 'center',
-            color: COLORS.sidebarText, transition: 'background 0.15s',
+            color: SIDEBAR.text, transition: 'background 0.15s',
           }}
-            onMouseEnter={e => e.currentTarget.style.background = COLORS.sidebarBgHover}
+            onMouseEnter={e => e.currentTarget.style.background = SIDEBAR.bgHover}
             onMouseLeave={e => e.currentTarget.style.background = 'transparent'}
           >
             {collapsed ? <MenuUnfoldOutlined style={{ fontSize: 16 }} /> : <MenuFoldOutlined style={{ fontSize: 16 }} />}
@@ -789,14 +1113,14 @@ const Layout = ({ user, onLogout, children }) => {
                   onClick={() => navigate(crumb.path)}
                   style={{
                     fontSize: 13,
-                    color: i === breadcrumbs.length - 1 ? '#1F2937' : '#6B7A8D',
+                    color: i === breadcrumbs.length - 1 ? COLORS.topbarTextColor : COLORS.topbarMutedColor,
                     fontWeight: i === breadcrumbs.length - 1 ? 600 : 400,
                     cursor: 'pointer',
                     display: 'flex', alignItems: 'center', gap: 4,
                     whiteSpace: 'nowrap', transition: 'color 0.15s',
                   }}
                   onMouseEnter={e => { if (i < breadcrumbs.length - 1) e.currentTarget.style.color = COLORS.accentBlue; }}
-                  onMouseLeave={e => { if (i < breadcrumbs.length - 1) e.currentTarget.style.color = '#6B7A8D'; }}
+                  onMouseLeave={e => { if (i < breadcrumbs.length - 1) e.currentTarget.style.color = COLORS.topbarMutedColor; }}
                 >
                   {crumb.icon && <span style={{ fontSize: 12 }}>{crumb.icon}</span>}
                   {crumb.label}
@@ -837,7 +1161,7 @@ const Layout = ({ user, onLogout, children }) => {
                   {searchDropdown}
                 </div>
               ) : (
-                <Tooltip title="Quick search (/)">
+                <Tooltip title="Global search (Ctrl+K)">
                   <div onClick={openSearch} style={iconBtnStyle}>
                     <SearchOutlined style={{ fontSize: 17 }} />
                   </div>
@@ -905,6 +1229,9 @@ const Layout = ({ user, onLogout, children }) => {
               </div>
             </Tooltip>
 
+            {/* Theme switcher */}
+            <ThemeSwitcher iconColor={COLORS.topbarIconColor} />
+
             {/* Notifications */}
             <Popover
               open={notifOpen}
@@ -922,7 +1249,7 @@ const Layout = ({ user, onLogout, children }) => {
                   <div style={{
                     ...iconBtnStyle,
                     background: notifOpen ? '#EFF6FF' : 'transparent',
-                    color: notifOpen ? COLORS.accentBlue : '#6B7A8D',
+                    color: notifOpen ? COLORS.accentBlue : COLORS.topbarIconColor,
                   }}>
                     <BellOutlined style={{ fontSize: 17 }} />
                   </div>
@@ -945,7 +1272,7 @@ const Layout = ({ user, onLogout, children }) => {
                 <div style={{
                   ...iconBtnStyle,
                   background: appsOpen ? '#EFF6FF' : 'transparent',
-                  color: appsOpen ? COLORS.accentBlue : '#6B7A8D',
+                  color: appsOpen ? COLORS.accentBlue : COLORS.topbarIconColor,
                 }}>
                   <AppstoreOutlined style={{ fontSize: 17 }} />
                 </div>
@@ -963,8 +1290,8 @@ const Layout = ({ user, onLogout, children }) => {
               trigger="click"
               placement="bottomRight"
               arrow={false}
-              styles={{ body: { padding: 0, borderRadius: 10, overflow: 'hidden' } }}
-              overlayStyle={{ width: 288 }}
+              styles={{ body: { padding: 0, borderRadius: 12, overflow: 'hidden' } }}
+              overlayStyle={{ width: 316 }}
             >
               <div style={{
                 display: 'flex', alignItems: 'center', gap: 8,
@@ -998,10 +1325,10 @@ const Layout = ({ user, onLogout, children }) => {
                 </div>
 
                 <div style={{ display:'flex', flexDirection:'column', lineHeight:1, minWidth:0 }}>
-                  <span style={{ fontSize:12.5, fontWeight:600, color: userPopOpen ? COLORS.accentBlue : '#1F2937', whiteSpace:'nowrap' }}>
+                  <span style={{ fontSize:12.5, fontWeight:600, color: userPopOpen ? COLORS.accentBlue : COLORS.topbarTextColor, whiteSpace:'nowrap' }}>
                     {user?.first_name || user?.username || 'Admin'}
                   </span>
-                  <span style={{ fontSize:10.5, color:'#6B7A8D', marginTop:2, whiteSpace:'nowrap' }}>
+                  <span style={{ fontSize:10.5, color: COLORS.topbarMutedColor, marginTop:2, whiteSpace:'nowrap' }}>
                     {user?.is_superuser ? 'Super Admin' : 'User'}
                   </span>
                 </div>
@@ -1068,11 +1395,55 @@ const Layout = ({ user, onLogout, children }) => {
         </Descriptions>
       </Modal>
 
+      {/* ── Keyboard Shortcuts modal ── */}
+      <Modal
+        open={shortcutsOpen}
+        onCancel={() => setShortcutsOpen(false)}
+        footer={null}
+        title={<Space><KeyOutlined style={{ color: COLORS.accentBlue }} />Keyboard Shortcuts</Space>}
+        width={460}
+      >
+        {[
+          { group: 'Navigation', items: [
+            { keys: ['/', '⌘K'], desc: 'Quick search modules' },
+            { keys: ['G', 'D'],  desc: 'Go to Dashboard' },
+            { keys: ['G', 'P'],  desc: 'Go to Personnel' },
+            { keys: ['G', 'A'],  desc: 'Go to Attendance' },
+            { keys: ['G', 'V'],  desc: 'Go to Visitors' },
+          ]},
+          { group: 'Layout', items: [
+            { keys: ['['],         desc: 'Collapse / expand sidebar' },
+            { keys: ['F11'],       desc: 'Toggle fullscreen' },
+          ]},
+          { group: 'General', items: [
+            { keys: ['⌘', ','],   desc: 'Open Account Settings' },
+            { keys: ['Esc'],       desc: 'Close popover / modal' },
+          ]},
+        ].map(group => (
+          <div key={group.group} style={{ marginBottom: 16 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.07em', color: '#9CA3AF', textTransform: 'uppercase', marginBottom: 8 }}>{group.group}</div>
+            {group.items.map(item => (
+              <div key={item.desc} style={{ display:'flex', alignItems:'center', justifyContent:'space-between', padding:'6px 0', borderBottom:'1px solid #f0f0f0' }}>
+                <span style={{ fontSize: 13, color: '#374151' }}>{item.desc}</span>
+                <Space size={4}>
+                  {item.keys.map((k, i) => (
+                    <kbd key={i} style={{ background:'#F3F4F6', border:'1px solid #E5E7EB', borderBottom:'2px solid #D1D5DB', borderRadius:5, padding:'2px 7px', fontSize:12, fontFamily:'monospace', color:'#374151' }}>{k}</kbd>
+                  ))}
+                </Space>
+              </div>
+            ))}
+          </div>
+        ))}
+      </Modal>
+
+      {/* ARIA — floats over every page */}
+      <ARIAWidget />
+
       <style>{`
         .pob-sidebar-scroll::-webkit-scrollbar { width: 4px; }
         .pob-sidebar-scroll::-webkit-scrollbar-track { background: transparent; }
-        .pob-sidebar-scroll::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 2px; }
-        .pob-sidebar-scroll::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.2); }
+        .pob-sidebar-scroll::-webkit-scrollbar-thumb { background: ${SIDEBAR.scrollThumb}; border-radius: 2px; }
+        .pob-sidebar-scroll::-webkit-scrollbar-thumb:hover { background: ${SIDEBAR.scrollThumbHover}; }
         .pob-notif-scroll::-webkit-scrollbar { width: 4px; }
         .pob-notif-scroll::-webkit-scrollbar-track { background: transparent; }
         .pob-notif-scroll::-webkit-scrollbar-thumb { background: #E5E7EB; border-radius: 2px; }
@@ -1081,15 +1452,15 @@ const Layout = ({ user, onLogout, children }) => {
           50% { opacity: 0.5; }
         }
       `}</style>
+
+      {/* ── Global Search Modal ── */}
+      <GlobalSearch
+        open={globalSearchOpen}
+        onClose={() => setGlobalSearchOpen(false)}
+      />
     </div>
   );
 };
 
-/* shared icon button style (defined outside component to avoid re-creating per render) */
-const iconBtnStyle = {
-  width: 34, height: 34, borderRadius: 6,
-  display: 'flex', alignItems: 'center', justifyContent: 'center',
-  cursor: 'pointer', color: '#6B7A8D', transition: 'all 0.15s',
-};
 
 export default Layout;

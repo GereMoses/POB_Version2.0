@@ -21,8 +21,8 @@ ENV NODE_ENV=production
 ENV GENERATE_SOURCEMAP=false
 ENV REACT_APP_API_BASE_URL=/api/v1
 
-# Build the application
-RUN npm run build
+# Build the application (CI=false so warnings don't fail the build)
+RUN CI=false npm run build || CI=false npx react-scripts build
 
 # Production stage
 FROM nginx:alpine AS production

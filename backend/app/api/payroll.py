@@ -5,6 +5,7 @@ Complete REST API for payroll management and calculations
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Body
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 from typing import List, Dict, Any, Optional
 from datetime import datetime, date
 from pydantic import BaseModel, Field
@@ -732,6 +733,30 @@ async def calculate_payroll(
         logger.error(f"Error calculating payroll: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
+def _has_payroll_admin(current_user, db) -> bool:
+    """Return True if user is superuser or has payroll.view permission."""
+    if getattr(current_user, "is_superuser", False):
+        return True
+    row = db.execute(text("""
+        SELECT 1 FROM auth_user_role ur
+        JOIN auth_role r ON r.id = ur.role_id
+        JOIN auth_role_permission rp ON rp.role_id = r.id
+        JOIN auth_permission p ON p.id = rp.permission_id
+        WHERE ur.user_id = :uid
+          AND p.codename IN ('payroll.view', 'payroll.manage', 'payroll.admin')
+        LIMIT 1
+    """), {"uid": current_user.id}).fetchone()
+    return bool(row)
+
+
+def _own_emp_id(current_user, db) -> int | None:
+    """Return the PaySalary.emp_id that belongs to the current user, or None."""
+    row = db.execute(text(
+        "SELECT id FROM personnel WHERE user_id = :uid LIMIT 1"
+    ), {"uid": current_user.id}).fetchone()
+    return row[0] if row else None
+
+
 @router.get("/salaries/", response_model=List[Dict[str, Any]])
 async def get_salaries(
     period_id: Optional[int] = Query(None),
@@ -740,16 +765,23 @@ async def get_salaries(
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
-    """Get calculated salaries"""
+    """Get calculated salaries — scoped to caller's own record unless payroll admin."""
     try:
         query = db.query(PaySalary)
-        
+
+        # Row-level security: non-admins may only see their own salary
+        if not _has_payroll_admin(current_user, db):
+            own = _own_emp_id(current_user, db)
+            if own is None:
+                return []  # user has no personnel record — no payroll data
+            query = query.filter(PaySalary.emp_id == own)
+        else:
+            if emp_id:
+                query = query.filter(PaySalary.emp_id == emp_id)
+
         if period_id:
             query = query.filter(PaySalary.period_id == period_id)
-        
-        if emp_id:
-            query = query.filter(PaySalary.emp_id == emp_id)
-        
+
         if status:
             query = query.filter(PaySalary.calc_status == status)
         
@@ -813,13 +845,19 @@ async def get_salary_details(
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
-    """Get detailed salary breakdown"""
+    """Get detailed salary breakdown — non-admins may only access their own record."""
     try:
         payroll_service = PayrollService(db)
-        
+
         salary = db.query(PaySalary).filter(PaySalary.id == salary_id).first()
         if not salary:
             raise HTTPException(status_code=404, detail="Salary record not found")
+
+        # Ownership check for non-admin users
+        if not _has_payroll_admin(current_user, db):
+            own = _own_emp_id(current_user, db)
+            if own is None or salary.emp_id != own:
+                raise HTTPException(status_code=403, detail="Access denied")
         
         breakdown = payroll_service._get_salary_breakdown(salary)
         
@@ -838,12 +876,16 @@ async def adjust_salary(
     db: Session = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
-    """Manual adjustment to salary"""
+    """Manual adjustment to salary — payroll admins only; employees cannot adjust their own."""
     try:
+        # Only payroll admins may adjust salaries — no self-service adjustments
+        if not _has_payroll_admin(current_user, db):
+            raise HTTPException(status_code=403, detail="Salary adjustments require payroll.manage permission")
+
         salary = db.query(PaySalary).filter(PaySalary.id == salary_id).first()
         if not salary:
             raise HTTPException(status_code=404, detail="Salary record not found")
-        
+
         if salary.is_final:
             raise HTTPException(status_code=400, detail="Cannot adjust finalized salary")
         

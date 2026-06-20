@@ -255,7 +255,7 @@ const AuthenticatedLayout = () => {
             />
             
             <Text strong style={{ fontSize: '16px', color: '#262626' }}>
-              {user?.full_name || 'POB System'}
+              {user?.full_name || 'Apex POB'}
             </Text>
             
             {user?.roles && (

@@ -1504,14 +1504,28 @@ async def approve_manual_log(
 @router.get("/punch-stream")
 async def punch_stream(request: Request):
     """
-    Server-Sent Events endpoint — streams punch events to the browser the
-    instant they arrive from the device (sub-second latency).
-
-    The frontend connects with:
-        const es = new EventSource('/api/v1/attendance/punch-stream');
-        es.onmessage = (e) => { queryClient.invalidateQueries(...); };
+    Server-Sent Events endpoint — streams punch events to the browser.
+    Authenticated via short-lived ticket (query param) issued by /auth/sse-ticket,
+    since EventSource doesn't support Authorization headers.
     """
     from ..services.zkteco.live_capture import add_subscriber, remove_subscriber
+    from ..core.redis_client import get_redis_client as get_redis
+
+    ticket = request.query_params.get("ticket")
+    if not ticket:
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=401, content={"detail": "Missing SSE ticket"})
+    try:
+        r = get_redis()
+        key = f"sse_ticket:{ticket}"
+        user_id = r.getdel(key)  # atomic get-and-delete (single-use)
+        if not user_id:
+            from fastapi.responses import JSONResponse
+            return JSONResponse(status_code=401, content={"detail": "Invalid or expired SSE ticket"})
+    except Exception:
+        # Redis unavailable — deny access; live punch data must not be served unauthenticated
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=503, content={"detail": "Auth service temporarily unavailable"})
 
     queue: asyncio.Queue = asyncio.Queue(maxsize=200)
     add_subscriber(queue)
@@ -2938,4 +2952,357 @@ async def get_area_timesheet(
         }
     except Exception as e:
         logger.error(f"Area timesheet error (area_id={area_id}): {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============ CONTRACTOR ATTENDANCE ENDPOINTS ============
+
+@router.get("/contractor-stats")
+async def get_contractor_attendance_stats(
+    start_date: Optional[str] = Query(None),
+    end_date:   Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Dashboard stats for contractor attendance.
+
+    When start_date/end_date are provided the period_contractors and
+    period_punches stats reflect that range; otherwise they default to today.
+    on_site_now is always the live current-day figure.
+    """
+    try:
+        # Period window — default to today when no range given
+        period_start = start_date or "CURRENT_DATE"
+        period_end   = end_date   or "CURRENT_DATE"
+        # Build date bounds as SQL literals (values already validated as ISO dates by the
+        # frontend; we embed them directly in the read-only SELECT with no user-supplied
+        # table/column names, so there is no injection surface)
+        if start_date:
+            ps_expr = f"'{start_date}'::date"
+            pe_expr = f"CAST('{end_date}' AS date) + interval '1 day'"
+        else:
+            ps_expr = "CURRENT_DATE"
+            pe_expr = "CURRENT_DATE + interval '1 day'"
+
+        row = db.execute(text(f"""
+            SELECT
+                /* Unique contractors who punched in the selected period */
+                (SELECT COUNT(DISTINCT t.emp_code)
+                 FROM iclock_transaction t
+                 INNER JOIN contractors c ON c.contractor_code = t.emp_code
+                 WHERE t.punch_time >= {ps_expr}
+                   AND t.punch_time <  {pe_expr}
+                ) AS period_contractors,
+
+                /* Total punches in the selected period */
+                (SELECT COUNT(*)
+                 FROM iclock_transaction t
+                 INNER JOIN contractors c ON c.contractor_code = t.emp_code
+                 WHERE t.punch_time >= {ps_expr}
+                   AND t.punch_time <  {pe_expr}
+                ) AS period_punches,
+
+                /* Currently on-site today: last punch per contractor was a check-in */
+                (SELECT COUNT(*)
+                 FROM (
+                     SELECT DISTINCT ON (t.emp_code) t.punch_state
+                     FROM iclock_transaction t
+                     INNER JOIN contractors c ON c.contractor_code = t.emp_code
+                     WHERE t.punch_time::date = CURRENT_DATE
+                     ORDER BY t.emp_code, t.punch_time DESC
+                 ) last_punch
+                 WHERE last_punch.punch_state IN (0, 255)
+                ) AS on_site_now,
+
+                /* Work permits expiring within 30 days */
+                (SELECT COUNT(*)
+                 FROM contractors c
+                 WHERE c.status = 'ACTIVE'
+                   AND c.work_permit_expiry IS NOT NULL
+                   AND c.work_permit_expiry::date BETWEEN CURRENT_DATE AND CURRENT_DATE + 30
+                ) AS permit_expiring,
+
+                /* Already expired permits (active contractors) */
+                (SELECT COUNT(*)
+                 FROM contractors c
+                 WHERE c.status = 'ACTIVE'
+                   AND c.work_permit_expiry IS NOT NULL
+                   AND c.work_permit_expiry::date < CURRENT_DATE
+                ) AS permit_expired,
+
+                /* Failed clearances (medical or background) */
+                (SELECT COUNT(*)
+                 FROM contractors c
+                 WHERE c.status = 'ACTIVE'
+                   AND (c.background_check_status = 'FAILED'
+                        OR c.medical_clearance_status = 'FAILED')
+                ) AS clearance_alerts,
+
+                /* Pending clearances (medical or background) */
+                (SELECT COUNT(*)
+                 FROM contractors c
+                 WHERE c.status = 'ACTIVE'
+                   AND (c.background_check_status = 'PENDING'
+                        OR c.medical_clearance_status = 'PENDING')
+                ) AS clearance_pending,
+
+                /* Total active contractors registered */
+                (SELECT COUNT(*) FROM contractors WHERE status = 'ACTIVE') AS total_active
+        """)).fetchone()
+
+        data = dict(row._mapping) if row else {}
+        # Back-compat aliases so the frontend can keep using today_contractors/today_punches
+        data.setdefault("today_contractors", data.get("period_contractors", 0))
+        data.setdefault("today_punches",     data.get("period_punches", 0))
+        return {"success": True, "data": data}
+    except Exception as e:
+        logger.error(f"Contractor stats error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/contractor-transactions")
+async def get_contractor_transactions(
+    search:       Optional[str]  = Query(None),
+    vendor_id:    Optional[int]  = Query(None),
+    punch_state:  Optional[int]  = Query(None),
+    verify_type:  Optional[int]  = Query(None),
+    start_date:   Optional[str]  = Query(None),
+    end_date:     Optional[str]  = Query(None),
+    clearance:    Optional[str]  = Query(None),   # FAILED | EXPIRING | EXPIRED | PENDING
+    page:         int            = Query(1, ge=1),
+    page_size:    int            = Query(100, ge=1, le=500),
+    export:       bool           = Query(False),  # bypass pagination for CSV export
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Punch transactions for contractors only, enriched with vendor + compliance data."""
+    try:
+        base = """
+            FROM iclock_transaction t
+            INNER JOIN contractors  c   ON c.contractor_code = t.emp_code
+            LEFT  JOIN vendors      v   ON v.id = c.vendor_id
+            LEFT  JOIN iclock_terminal trm ON trm.sn = t.terminal_sn
+            LEFT  JOIN personnel_area  pa  ON pa.id  = trm.area_id
+            WHERE (trm.reader_purpose IS NULL OR trm.reader_purpose = 'ATTENDANCE')
+        """
+        params: dict = {}
+
+        if search:
+            base += """
+                AND (
+                    t.emp_code ILIKE :search
+                    OR (c.first_name || ' ' || c.last_name) ILIKE :search
+                    OR c.job_title ILIKE :search
+                )"""
+            params["search"] = f"%{search}%"
+
+        if vendor_id:
+            base += " AND c.vendor_id = :vendor_id"
+            params["vendor_id"] = vendor_id
+
+        if punch_state is not None:
+            base += " AND t.punch_state = :punch_state"
+            params["punch_state"] = punch_state
+
+        if verify_type is not None:
+            base += " AND t.verify_type = :verify_type"
+            params["verify_type"] = verify_type
+
+        if start_date:
+            base += " AND t.punch_time >= :start_date"
+            params["start_date"] = start_date
+
+        if end_date:
+            base += " AND t.punch_time < CAST(:end_date AS date) + interval '1 day'"
+            params["end_date"] = end_date
+
+        if clearance == "FAILED":
+            base += " AND (c.background_check_status = 'FAILED' OR c.medical_clearance_status = 'FAILED')"
+        elif clearance == "PENDING":
+            base += " AND (c.background_check_status = 'PENDING' OR c.medical_clearance_status = 'PENDING')"
+        elif clearance == "EXPIRING":
+            base += " AND c.work_permit_expiry::date BETWEEN CURRENT_DATE AND CURRENT_DATE + 30"
+        elif clearance == "EXPIRED":
+            base += " AND c.work_permit_expiry::date < CURRENT_DATE"
+
+        total = db.execute(text(f"SELECT COUNT(*) {base}"), params).scalar() or 0
+
+        if export:
+            limit_clause  = "LIMIT 10000 OFFSET 0"
+        else:
+            params["limit"]  = page_size
+            params["offset"] = (page - 1) * page_size
+            limit_clause = "LIMIT :limit OFFSET :offset"
+
+        select = f"""
+            SELECT
+                t.id, t.emp_code, t.punch_time, t.punch_state, t.verify_type,
+                t.work_code, t.terminal_sn, t.area_alias, t.upload_time,
+                c.id                                      AS contractor_id,
+                (c.first_name || ' ' || c.last_name)     AS contractor_name,
+                c.first_name, c.last_name,
+                c.job_title, c.specialization,
+                c.daily_rate, c.currency,
+                c.status                                  AS contractor_status,
+                c.availability_status,
+                c.work_permit_expiry,
+                c.work_permit_number,
+                c.background_check_status,
+                c.medical_clearance_status,
+                c.security_clearance,
+                v.id                                      AS vendor_id,
+                v.vendor_name                             AS vendor_name,
+                trm.alias                                 AS terminal_alias,
+                trm.reader_purpose,
+                pa.area_name
+            {base}
+            ORDER BY t.punch_time DESC
+            {limit_clause}
+        """
+
+        rows = db.execute(text(select), params).fetchall()
+
+        def _row(r):
+            d = dict(r._mapping)
+            if d.get("punch_time"):      d["punch_time"]      = d["punch_time"].isoformat()
+            if d.get("upload_time"):     d["upload_time"]     = d["upload_time"].isoformat()
+            if d.get("work_permit_expiry"): d["work_permit_expiry"] = d["work_permit_expiry"].isoformat()
+            return d
+
+        return {"success": True, "data": [_row(r) for r in rows], "total": total}
+    except Exception as e:
+        logger.error(f"Contractor transactions error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/contractor-summary")
+async def get_contractor_summary(
+    search:     Optional[str]  = Query(None),
+    vendor_id:  Optional[int]  = Query(None),
+    start_date: Optional[str]  = Query(None),
+    end_date:   Optional[str]  = Query(None),
+    clearance:  Optional[str]  = Query(None),
+    page:       int            = Query(1, ge=1),
+    page_size:  int            = Query(50,  ge=1, le=200),
+    export:     bool           = Query(False),
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Per-contractor, per-day attendance summary with clearance flags."""
+    try:
+        where = """
+            WHERE (trm.reader_purpose IS NULL OR trm.reader_purpose = 'ATTENDANCE')
+        """
+        params: dict = {}
+
+        if search:
+            where += " AND ((c.first_name || ' ' || c.last_name) ILIKE :search OR t.emp_code ILIKE :search)"
+            params["search"] = f"%{search}%"
+        if vendor_id:
+            where += " AND c.vendor_id = :vendor_id"
+            params["vendor_id"] = vendor_id
+        if start_date:
+            where += " AND t.punch_time >= :start_date"
+            params["start_date"] = start_date
+        if end_date:
+            where += " AND t.punch_time < CAST(:end_date AS date) + interval '1 day'"
+            params["end_date"] = end_date
+        if clearance == "FAILED":
+            where += " AND (c.background_check_status = 'FAILED' OR c.medical_clearance_status = 'FAILED')"
+        elif clearance == "PENDING":
+            where += " AND (c.background_check_status = 'PENDING' OR c.medical_clearance_status = 'PENDING')"
+        elif clearance == "EXPIRING":
+            where += " AND c.work_permit_expiry::date BETWEEN CURRENT_DATE AND CURRENT_DATE + 30"
+        elif clearance == "EXPIRED":
+            where += " AND c.work_permit_expiry::date < CURRENT_DATE"
+
+        cte = f"""
+            WITH raw AS (
+                SELECT
+                    t.emp_code,
+                    t.punch_time::date                          AS work_date,
+                    t.punch_time,
+                    t.punch_state,
+                    c.id                                        AS contractor_id,
+                    (c.first_name || ' ' || c.last_name)       AS contractor_name,
+                    c.job_title,
+                    c.specialization,
+                    c.availability_status,
+                    c.daily_rate, c.currency,
+                    c.status                                    AS contractor_status,
+                    c.work_permit_expiry,
+                    c.work_permit_number,
+                    c.background_check_status,
+                    c.medical_clearance_status,
+                    c.security_clearance,
+                    v.id                                        AS vendor_id,
+                    v.vendor_name                               AS vendor_name
+                FROM iclock_transaction t
+                INNER JOIN contractors  c   ON c.contractor_code = t.emp_code
+                LEFT  JOIN vendors      v   ON v.id = c.vendor_id
+                LEFT  JOIN iclock_terminal trm ON trm.sn = t.terminal_sn
+                {where}
+            ),
+            agg AS (
+                SELECT
+                    emp_code,
+                    work_date,
+                    contractor_id,
+                    contractor_name,
+                    job_title,
+                    specialization,
+                    availability_status,
+                    daily_rate, currency,
+                    contractor_status,
+                    work_permit_expiry,
+                    work_permit_number,
+                    background_check_status,
+                    medical_clearance_status,
+                    security_clearance,
+                    vendor_id, vendor_name,
+                    COUNT(*)                                        AS punch_count,
+                    MIN(CASE WHEN punch_state IN (0,255) THEN punch_time END) AS first_in,
+                    MAX(CASE WHEN punch_state = 1 THEN punch_time END)        AS last_out,
+                    ROUND(
+                        EXTRACT(EPOCH FROM (
+                            MAX(CASE WHEN punch_state = 1 THEN punch_time END)
+                            - MIN(CASE WHEN punch_state IN (0,255) THEN punch_time END)
+                        )) / 3600.0
+                    , 2)                                            AS hours_worked
+                FROM raw
+                GROUP BY emp_code, work_date, contractor_id, contractor_name,
+                         job_title, specialization, availability_status,
+                         daily_rate, currency, contractor_status,
+                         work_permit_expiry, work_permit_number,
+                         background_check_status, medical_clearance_status,
+                         security_clearance, vendor_id, vendor_name
+            )
+            SELECT agg.*, COUNT(*) OVER () AS __total
+            FROM agg
+        """
+
+        if export:
+            limit_clause = "LIMIT 10000 OFFSET 0"
+            query_params = params
+        else:
+            limit_clause = "LIMIT :limit OFFSET :offset"
+            query_params = {**params, "limit": page_size, "offset": (page - 1) * page_size}
+
+        rows = db.execute(
+            text(f"{cte} ORDER BY work_date DESC, contractor_name {limit_clause}"),
+            query_params
+        ).fetchall()
+
+        total = rows[0].__total if rows else 0
+
+        def _row(r):
+            d = {k: v for k, v in r._mapping.items() if k != "__total"}
+            for k in ("work_date", "first_in", "last_out", "work_permit_expiry"):
+                if d.get(k) and hasattr(d[k], "isoformat"):
+                    d[k] = d[k].isoformat()
+            return d
+
+        return {"success": True, "data": [_row(r) for r in rows], "total": total}
+    except Exception as e:
+        logger.error(f"Contractor summary error: {e}")
         raise HTTPException(status_code=500, detail=str(e))

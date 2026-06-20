@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSock
 from sqlalchemy.orm import Session
 from sqlalchemy import func, or_
 from typing import Optional
+from datetime import datetime
 import logging
 import asyncio
 import json
@@ -225,20 +226,6 @@ def get_dashboard(db: Session = Depends(get_db), _=Depends(get_current_user)):
     live_count_map = {r.zone_id: r.cnt for r in live_rows}
 
     # Last activity per zone (most recent punch on any terminal in that zone)
-    last_rows = db.execute(text("""
-        SELECT term.zone_id, t.emp_code, t.punch_time
-        FROM (
-            SELECT DISTINCT ON (term2.zone_id)
-                term2.zone_id, t2.emp_code, t2.punch_time
-            FROM iclock_transaction t2
-            JOIN iclock_terminal term2 ON term2.sn = t2.terminal_sn
-            WHERE term2.zone_id IS NOT NULL
-            ORDER BY term2.zone_id, t2.punch_time DESC
-        ) t
-        JOIN iclock_terminal term ON term.zone_id = t.zone_id
-        LIMIT 1
-    """)).fetchall()
-    # Simpler: one query per zone approach for last activity (small zone count)
     last_activity_map = {}
     for row in db.execute(text("""
         SELECT term.zone_id, MAX(t.punch_time) AS last_punch,
@@ -250,11 +237,15 @@ def get_dashboard(db: Session = Depends(get_db), _=Depends(get_current_user)):
     """)).fetchall():
         last_activity_map[row.zone_id] = (row.last_emp, row.last_punch)
 
+    reader_count_map = {}
+    for row in db.execute(text(
+        "SELECT zone_id, COUNT(*) AS cnt FROM iclock_terminal WHERE zone_id IS NOT NULL GROUP BY zone_id"
+    )).fetchall():
+        reader_count_map[row.zone_id] = row.cnt
+
     result = []
     for z in zones:
-        reader_count = db.execute(text(
-            "SELECT COUNT(*) FROM iclock_terminal WHERE zone_id = :zid"
-        ), {"zid": z.id}).scalar() or 0
+        reader_count = reader_count_map.get(z.id, 0)
 
         d = _to_dict(z, db)
         # Override stored count with live transaction-based count
@@ -292,6 +283,7 @@ def get_available_devices(db: Session = Depends(get_db), _=Depends(get_current_u
             "zone_id": r.zone_id,
             "last_activity": r.last_activity.isoformat() if r.last_activity else None,
             "state": r.state,
+            "status": "online" if r.state == 1 else "offline",
             "already_assigned": r.zone_id is not None,
         }
         for r in rows
@@ -352,6 +344,60 @@ def get_zones(
 
     zones = q.order_by(Zone.name).offset(skip).limit(limit).all()
     return [_to_dict(z, db) for z in zones]
+
+
+@router.get("/activity-feed")
+def get_zone_activity_feed(
+    limit: int = Query(default=30, le=100),
+    since: Optional[str] = Query(default=None, description="ISO timestamp — return only events after this time"),
+    db: Session = Depends(get_db),
+    _=Depends(get_current_user),
+):
+    """Recent badge events across all zones with personnel details."""
+    params: dict = {"limit": limit}
+    since_clause = ""
+    if since:
+        try:
+            since_clause = "AND zpt.punch_time > :since"
+            params["since"] = datetime.fromisoformat(since.replace("Z", "+00:00"))
+        except ValueError:
+            pass
+
+    rows = db.execute(text(f"""
+        SELECT
+            zpt.id,
+            zpt.emp_code,
+            zpt.event_type,
+            zpt.punch_time,
+            zpt.device_sn,
+            z.name  AS zone_name,
+            z.id    AS zone_id,
+            COALESCE(NULLIF(TRIM(COALESCE(p.first_name,'') || ' ' || COALESCE(p.last_name,'')), ''), zpt.emp_code) AS emp_name,
+            p.photo_url,
+            p.department
+        FROM zone_personnel_tracking zpt
+        LEFT JOIN zones z ON z.id = zpt.zone_id
+        LEFT JOIN personnel p ON p.emp_code = zpt.emp_code
+        WHERE 1=1 {since_clause}
+        ORDER BY zpt.punch_time DESC
+        LIMIT :limit
+    """), params).fetchall()
+
+    return [
+        {
+            "id":         r.id,
+            "emp_code":   r.emp_code,
+            "emp_name":   r.emp_name,
+            "event_type": r.event_type,
+            "punch_time": r.punch_time.isoformat() if r.punch_time else None,
+            "zone_name":  r.zone_name,
+            "zone_id":    r.zone_id,
+            "photo_url":  r.photo_url,
+            "department": r.department,
+            "device_sn":  r.device_sn,
+        }
+        for r in rows
+    ]
 
 
 @router.get("/{zone_id}")
@@ -466,12 +512,22 @@ def update_zone_position(
 
 def _delete_single_zone(db: Session, zone_id: int) -> None:
     """Delete one zone row and its dependent rows. Caller is responsible for commit."""
+    # Nullable FKs — SET NULL
     db.execute(text("UPDATE iclock_terminal SET zone_id = NULL WHERE zone_id = :z"), {"z": zone_id})
     db.execute(text("UPDATE devices SET zone_id = NULL WHERE zone_id = :z"), {"z": zone_id})
     db.execute(text("UPDATE personnel SET current_zone_id = NULL WHERE current_zone_id = :z"), {"z": zone_id})
     db.execute(text("UPDATE zone_personnel_tracking SET previous_zone_id = NULL WHERE previous_zone_id = :z"), {"z": zone_id})
     db.execute(text("UPDATE access_logs SET zone_id = NULL WHERE zone_id = :z"), {"z": zone_id})
     db.execute(text("UPDATE pay_zone_allowance SET area_id = NULL WHERE area_id = :z"), {"z": zone_id})
+    db.execute(text("UPDATE mustering_event SET zone_id = NULL WHERE zone_id = :z"), {"z": zone_id})
+    db.execute(text("UPDATE emergency_template SET auto_mustering_zone_id = NULL WHERE auto_mustering_zone_id = :z"), {"z": zone_id})
+    db.execute(text("UPDATE emergency_plan SET zone_id = NULL WHERE zone_id = :z"), {"z": zone_id})
+    db.execute(text("UPDATE vis_type SET mustering_zone_id = NULL WHERE mustering_zone_id = :z"), {"z": zone_id})
+    db.execute(text("UPDATE vis_visit_log SET mustering_zone_id = NULL WHERE mustering_zone_id = :z"), {"z": zone_id})
+    db.execute(text("UPDATE mtg_room SET mustering_zone_id = NULL WHERE mustering_zone_id = :z"), {"z": zone_id})
+    # NOT NULL FKs — DELETE referencing rows first
+    db.execute(text("DELETE FROM mustering_drill_schedule WHERE zone_id = :z"), {"z": zone_id})
+    # Child rows
     db.execute(text("DELETE FROM zone_personnel_tracking WHERE zone_id = :z"), {"z": zone_id})
     db.execute(text("DELETE FROM zone_reader_assignments WHERE zone_id = :z"), {"z": zone_id})
     db.execute(text("DELETE FROM zone_personnel_assignments WHERE zone_id = :z"), {"z": zone_id})
@@ -560,6 +616,80 @@ def get_zone_personnel(
     ]
 
 
+def _sync_zone_to_access_control(zone_id: int, db: Session) -> None:
+    """
+    Keep the Access Control system (acc_zone / acc_door / acc_zone_door) in sync
+    whenever a reader is assigned or removed in Zone Management.
+
+    For every terminal with iclock_terminal.zone_id = zone_id we ensure:
+      • An acc_door row exists (keyed by terminal_sn)
+      • An acc_zone row mirrors the zones.name entry
+      • An acc_zone_door row links them with the correct direction
+        (reader_purpose=ACCESS_ENTRY → direction=0, ACCESS_EXIT → direction=1,
+         anything else → direction=0)
+
+    Also recomputes zones.device_count so the zone card always shows the right
+    reader count.
+    """
+    # Refresh device_count from ground truth
+    db.execute(text("""
+        UPDATE zones SET device_count = (
+            SELECT COUNT(*) FROM iclock_terminal WHERE zone_id = :zid
+        ) WHERE id = :zid
+    """), {"zid": zone_id})
+
+    zone_row = db.execute(text("SELECT name FROM zones WHERE id = :zid"), {"zid": zone_id}).fetchone()
+    if not zone_row:
+        return
+    zone_name = zone_row.name[:100]
+
+    # Ensure acc_zone exists
+    az = db.execute(text("SELECT id FROM acc_zone WHERE zone_name = :n LIMIT 1"), {"n": zone_name}).fetchone()
+    if not az:
+        az = db.execute(text("""
+            INSERT INTO acc_zone (zone_name) VALUES (:n)
+            ON CONFLICT (zone_name) DO UPDATE SET zone_name = EXCLUDED.zone_name
+            RETURNING id
+        """), {"n": zone_name}).fetchone()
+    acc_zone_id = az.id
+
+    # Sync each terminal assigned to this zone
+    terminals = db.execute(text("""
+        SELECT id, sn, alias, reader_purpose FROM iclock_terminal WHERE zone_id = :zid
+    """), {"zid": zone_id}).fetchall()
+
+    for t in terminals:
+        # Ensure acc_door
+        door = db.execute(text(
+            "SELECT id FROM acc_door WHERE terminal_sn = :sn LIMIT 1"
+        ), {"sn": t.sn}).fetchone()
+        if not door:
+            rp = t.reader_purpose or "ATTENDANCE"
+            suffix = "Entry" if rp == "ACCESS_ENTRY" else "Exit" if rp == "ACCESS_EXIT" else "Reader"
+            door_name = f"{t.alias or t.sn} ({suffix})"[:50]
+            door = db.execute(text("""
+                INSERT INTO acc_door (name, terminal_sn) VALUES (:n, :sn) RETURNING id
+            """), {"n": door_name, "sn": t.sn}).fetchone()
+
+        direction = 0 if (t.reader_purpose or "") == "ACCESS_ENTRY" else 1
+        db.execute(text("""
+            INSERT INTO acc_zone_door (zone_id, door_id, direction)
+            VALUES (:zid, :did, :dir)
+            ON CONFLICT (zone_id, door_id) DO UPDATE SET direction = :dir
+        """), {"zid": acc_zone_id, "did": door.id, "dir": direction})
+
+    # Remove acc_zone_door entries for doors whose terminal is no longer in this zone
+    db.execute(text("""
+        DELETE FROM acc_zone_door
+        WHERE zone_id = :azid
+          AND door_id NOT IN (
+              SELECT ad.id FROM acc_door ad
+              JOIN iclock_terminal t ON t.sn = ad.terminal_sn
+              WHERE t.zone_id = :zid
+          )
+    """), {"azid": acc_zone_id, "zid": zone_id})
+
+
 @router.get("/{zone_id}/readers")
 def get_zone_readers(
     zone_id: int,
@@ -581,7 +711,7 @@ def get_zone_readers(
             "ip_address": r.ip_address,
             "last_activity": r.last_activity.isoformat() if r.last_activity else None,
             "state": r.state,
-            "status": "active" if r.state == 1 else "offline",
+            "status": "online" if r.state == 1 else "offline",
             "reader_purpose": r.reader_purpose or "ATTENDANCE",
         }
         for r in rows
@@ -615,26 +745,42 @@ def assign_reader(
 
     old_zone_id = terminal.zone_id
 
+    # Before reassigning: force-checkout any employee whose last global punch
+    # was a check-in on this terminal, so they don't phantom-follow it to the new zone.
+    if old_zone_id != zone_id:
+        stale = db.execute(text("""
+            SELECT DISTINCT latest.emp_code
+            FROM (
+                SELECT DISTINCT ON (t.emp_code) t.emp_code, t.punch_state, t.terminal_sn, t.punch_time
+                FROM iclock_transaction t
+                ORDER BY t.emp_code, t.punch_time DESC
+            ) latest
+            WHERE latest.punch_state IN (0, 4)
+              AND latest.terminal_sn = :sn
+        """), {"sn": terminal.sn}).fetchall()
+
+        if stale:
+            now = datetime.utcnow()
+            for row in stale:
+                db.execute(text("""
+                    INSERT INTO iclock_transaction
+                        (emp_code, punch_time, punch_state, verify_type, terminal_sn)
+                    VALUES (:ec, :pt, 1, 0, :sn)
+                    ON CONFLICT DO NOTHING
+                """), {"ec": row.emp_code, "pt": now, "sn": terminal.sn})
+
     db.execute(text(
         "UPDATE iclock_terminal SET zone_id = :zid, reader_purpose = :rp WHERE id = :tid"
     ), {"zid": zone_id, "rp": reader_purpose, "tid": terminal_id})
 
-    # Update device_count on the destination zone
-    device_count = db.execute(text(
-        "SELECT COUNT(*) FROM iclock_terminal WHERE zone_id = :zid"
-    ), {"zid": zone_id}).scalar() or 0
-    zone.device_count = device_count
-
-    # Update device_count on the source zone (if this was a move)
-    if old_zone_id is not None:
-        old_zone = db.query(Zone).filter(Zone.id == old_zone_id).first()
-        if old_zone:
-            old_count = db.execute(text(
-                "SELECT COUNT(*) FROM iclock_terminal WHERE zone_id = :zid"
-            ), {"zid": old_zone_id}).scalar() or 0
-            old_zone.device_count = old_count
-
     db.commit()
+
+    # Sync both zone systems (device_count + acc_zone/acc_door/acc_zone_door)
+    _sync_zone_to_access_control(zone_id, db)
+    if old_zone_id is not None and old_zone_id != zone_id:
+        _sync_zone_to_access_control(old_zone_id, db)
+    db.commit()
+
     moved = old_zone_id is not None and old_zone_id != zone_id
     return {
         "message": "Reader moved to zone" if moved else "Reader assigned to zone",
@@ -661,14 +807,12 @@ def remove_reader(
         "UPDATE iclock_terminal SET zone_id = NULL WHERE id = :rid"
     ), {"rid": reader_id})
 
-    zone = db.query(Zone).filter(Zone.id == zone_id).first()
-    if zone:
-        device_count = db.execute(text(
-            "SELECT COUNT(*) FROM iclock_terminal WHERE zone_id = :zid"
-        ), {"zid": zone_id}).scalar() or 0
-        zone.device_count = device_count
-
     db.commit()
+
+    # Sync both systems after removal
+    _sync_zone_to_access_control(zone_id, db)
+    db.commit()
+
     return {"message": "Reader removed from zone"}
 
 
@@ -680,7 +824,7 @@ def get_current_personnel(
 ):
     rows = db.execute(text("""
         SELECT latest.emp_code, latest.event_type, latest.punch_time, latest.device_sn,
-               p.first_name, p.last_name, p.photo_url
+               p.first_name, p.last_name, p.photo_url, p.department, p.position
         FROM (
             SELECT DISTINCT ON (emp_code)
                 emp_code, event_type, punch_time, device_sn
@@ -699,6 +843,8 @@ def get_current_personnel(
             "punch_time": r.punch_time.isoformat() if r.punch_time else None,
             "device_sn": r.device_sn,
             "photo_url": r.photo_url,
+            "department": r.department,
+            "designation": r.position,
         }
         for r in rows
     ]
@@ -732,6 +878,98 @@ def get_tracking_log(
     ]
 
 
+@router.post("/{zone_id}/reset-occupancy")
+def reset_occupancy(
+    zone_id: int,
+    db: Session = Depends(get_db),
+    _=Depends(get_current_user),
+):
+    """
+    Force-reset a zone's occupancy to 0.
+
+    For every employee whose last global punch was a CHECK_IN on a reader assigned
+    to this zone, insert a CHECK_OUT record on that same reader so the live count
+    query immediately drops them from the zone.  Also clears personnel.current_zone_id
+    for anyone who was pointing at this zone, and resets the zone's stored count.
+    """
+    zone = db.query(Zone).filter(Zone.id == zone_id).first()
+    if not zone:
+        raise HTTPException(status_code=404, detail="Zone not found")
+
+    # Find terminals assigned to this zone
+    terminals = db.execute(text(
+        "SELECT sn FROM iclock_terminal WHERE zone_id = :zid"
+    ), {"zid": zone_id}).fetchall()
+    terminal_sns = [t.sn for t in terminals]
+
+    cleared = []
+    now = datetime.utcnow()
+
+    if terminal_sns:
+        # Find employees whose most recent punch (globally) is a check-in on one of our terminals
+        phantom_rows = db.execute(text("""
+            SELECT DISTINCT latest.emp_code, latest.terminal_sn
+            FROM (
+                SELECT DISTINCT ON (t.emp_code)
+                    t.emp_code, t.punch_state, t.terminal_sn, t.punch_time
+                FROM iclock_transaction t
+                ORDER BY t.emp_code, t.punch_time DESC
+            ) latest
+            WHERE latest.punch_state IN (0, 4)
+              AND latest.terminal_sn = ANY(:sns)
+        """), {"sns": terminal_sns}).fetchall()
+
+        for row in phantom_rows:
+            db.execute(text("""
+                INSERT INTO iclock_transaction
+                    (emp_code, punch_time, punch_state, verify_type, terminal_sn)
+                VALUES (:ec, :pt, 1, 0, :sn)
+                ON CONFLICT DO NOTHING
+            """), {"ec": row.emp_code, "pt": now, "sn": row.terminal_sn})
+            cleared.append(row.emp_code)
+
+    # Also clear any zone_personnel_tracking CLOCK_INs for this zone
+    # by inserting CLOCK_OUTs so _recalc_zone_occupancy returns 0
+    tracking_stale = db.execute(text("""
+        SELECT DISTINCT emp_code, device_sn
+        FROM (
+            SELECT DISTINCT ON (emp_code) emp_code, event_type, device_sn
+            FROM zone_personnel_tracking
+            WHERE zone_id = :zid
+            ORDER BY emp_code, punch_time DESC
+        ) last
+        WHERE event_type = 'CLOCK_IN'
+    """), {"zid": zone_id}).fetchall()
+
+    for row in tracking_stale:
+        db.execute(text("""
+            INSERT INTO zone_personnel_tracking
+                (zone_id, emp_code, device_sn, event_type, punch_time, previous_zone_id)
+            VALUES (:zid, :ec, :sn, 'CLOCK_OUT', :pt, :zid)
+        """), {"zid": zone_id, "ec": row.emp_code, "sn": row.device_sn, "pt": now})
+
+    # Clear personnel.current_zone_id for anyone still pointing here
+    db.execute(text(
+        "UPDATE personnel SET current_zone_id = NULL WHERE current_zone_id = :zid"
+    ), {"zid": zone_id})
+
+    # Reset zone counters
+    db.execute(text("""
+        UPDATE zones SET current_occupancy = 0, current_personnel_count = 0,
+            updated_at = NOW() WHERE id = :zid
+    """), {"zid": zone_id})
+
+    db.commit()
+
+    return {
+        "success": True,
+        "zone_id": zone_id,
+        "cleared_employees": cleared,
+        "cleared_count": len(set(cleared)),
+        "message": f"Zone occupancy reset. {len(set(cleared))} phantom check-in(s) cleared.",
+    }
+
+
 @router.post("/{zone_id}/push-to-biotime")
 def push_to_biotime(
     zone_id: int,
@@ -757,7 +995,7 @@ def push_to_biotime(
     db.commit()
     db.refresh(bt)
 
-    zone.last_sync_at = func.now()
+    zone.last_sync_at = datetime.utcnow()
     db.commit()
 
     return {"message": "Zone pushed to BioTime", "biotime_area_id": bt.id}

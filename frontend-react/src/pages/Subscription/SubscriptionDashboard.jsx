@@ -271,7 +271,7 @@ const SubscriptionDashboard = () => {
         open={setupOpen}
         onCancel={() => setSetupOpen(false)}
         footer={null}
-        destroyOnClose
+        destroyOnHidden
       >
         <Form form={setupForm} layout="vertical" onFinish={handleSetup}>
           <Form.Item name="org_name" label="Organisation Name" rules={[{ required: true }]}>

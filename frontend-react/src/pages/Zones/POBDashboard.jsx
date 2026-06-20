@@ -1,12 +1,12 @@
-import { useState, useEffect, useRef } from 'react';
-import { Button, Spin, Tooltip, Empty, message, Dropdown, Drawer, Badge, Avatar } from 'antd';
+import { useState, useEffect, useRef, useMemo } from 'react';
+import { Button, Spin, Tooltip, Empty, message, Dropdown, Drawer, Badge, Avatar, Tag } from 'antd';
 import {
   ArrowLeftOutlined, ReloadOutlined, TeamOutlined,
   WifiOutlined, DisconnectOutlined,
   UploadOutlined, DeleteOutlined, MoreOutlined,
   VerticalLeftOutlined, VerticalRightOutlined,
   VerticalAlignTopOutlined, VerticalAlignBottomOutlined,
-  SyncOutlined,
+  SyncOutlined, LoginOutlined, LogoutOutlined, ThunderboltOutlined,
 } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import apiService from '../../services/api';
@@ -198,7 +198,7 @@ const ZonePersonnelDrawer = ({ zone, open, onClose }) => {
       onClose={onClose}
       width={400}
       placement="right"
-      destroyOnClose
+      destroyOnHidden
     >
       {isLoading ? (
         <div style={{ textAlign:'center', paddingTop:40 }}>
@@ -504,12 +504,188 @@ const ZoneDetailView = ({ zone, subZones, onBack, onDrillDown, byParent, getCoun
   );
 };
 
+/* ── Time-ago helper ─────────────────────────────────────────────────────────── */
+const timeAgo = (isoStr) => {
+  if (!isoStr) return '';
+  const diff = Math.floor((Date.now() - new Date(isoStr).getTime()) / 1000);
+  if (diff < 10)  return 'just now';
+  if (diff < 60)  return `${diff}s ago`;
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  return `${Math.floor(diff / 3600)}h ago`;
+};
+
+/* ── Activity Feed Drawer ────────────────────────────────────────────────────── */
+const ActivityFeedDrawer = ({ open, onClose }) => {
+  const [events, setEvents]       = useState([]);
+  const [newCount, setNewCount]   = useState(0);
+  const latestIdRef               = useRef(null);
+  const [tick, setTick]           = useState(0);
+
+  // Tick every 30s to update time-ago labels
+  useEffect(() => {
+    const t = setInterval(() => setTick(n => n + 1), 30000);
+    return () => clearInterval(t);
+  }, []);
+
+  // Initial load
+  const { data: initialData, isLoading } = useQuery({
+    queryKey: ['zone-activity-initial'],
+    queryFn:  () => apiService.get('/api/v1/zones/activity-feed?limit=30'),
+    refetchOnWindowFocus: false,
+    staleTime: Infinity,
+  });
+  useEffect(() => {
+    if (!initialData) return;
+    const rows = Array.isArray(initialData) ? initialData : (initialData?.data ?? []);
+    setEvents(rows);
+    if (rows.length > 0) latestIdRef.current = rows[0].id;
+  }, [initialData]);
+
+  // Poll for new events every 5s
+  useQuery({
+    queryKey: ['zone-activity-poll'],
+    queryFn:  async () => {
+      const res = await apiService.get('/api/v1/zones/activity-feed?limit=20');
+      const rows = Array.isArray(res) ? res : (res?.data ?? []);
+      const fresh = latestIdRef.current
+        ? rows.filter(r => r.id > latestIdRef.current)
+        : [];
+      if (fresh.length > 0) {
+        latestIdRef.current = fresh[0].id;
+        setEvents(prev => {
+          const merged = [...fresh, ...prev];
+          return merged.slice(0, 60);
+        });
+        if (!open) setNewCount(p => p + fresh.length);
+      }
+      return rows;
+    },
+    refetchInterval: 5000,
+    refetchIntervalInBackground: true,
+  });
+
+  const handleOpen = () => { setNewCount(0); onClose(false); };
+
+  const eventColor = (type) => type === 'CLOCK_IN' ? '#22c55e' : '#f97316';
+  const eventLabel = (type) => type === 'CLOCK_IN' ? 'IN' : 'OUT';
+  const EventIcon  = ({ type }) => type === 'CLOCK_IN'
+    ? <LoginOutlined  style={{ fontSize: 11, color: eventColor(type) }} />
+    : <LogoutOutlined style={{ fontSize: 11, color: eventColor(type) }} />;
+
+  return (
+    <>
+      {/* Toggle button with unread badge */}
+      <Tooltip title="Live Activity Feed" placement="left">
+        <Badge count={newCount} size="small" offset={[-2, 2]}>
+          <Button
+            size="small"
+            icon={<ThunderboltOutlined />}
+            onClick={() => { setNewCount(0); onClose(true); }}
+            style={{
+              borderRadius: 6, fontWeight: 600, fontSize: 11,
+              background: open ? '#0078D4' : undefined,
+              color: open ? '#fff' : undefined,
+              borderColor: open ? '#0078D4' : undefined,
+            }}
+          >
+            Activity
+          </Button>
+        </Badge>
+      </Tooltip>
+
+      <Drawer
+        title={
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <ThunderboltOutlined style={{ color: '#0078D4' }} />
+            <span style={{ fontWeight: 700 }}>Live Activity Feed</span>
+            <Tag color="blue" style={{ marginLeft: 'auto', fontSize: 10 }}>
+              {events.length} events
+            </Tag>
+          </div>
+        }
+        open={open}
+        onClose={() => onClose(false)}
+        width={340}
+        placement="right"
+        destroyOnHidden={false}
+        styles={{ body: { padding: '8px 0', background: '#0F172A' }, header: { background: '#1E293B', borderBottom: '1px solid rgba(255,255,255,0.08)', color: '#F1F5F9' } }}
+      >
+        {isLoading ? (
+          <div style={{ textAlign: 'center', paddingTop: 48 }}>
+            <Spin />
+            <div style={{ marginTop: 12, color: '#64748B', fontSize: 12 }}>Loading activity…</div>
+          </div>
+        ) : events.length === 0 ? (
+          <div style={{ textAlign: 'center', paddingTop: 48 }}>
+            <ThunderboltOutlined style={{ fontSize: 32, color: '#334155', display: 'block', marginBottom: 10 }} />
+            <div style={{ color: '#64748B', fontSize: 12 }}>No badge events yet</div>
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column' }}>
+            {events.map((ev, idx) => (
+              <div
+                key={ev.id ?? idx}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 10,
+                  padding: '8px 14px',
+                  borderBottom: '1px solid rgba(255,255,255,0.04)',
+                  background: idx === 0 ? 'rgba(0,120,212,0.08)' : 'transparent',
+                  transition: 'background 0.3s',
+                }}
+              >
+                <Avatar
+                  src={ev.photo_url}
+                  size={36}
+                  style={{ flexShrink: 0, background: ev.event_type === 'CLOCK_IN' ? '#064e3b' : '#7c2d12', border: `1.5px solid ${eventColor(ev.event_type)}40` }}
+                >
+                  {!ev.photo_url && (ev.emp_name?.[0]?.toUpperCase() || '?')}
+                </Avatar>
+
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 2 }}>
+                    <span style={{ fontWeight: 600, fontSize: 12, color: '#E2E8F0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {ev.emp_name || ev.emp_code}
+                    </span>
+                    <span style={{
+                      flexShrink: 0, fontSize: 9, fontWeight: 800,
+                      color: eventColor(ev.event_type),
+                      background: `${eventColor(ev.event_type)}18`,
+                      borderRadius: 3, padding: '1px 5px', letterSpacing: '0.06em',
+                    }}>
+                      {eventLabel(ev.event_type)}
+                    </span>
+                  </div>
+                  <div style={{ fontSize: 11, color: '#64748B', display: 'flex', alignItems: 'center', gap: 4 }}>
+                    <EventIcon type={ev.event_type} />
+                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {ev.zone_name || 'Unknown zone'}
+                    </span>
+                  </div>
+                  {ev.department && (
+                    <div style={{ fontSize: 10, color: '#475569', marginTop: 1 }}>{ev.department}</div>
+                  )}
+                </div>
+
+                <div style={{ flexShrink: 0, fontSize: 10, color: '#475569', textAlign: 'right' }}>
+                  {/* tick dependency keeps time-ago labels fresh */}
+                  {tick >= 0 && timeAgo(ev.punch_time)}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </Drawer>
+    </>
+  );
+};
+
 /* ── Main POBDashboard ───────────────────────────────────────────────────────── */
 const POBDashboard = ({ onRefreshDash }) => {
   const [selectedZone,       setSelectedZone]       = useState(null);
   const [history,            setHistory]            = useState([]);
   const [liveCounts,         setLiveCounts]         = useState({});
   const [personnelDrawerZone, setPersonnelDrawerZone] = useState(null);
+  const [activityOpen,       setActivityOpen]       = useState(false);
   const [wsStatus,     setWsStatus]     = useState('connecting');
   const wsRef          = useRef(null);
   const reconnectTimer = useRef(null);
@@ -538,8 +714,8 @@ const POBDashboard = ({ onRefreshDash }) => {
       if (!alive) return;
       setWsStatus('connecting');
       const token = localStorage.getItem('token') || '';
-      const host  = window.location.hostname;
-      const ws    = new WebSocket(`ws://${host}:8000/api/v1/zones/ws?token=${token}`);
+      const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const ws    = new WebSocket(`${proto}//${window.location.host}/api/v1/zones/ws?token=${token}`);
       wsRef.current = ws;
       ws.onopen  = () => { if (alive) setWsStatus('live'); };
       ws.onmessage = (evt) => {
@@ -571,12 +747,19 @@ const POBDashboard = ({ onRefreshDash }) => {
   }, []);
 
   const getCount  = z => liveCounts.hasOwnProperty(z.id) ? liveCounts[z.id] : (z.current_personnel_count ?? 0);
-  const totalPOB  = Object.keys(liveCounts).length > 0
-    ? Object.values(liveCounts).reduce((a, b) => a + b, 0)
-    : (hierarchyData?.total_pob || 0);
 
   const topLevel  = hierarchyData?.top_level || [];
   const byParent  = hierarchyData?.by_parent || {};
+
+  const totalPOB  = useMemo(() => {
+    const allZones = [...topLevel, ...Object.values(byParent).flat()];
+    const seen = new Set();
+    return allZones.reduce((s, z) => {
+      if (seen.has(z.id)) return s;
+      seen.add(z.id);
+      return s + getCount(z);
+    }, 0);
+  }, [topLevel, byParent, liveCounts]); // eslint-disable-line
 
   const handleSelectZone = (zone) => {
     if ((byParent[String(zone.id)] || []).length > 0) {
@@ -614,6 +797,7 @@ const POBDashboard = ({ onRefreshDash }) => {
             {wsStyle.label}
           </span>
         </Tooltip>
+        <ActivityFeedDrawer open={activityOpen} onClose={setActivityOpen} />
         <Button icon={<ReloadOutlined />} size="small" style={{ borderRadius:6 }}
           onClick={() => { refetch(); onRefreshDash?.(); }}>
           Refresh

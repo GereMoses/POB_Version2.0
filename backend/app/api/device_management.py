@@ -140,27 +140,24 @@ class FirmwarePushRequest(BaseModel):
 # Helper Functions
 def get_device_status(last_activity: Optional[datetime], state: Optional[int] = None) -> str:
     """
-    Determine device status for ADMS terminals.
-    ADMS state constants: 0=PENDING, 1=APPROVED, 2=REJECTED, 3=OFFLINE (heartbeat-set).
-    REJECTED and OFFLINE states are treated as offline immediately.
-    PENDING/APPROVED fall back to last_activity freshness.
+    Determine device status.
+    State constants: 0=PENDING, 1=APPROVED/online, 2=REJECTED, 3=OFFLINE (heartbeat-set).
+    The heartbeat service owns state transitions — trust state=1 as online and state=3 as offline.
+    Returns lowercase 'online' or 'offline' to match frontend switch() comparisons.
     """
-    # state=3 means heartbeat explicitly detected the device is unreachable
-    # state=2 means admin rejected the device
-    if state in (2, 3):
-        return "Offline"
-
+    if state in (2, 3):   # heartbeat or admin marked offline/rejected
+        return "offline"
+    if state == 1:         # heartbeat confirmed online within ADMS_STALE_SECS (5 min)
+        return "online"
+    # PENDING (0) or no state yet — fall back to last_activity recency
     if not last_activity:
-        return "Offline"
-
+        return "offline"
     now = datetime.now(timezone.utc)
     if last_activity.tzinfo is None:
         last_activity = last_activity.replace(tzinfo=timezone.utc)
-    time_diff = now - last_activity
-
-    if time_diff.total_seconds() <= DEVICE_ONLINE_THRESHOLD_MINUTES * 60:
-        return "Online"
-    return "Offline"
+    if (now - last_activity).total_seconds() <= DEVICE_ONLINE_THRESHOLD_MINUTES * 60:
+        return "online"
+    return "offline"
 
 def queue_command(db: Session, device_sn: str, command: str, user_id: Optional[int] = None):
     """Queue a command for a device"""
@@ -258,7 +255,7 @@ async def get_areas(
     return [{"id": r.id, "area_code": r.area_code, "name": r.area_name} for r in rows]
 
 
-@router.get("/api/device/terminals/", response_model=List[DeviceResponse])
+@router.get("/api/device/terminals/", response_model=None)
 async def get_terminals(
     search: Optional[str] = Query(None, description="Search by SN or alias"),
     area_id: Optional[int] = Query(None, description="Filter by area ID"),
@@ -270,42 +267,37 @@ async def get_terminals(
     current_user: User = Depends(get_current_user)
 ):
     """
-    Get all terminals with filtering and pagination
-    BioTime compatible endpoint
+    Get all terminals with filtering and pagination.
+    Returns devices from iclock_terminal (ADMS) PLUS any devices in the `devices`
+    table that have no iclock_terminal entry (ZKLib direct-mode devices).
     """
     try:
-        # Build query
+        status_filter = status.lower() if status else None
+
+        # ── Phase 1: iclock_terminal rows (ADMS / dual-mode) ─────────────────
         query = db.query(IClockTerminal)
-        
-        # Apply filters
         if search:
-            search_filter = or_(
+            query = query.filter(or_(
                 IClockTerminal.sn.ilike(f"%{search}%"),
                 IClockTerminal.alias.ilike(f"%{search}%"),
-                IClockTerminal.device_name.ilike(f"%{search}%")
-            )
-            query = query.filter(search_filter)
-        
+                IClockTerminal.device_name.ilike(f"%{search}%"),
+            ))
         if area_id:
             query = query.filter(IClockTerminal.area_id == area_id)
-        
         if device_type is not None:
             query = query.filter(IClockTerminal.device_type == device_type)
-        
-        # Apply pagination
-        offset = (page - 1) * limit
-        terminals = query.offset(offset).limit(limit).all()
-        
-        # Convert to response format
+
+        terminals = query.all()
+
         device_responses = []
+        seen_sns = set()
+
         for terminal in terminals:
             device_status = get_device_status(terminal.last_activity, getattr(terminal, "state", None))
-            
-            # Apply status filter if specified
-            if status and device_status != status.lower():
+            if status_filter and device_status != status_filter:
                 continue
-            
-            device_response = DeviceResponse(
+            seen_sns.add(terminal.sn)
+            device_responses.append(DeviceResponse(
                 id=terminal.id,
                 sn=terminal.sn,
                 alias=getattr(terminal, 'alias', None),
@@ -332,12 +324,77 @@ async def get_terminals(
                 last_activity=terminal.last_activity,
                 created_at=terminal.created_at,
                 updated_at=terminal.updated_at,
-                status=device_status
-            )
-            device_responses.append(device_response)
-        
-        return device_responses
-        
+                status=device_status,
+            ))
+
+        # ── Phase 2: direct-mode `devices` rows not in iclock_terminal ───────
+        # These are ZKLib-only devices that never pushed via ADMS and therefore
+        # have no iclock_terminal entry — they would otherwise be invisible.
+        direct_q = db.query(Device).filter(
+            Device.serial_number.isnot(None),
+            ~db.query(IClockTerminal.id).filter(
+                IClockTerminal.sn == Device.serial_number
+            ).exists(),
+        )
+        if search:
+            direct_q = direct_q.filter(Device.name.ilike(f"%{search}%") | Device.serial_number.ilike(f"%{search}%"))
+
+        for dev in direct_q.all():
+            sn = dev.serial_number
+            if sn in seen_sns:
+                continue
+            dev_status = "online" if dev.status == DeviceStatus.ONLINE else "offline"
+            if status_filter and dev_status != status_filter:
+                continue
+            # Derive state integer from device status so the UI renders correctly
+            dev_state = 1 if dev.status == DeviceStatus.ONLINE else 3
+            now_dt = datetime.now(timezone.utc)
+            device_responses.append(DeviceResponse(
+                id=dev.id,
+                sn=sn,
+                alias=dev.name,
+                ip_address=dev.ip_address,
+                area_id=None,
+                comm_key=None,
+                device_name=dev.name,
+                device_model=None,
+                fw_version=None,
+                platform=None,
+                mac_address=None,
+                oem_vendor=None,
+                user_count=0,
+                fp_count=0,
+                face_count=0,
+                palm_count=0,
+                log_count=0,
+                device_type=0,
+                zone_id=dev.zone_id,
+                reader_purpose='ATTENDANCE',
+                connection_mode=dev.connection_mode or 'direct',
+                is_auto_reg=False,
+                state=dev_state,
+                last_activity=dev.last_seen,
+                created_at=dev.created_at or now_dt,
+                updated_at=dev.updated_at or dev.created_at or now_dt,
+                status=dev_status,
+            ))
+
+        # Sort: online first, then by sn
+        device_responses.sort(key=lambda d: (0 if d.status == "online" else 1, d.sn))
+
+        # Apply pagination after merging both sources
+        total = len(device_responses)
+        offset_val = (page - 1) * limit
+        page_items = device_responses[offset_val: offset_val + limit]
+
+        # Return paginated list. model_dump(mode='json') converts datetime → ISO string
+        # so JSONResponse can serialize it without TypeError.
+        from fastapi.responses import JSONResponse
+        return JSONResponse({
+            "data":  [r.model_dump(mode='json') for r in page_items],
+            "total": total,
+        })
+
     except Exception as e:
         logger.error(f"Error getting terminals: {e}")
         raise HTTPException(
@@ -519,6 +576,24 @@ async def update_terminal(
             setattr(terminal, field, value)
 
         terminal.updated_at = datetime.utcnow()
+
+        # Keep the `devices` row in sync with the terminal. The heartbeat and
+        # live_capture services read connection_mode/ip_address from `devices`,
+        # not `iclock_terminal`, so without this an admin's UI change (e.g.
+        # switching a remote reader to ADMS) silently never takes effect and the
+        # device keeps getting TCP-probed on an unreachable LAN IP. Only mirror
+        # the fields the admin actually changed so we never clobber other data.
+        device = db.query(Device).filter(Device.serial_number == terminal.sn).first()
+        if device:
+            if 'connection_mode' in update_data and update_data['connection_mode']:
+                device.connection_mode = update_data['connection_mode']
+            if 'ip_address' in update_data:
+                device.ip_address = update_data['ip_address']
+            if 'zone_id' in update_data:
+                device.zone_id = update_data['zone_id']
+            if 'alias' in update_data and update_data['alias']:
+                device.name = update_data['alias']
+
         db.commit()
         db.refresh(terminal)
         
@@ -815,7 +890,7 @@ async def _execute_direct_command(device: Device, cmd: str) -> dict:
         return {"success": False, "error": str(exc)}
 
 
-@router.post("/api/device/devcmd/")
+@router.post("/api/device/devcmd")
 async def send_device_command(
     command_data: DeviceCommandRequest,
     db: Session = Depends(get_db),
@@ -856,7 +931,25 @@ async def send_device_command(
                 "message": result.get("message", "Command executed successfully"),
             }
 
-        # ADMS device — queue as normal (device will pick up on next /iclock/getrequest poll)
+        # ADMS device — reject commands that are ZKLib-only and have no ADMS equivalent
+        _ZKLIB_ONLY = {
+            'PULL ATTENDANCE', 'GET LOG', 'GETALLLOG', 'PULL LOG',
+            'GET USERINFO', 'GETUSERINFO', 'GET USERS',
+            'CLEAR LOG', 'CLEARATTLOG', 'CLEAR ATTENDANCE',
+        }
+        if command_data.cmd.strip().upper() in _ZKLIB_ONLY:
+            return {
+                "sn": command_data.sn,
+                "cmd": command_data.cmd,
+                "status": "not_applicable",
+                "message": (
+                    f"'{command_data.cmd}' is a ZKLib (direct TCP) command and cannot be sent to an ADMS device. "
+                    "For ADMS devices, attendance records are pushed automatically by the reader on every heartbeat — "
+                    "no manual pull is needed."
+                ),
+            }
+
+        # Queue as normal — device picks up on next /iclock/getrequest poll
         command_id = queue_command(db, command_data.sn, command_data.cmd, current_user.id)
         return {
             "id": command_id,
@@ -983,12 +1076,14 @@ async def sync_user_to_device(
 @router.post("/api/device/devcmd/sync-all-users/")
 async def sync_all_users_to_device(
     sn: str,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """Sync all active employees to the device.
-    Direct-connect devices: pushed immediately via ZKLib.
-    ADMS devices: queued for pickup on next device poll.
+    Direct-connect devices: ZKLib push runs in background so the HTTP request
+    returns immediately — avoids long-held connections that crash the frontend.
+    ADMS devices: queued for pickup on next device poll (already fast).
     """
     try:
         terminal = validate_device_exists(db, sn)
@@ -1021,129 +1116,135 @@ async def sync_all_users_to_device(
         )
 
         if direct_device:
-            from ..services.zkteco.direct_connection import zkteco_direct, _make_zk, _run_sync
+            from ..services.zkteco.direct_connection import _make_zk
             from zk import const as zk_const
 
             ip = direct_device.ip_address
             port = direct_device.port or 4370
-            employees_snapshot = list(rows)   # snapshot before async boundary
-            errors = []
-            synced = 0
+            employees_snapshot = list(rows)   # snapshot before handing off to background thread
+            total_count = len(employees_snapshot)
 
-            def _push():
-                nonlocal synced
-                zk = _make_zk(ip, port)
-                conn = zk.connect()
-                conn.disable_device()
+            def _push_in_background():
+                """Runs in FastAPI's background thread pool after the HTTP response is sent."""
+                synced = 0
+                errors = []
                 try:
-                    for row in employees_snapshot:
-                        try:
-                            name = f"{row.first_name or ''} {row.last_name or ''}".strip()[:24] or row.emp_code
-                            card = int(row.card_no) if row.card_no and row.card_no.isdigit() else 0
-                            conn.set_user(
-                                uid=row.id,
-                                name=name,
-                                privilege=zk_const.USER_DEFAULT,
-                                password=row.pwd or "",
-                                group_id="",
-                                user_id=row.emp_code,
-                                card=card,
-                            )
-                            synced += 1
-                        except Exception as exc:
-                            errors.append(f"{row.emp_code}: {exc}")
-                finally:
-                    conn.enable_device()
-                    conn.disconnect()
+                    zk = _make_zk(ip, port)
+                    conn = zk.connect()
+                    conn.disable_device()
+                    try:
+                        for row in employees_snapshot:
+                            try:
+                                name = f"{row.first_name or ''} {row.last_name or ''}".strip()[:24] or row.emp_code
+                                card = int(row.card_no) if row.card_no and row.card_no.isdigit() else 0
+                                conn.set_user(
+                                    uid=row.id,
+                                    name=name,
+                                    privilege=zk_const.USER_DEFAULT,
+                                    password=row.pwd or "",
+                                    group_id="",
+                                    user_id=row.emp_code,
+                                    card=card,
+                                )
+                                synced += 1
+                            except Exception as exc:
+                                errors.append(f"{row.emp_code}: {exc}")
+                    finally:
+                        conn.enable_device()
+                        conn.disconnect()
+                    logger.info(f"Background sync {sn}: pushed {synced}/{total_count} users, {len(errors)} errors")
+                except Exception as exc:
+                    logger.warning(f"Background sync {sn} failed: {exc}")
 
-            direct_ok = False
-            try:
-                await _run_sync(_push)
-                direct_ok = True
-            except Exception as exc:
-                logger.warning(f"Direct push failed for {sn}, falling back to ADMS queue: {exc}")
-
-            if direct_ok:
-                db.execute(text("""
-                    INSERT INTO iclock_devcmd (sn, cmd_content, cmd_commit_time, cmd_trans_time, cmd_return_time, status)
-                    VALUES (:sn, :cmd, :now, :now, :now, 2)
-                """), {"sn": sn, "cmd": f"SYNC ALL USERS ({synced} pushed)", "now": datetime.utcnow()})
-                db.commit()
-                return {
-                    "message": f"Pushed {synced} of {len(rows)} employees to device directly",
-                    "synced": synced,
-                    "total": len(rows),
-                    "errors": errors,
-                    "method": "direct",
-                }
+            background_tasks.add_task(_push_in_background)
+            return {
+                "message": f"Sync started in background — pushing {total_count} employees to {sn}",
+                "total": total_count,
+                "method": "direct_background",
+                "status": "started",
+            }
 
         # ADMS fallback: check if terminal supports DATA UPDATE USERINFO (PushVer 2.x)
         # For PushVer 1.x, DATA UPDATE USERINFO is not supported — use ZKLib if IP available
         pushver = (terminal.pushver or "").strip() if hasattr(terminal, 'pushver') else ""
         terminal_ip = getattr(terminal, 'ip_address', None)
 
+        # Detect remote ADMS devices: connection_mode='adms' AND IP is a Docker gateway
+        # (real device IP is not known because Docker Desktop rewrites source IPs).
+        # ZKLib (port 4370) is unreachable on remote devices behind NAT — don't attempt it.
+        from ..api.adms_protocol import _DOCKER_GATEWAY_IPS
+        adms_device = db.query(Device).filter(
+            Device.serial_number == sn,
+            Device.connection_mode == 'adms',
+        ).first()
+        is_remote_adms = bool(adms_device) and (
+            not terminal_ip or terminal_ip in _DOCKER_GATEWAY_IPS
+        )
+
+        if not pushver.startswith("2") and is_remote_adms:
+            # Remote PushVer 1.x ADMS device: ZKLib is not reachable and
+            # DATA UPDATE USERINFO is not supported by this firmware version.
+            # Users must be enrolled directly on the device.
+            return {
+                "message": (
+                    f"Device {sn} uses PushVer 1.x over ADMS (remote). "
+                    "Remote user push is not supported for this firmware version — "
+                    "please enroll employees directly on the reader."
+                ),
+                "synced": 0,
+                "method": "not_supported",
+            }
+
         if not pushver.startswith("2") and terminal_ip:
-            # PushVer 1.x with known IP — try ZKLib directly
-            from ..services.zkteco.direct_connection import zkteco_direct, _make_zk, _run_sync
+            # PushVer 1.x with a reachable LAN IP — background ZKLib push
+            from ..services.zkteco.direct_connection import _make_zk
             from zk import const as zk_const
             employees_snapshot = list(rows)
-            errors = []
-            synced = 0
+            total_count = len(employees_snapshot)
+            _tip = terminal_ip
 
-            def _push_adms():
-                import re
-                nonlocal synced
-                zk = _make_zk(terminal_ip, 4370)
-                conn = zk.connect()
-                # Build emp_code→uid map from device (use emp_code as user_id for proper matching)
-                existing_users = conn.get_users()
-                code_to_uid = {str(u.user_id): u.uid for u in (existing_users or []) if u.user_id}
-                max_uid = max((u.uid for u in (existing_users or [])), default=0)
-                conn.disable_device()
+            def _push_adms_bg():
+                synced = 0
                 try:
-                    for row in employees_snapshot:
-                        try:
-                            name = f"{row.first_name or ''} {row.last_name or ''}".strip()[:24] or row.emp_code
-                            card = int(row.card_no) if row.card_no and row.card_no.isdigit() else 0
-                            uid = code_to_uid.get(row.emp_code)
-                            if uid is None:
-                                max_uid += 1
-                                uid = max_uid
-                            conn.set_user(
-                                uid=uid,
-                                name=name,
-                                privilege=zk_const.USER_DEFAULT,
-                                password=row.pwd or "",
-                                group_id="",
-                                user_id=row.emp_code,
-                                card=card,
-                            )
-                            synced += 1
-                        except Exception as exc:
-                            errors.append(f"{row.emp_code}: {exc}")
-                finally:
-                    conn.enable_device()
-                    conn.disconnect()
+                    zk = _make_zk(_tip, 4370)
+                    conn = zk.connect()
+                    existing_users = conn.get_users()
+                    code_to_uid = {str(u.user_id): u.uid for u in (existing_users or []) if u.user_id}
+                    max_uid = max((u.uid for u in (existing_users or [])), default=0)
+                    conn.disable_device()
+                    try:
+                        for row in employees_snapshot:
+                            try:
+                                name = f"{row.first_name or ''} {row.last_name or ''}".strip()[:24] or row.emp_code
+                                card = int(row.card_no) if row.card_no and row.card_no.isdigit() else 0
+                                uid = code_to_uid.get(row.emp_code)
+                                if uid is None:
+                                    max_uid += 1
+                                    uid = max_uid
+                                conn.set_user(
+                                    uid=uid, name=name, privilege=zk_const.USER_DEFAULT,
+                                    password=row.pwd or "", group_id="",
+                                    user_id=row.emp_code, card=card,
+                                )
+                                synced += 1
+                            except Exception as exc:
+                                logger.warning(f"Sync {sn} user {row.emp_code}: {exc}")
+                    finally:
+                        conn.enable_device()
+                        conn.disconnect()
+                    logger.info(f"Background ADMS sync {sn}: pushed {synced}/{total_count}")
+                except Exception as exc:
+                    logger.warning(f"Background ADMS sync {sn} failed: {exc}")
 
-            try:
-                await _run_sync(_push_adms)
-                db.execute(text("""
-                    INSERT INTO iclock_devcmd (sn, cmd_content, cmd_commit_time, cmd_trans_time, cmd_return_time, status)
-                    VALUES (:sn, :cmd, :now, :now, :now, 2)
-                """), {"sn": sn, "cmd": f"SYNC ALL USERS ({synced} pushed via ZKLib)", "now": datetime.utcnow()})
-                db.commit()
-                return {
-                    "message": f"Pushed {synced} of {len(rows)} employees via ZKLib (PushVer 1.x device)",
-                    "synced": synced,
-                    "total": len(rows),
-                    "errors": errors,
-                    "method": "zklib",
-                }
-            except Exception as exc:
-                logger.warning(f"ZKLib push failed for ADMS terminal {sn}: {exc}")
-                # fall through to ADMS queue
+            background_tasks.add_task(_push_adms_bg)
+            return {
+                "message": f"Sync started in background — pushing {total_count} employees to {sn} (PushVer 1.x)",
+                "total": total_count,
+                "method": "zklib_background",
+                "status": "started",
+            }
 
-        # Queue DATA UPDATE USERINFO commands (works for PushVer 2.x or as last resort)
+        # Queue DATA UPDATE USERINFO commands (PushVer 2.x)
         count = 0
         for row in rows:
             queue_command(db, sn, _build_adms_userinfo_cmd(row), current_user.id)
@@ -1164,6 +1265,122 @@ async def sync_all_users_to_device(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to sync users to device"
         )
+
+@router.post("/api/device/devcmd/flush-pending-zklib/")
+async def flush_pending_commands_via_zklib(
+    sn: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    For ZKLib / dual-mode devices: read pending ADMS queue commands, execute
+    them directly via ZKLib, then mark them as delivered.  Clears the backlog
+    that builds up when the ADMS fallback queued commands a device never picks up.
+    """
+    device = db.execute(text("""
+        SELECT ip_address, port FROM devices
+        WHERE serial_number = :sn AND ip_address IS NOT NULL
+    """), {"sn": sn}).fetchone()
+
+    if not device or not device.ip_address:
+        raise HTTPException(status_code=404, detail="Device not found or has no IP address")
+
+    # Get all pending USERINFO commands for this device
+    pending = db.execute(text("""
+        SELECT id, cmd_content FROM iclock_devcmd
+        WHERE sn = :sn AND status = 0
+        ORDER BY cmd_commit_time ASC
+    """), {"sn": sn}).fetchall()
+
+    if not pending:
+        return {"message": "No pending commands", "flushed": 0, "method": "zklib"}
+
+    # Collect unique emp_codes from pending USERINFO commands
+    import re
+    emp_codes = []
+    for cmd in pending:
+        m = re.search(r'Pin=([^\t\s]+)', cmd.cmd_content or '')
+        if m:
+            ec = m.group(1).strip()
+            if ec and ec not in emp_codes:
+                emp_codes.append(ec)
+
+    # Fetch employee data for those codes
+    if emp_codes:
+        placeholders = ','.join(f"'{ec}'" for ec in emp_codes)
+        rows = db.execute(text(f"""
+            SELECT id, emp_code, first_name, last_name, NULL::text AS card_no, NULL::text AS pwd
+            FROM personnel WHERE emp_code IN ({placeholders})
+            UNION ALL
+            SELECT pe.id, pe.emp_code, pe.first_name, pe.last_name, pe.card_no, pe.pwd
+            FROM personnel_employee pe
+            WHERE pe.emp_code IN ({placeholders})
+              AND pe.emp_code NOT IN (SELECT emp_code FROM personnel WHERE emp_code IS NOT NULL)
+        """)).fetchall()
+    else:
+        rows = []
+
+    if not rows and not pending:
+        return {"message": "No user data found for pending commands", "flushed": 0}
+
+    from ..services.zkteco.direct_connection import _make_zk, _run_sync
+    from zk import const as zk_const
+
+    ip   = device.ip_address
+    port = device.port or 4370
+    employees_snapshot = list(rows)
+    synced = 0
+    errors = []
+
+    def _push():
+        nonlocal synced
+        zk = _make_zk(ip, port)
+        conn = zk.connect()
+        # Build uid map from existing device users to avoid uid collisions
+        existing = conn.get_users() or []
+        code_to_uid = {str(u.user_id): u.uid for u in existing if u.user_id}
+        max_uid = max((u.uid for u in existing), default=0)
+        conn.disable_device()
+        try:
+            for row in employees_snapshot:
+                try:
+                    name = f"{row.first_name or ''} {row.last_name or ''}".strip()[:24] or row.emp_code
+                    card = int(row.card_no) if row.card_no and str(row.card_no).isdigit() else 0
+                    uid = code_to_uid.get(str(row.emp_code))
+                    if uid is None:
+                        max_uid += 1
+                        uid = max_uid
+                    conn.set_user(uid=uid, name=name, privilege=zk_const.USER_DEFAULT,
+                                  password=row.pwd or "", group_id="",
+                                  user_id=str(row.emp_code), card=card)
+                    synced += 1
+                except Exception as exc:
+                    errors.append(f"{row.emp_code}: {exc}")
+        finally:
+            conn.enable_device()
+            conn.disconnect()
+
+    try:
+        await _run_sync(_push)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"ZKLib connection failed: {exc}")
+
+    # Mark all pending commands as delivered
+    cmd_ids = [c.id for c in pending]
+    db.execute(text("""
+        UPDATE iclock_devcmd SET status = 2, cmd_trans_time = :now, cmd_return_time = :now
+        WHERE id = ANY(:ids)
+    """), {"now": datetime.utcnow(), "ids": cmd_ids})
+    db.commit()
+
+    return {
+        "message": f"Flushed {len(cmd_ids)} pending commands via ZKLib ({synced} users pushed)",
+        "flushed": len(cmd_ids),
+        "synced": synced,
+        "errors": errors,
+        "method": "zklib",
+    }
+
 
 @router.post("/api/device/devcmd/sync-department/")
 async def sync_department_to_device(
@@ -1365,8 +1582,8 @@ async def get_real_time_devices(
         return {
             "devices": devices,
             "total_count": len(devices),
-            "online_count": len([d for d in devices if d['status'] == 'Online']),
-            "offline_count": len([d for d in devices if d['status'] == 'Offline']),
+            "online_count":  len([d for d in devices if d['status'].lower() == 'online']),
+            "offline_count": len([d for d in devices if d['status'].lower() == 'offline']),
             "timestamp": datetime.utcnow().isoformat()
         }
         
@@ -1519,6 +1736,83 @@ async def device_health_check(db: Session = Depends(get_db)):
             "error": str(e),
             "timestamp": datetime.utcnow().isoformat()
         }
+
+
+@router.get("/api/device/network-diagnostics")
+async def device_network_diagnostics(
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Self-check for "the server can't see our readers" deployment issues.
+
+    Reports whether this backend is running in a container (whose own network
+    interfaces are NOT the reader LAN), what DEVICE_SCAN_SUBNETS is set to,
+    and live TCP reachability to every registered device's IP:port. Run this
+    on-site before declaring a deployment broken — it surfaces exactly which
+    layer (auto-discovery config vs. actual network reachability) is failing.
+    """
+    from ..services.zkteco.device_heartbeat import get_network_diagnostics, _tcp_reachable
+
+    diag = get_network_diagnostics()
+
+    # Live TCP reachability probes, run concurrently
+    from ..core.database import SessionLocal
+    db = SessionLocal()
+    try:
+        devices = db.query(Device).filter(Device.ip_address.isnot(None)).all()
+        targets = [(d, d.ip_address, d.port or 4370) for d in devices]
+    finally:
+        db.close()
+
+    import asyncio as _asyncio
+
+    async def _probe(d, ip, port):
+        ok = await _tcp_reachable(ip, port)
+        result = {
+            "id": d.id, "name": d.name, "serial_number": d.serial_number,
+            "ip_address": ip, "port": port, "connection_mode": d.connection_mode,
+            "db_status": d.status.value if d.status else None,
+            "live_reachable": ok,
+        }
+        # For direct/both devices, TCP-reachable-but-offline means the heartbeat/
+        # poller is broken (code-level bug — investigate immediately). For ADMS
+        # devices, the heartbeat never TCP-probes them at all; "online" only
+        # comes from the device actively pushing to /iclock/cdata. A reachable-
+        # but-offline ADMS device almost always means the reader is powered on
+        # and on the network, but its configured ADMS server address/port
+        # (set on the reader itself, e.g. via its menu or web UI) is wrong, or
+        # a firewall is blocking its outbound push to this server's port 80.
+        if ok and result["db_status"] == "offline":
+            if d.connection_mode in ("direct", "both"):
+                result["likely_cause"] = (
+                    "Device answers on its port but the heartbeat/poller isn't marking it "
+                    "online — check backend logs for heartbeat/poller errors for this device."
+                )
+            else:
+                result["likely_cause"] = (
+                    "Device is powered on and reachable, but isn't pushing ADMS data. "
+                    "Check the reader's configured ADMS server address/port points to "
+                    "this server, and that nothing blocks its outbound HTTP to port 80."
+                )
+        return result
+
+    results = await _asyncio.gather(*[_probe(d, ip, port) for d, ip, port in targets]) if targets else []
+
+    unreachable = [r for r in results if not r["live_reachable"]]
+    flapping = [r for r in results if r["live_reachable"] and r["db_status"] == "offline"]
+
+    return {
+        "containerized": diag["containerized"],
+        "local_interface_subnets": diag["local_interface_subnets"],
+        "device_scan_subnets_env": diag["device_scan_subnets_env"],
+        "effective_scan_subnets": diag["effective_scan_subnets"],
+        "discovery_warning": diag["warning"],
+        "devices_checked": len(results),
+        "devices_unreachable_now": unreachable,
+        "devices_reachable_but_marked_offline": flapping,
+        "all_devices": results,
+        "checked_at": datetime.utcnow().isoformat(),
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1865,7 +2159,7 @@ class ExtendedCommandRequest(BaseModel):
     params: Dict[str, Any] = {}
 
 
-@router.post("/api/device/devcmd/extended/")
+@router.post("/api/device/devcmd/extended")
 async def send_extended_command(
     payload: ExtendedCommandRequest,
     db: Session = Depends(get_db),

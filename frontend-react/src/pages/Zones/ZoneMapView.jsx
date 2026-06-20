@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { MapContainer, TileLayer, Marker, Popup, useMap, ZoomControl } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
@@ -132,6 +132,27 @@ const markerIcon = (zone, isSelected, tileKey) => {
 const MapController = ({ zone, allZones }) => {
   const map = useMap();
 
+  // The map mounts with `forceRender` inside an antd Tab pane that starts
+  // hidden (display:none). Leaflet measures a 0×0 container at mount time
+  // and has no way to know later when the pane becomes visible — a plain
+  // window resize never fires in that case, so tiles/markers stayed blank
+  // forever even after clicking into the tab. A ResizeObserver on the map's
+  // own container catches the display:none → visible transition and forces
+  // Leaflet to recompute its size, which is what actually makes it render.
+  useEffect(() => {
+    const container = map.getContainer();
+    if (!container || typeof ResizeObserver === 'undefined') return;
+    let lastHadSize = false;
+    const ro = new ResizeObserver(() => {
+      const { width, height } = container.getBoundingClientRect();
+      const hasSize = width > 0 && height > 0;
+      if (hasSize && !lastHadSize) map.invalidateSize();
+      lastHadSize = hasSize;
+    });
+    ro.observe(container);
+    return () => ro.disconnect();
+  }, [map]);
+
   useEffect(() => {
     const size = map.getSize();
     const go = () => {
@@ -248,13 +269,15 @@ const SidebarCard = ({ zone, isSelected, onClick }) => {
         display: 'flex', alignItems: 'center', gap: 10,
         padding: '9px 10px', marginBottom: 2, borderRadius: 8,
         background: isSelected ? `${color}18` : 'transparent',
-        border: isSelected ? `1px solid ${color}50` : '1px solid transparent',
+        borderTop:    isSelected ? `1px solid ${color}50` : '1px solid transparent',
+        borderRight:  isSelected ? `1px solid ${color}50` : '1px solid transparent',
+        borderBottom: isSelected ? `1px solid ${color}50` : '1px solid transparent',
         borderLeft: `3px solid ${color}`,
         cursor: 'pointer', transition: 'all 0.15s',
         boxShadow: isSelected ? `0 2px 10px ${color}28` : 'none',
       }}
-      onMouseEnter={e => { if (!isSelected) { e.currentTarget.style.background = `${color}0d`; e.currentTarget.style.borderColor = `${color}30 ${color}30 ${color}30 ${color}`; } }}
-      onMouseLeave={e => { if (!isSelected) { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.borderColor = `transparent transparent transparent ${color}`; } }}
+      onMouseEnter={e => { if (!isSelected) { e.currentTarget.style.background = `${color}0d`; e.currentTarget.style.borderTopColor = `${color}30`; e.currentTarget.style.borderRightColor = `${color}30`; e.currentTarget.style.borderBottomColor = `${color}30`; } }}
+      onMouseLeave={e => { if (!isSelected) { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.borderTopColor = 'transparent'; e.currentTarget.style.borderRightColor = 'transparent'; e.currentTarget.style.borderBottomColor = 'transparent'; } }}
     >
       {/* Avatar */}
       <div style={{
@@ -374,18 +397,24 @@ const ZoneMapView = ({ zones }) => {
     else document.exitFullscreen();
   };
 
-  const geoZones   = zones.filter(z => z.latitude && z.longitude && !isNaN(parseFloat(z.latitude)) && !isNaN(parseFloat(z.longitude)));
-  const noGeoCount = zones.length - geoZones.length;
-  const totalPOB   = zones.reduce((s, z) => s + (z.current_personnel_count ?? 0), 0);
-  const activeCount= geoZones.filter(z => z.status === 'ACTIVE').length;
-  const alertCount = geoZones.filter(z => ['EMERGENCY','LOCKDOWN'].includes(z.status)).length;
-  const selectedZone = geoZones.find(z => z.id === selectedId) || null;
-
-  const filtered = geoZones.filter(z =>
-    z.name.toLowerCase().includes(search.toLowerCase()) ||
-    (z.state || '').toLowerCase().includes(search.toLowerCase()) ||
-    z.code.toLowerCase().includes(search.toLowerCase())
+  const geoZones = useMemo(
+    () => zones.filter(z => z.latitude && z.longitude && !isNaN(parseFloat(z.latitude)) && !isNaN(parseFloat(z.longitude))),
+    [zones]
   );
+  const noGeoCount   = zones.length - geoZones.length;
+  const totalPOB     = useMemo(() => zones.reduce((s, z) => s + (z.current_personnel_count ?? 0), 0), [zones]);
+  const activeCount  = useMemo(() => geoZones.filter(z => z.status === 'ACTIVE').length, [geoZones]);
+  const alertCount   = useMemo(() => geoZones.filter(z => ['EMERGENCY','LOCKDOWN'].includes(z.status)).length, [geoZones]);
+  const selectedZone = useMemo(() => geoZones.find(z => z.id === selectedId) || null, [geoZones, selectedId]);
+
+  const filtered = useMemo(() => {
+    const q = search.toLowerCase();
+    return geoZones.filter(z =>
+      z.name.toLowerCase().includes(q) ||
+      (z.state || '').toLowerCase().includes(q) ||
+      z.code.toLowerCase().includes(q)
+    );
+  }, [geoZones, search]);
 
   const tile = TILE_LAYERS[tileKey];
   const isDark = tileKey === 'dark' || tileKey === 'satellite';

@@ -28,7 +28,9 @@ from ..models.biotime_models import (
 from ..models.zone import Zone
 from ..core.database import get_db
 from ..services.zkteco.biometric_service import ZKTecoBiometricService
+from ..services.emergency_websocket import emergency_websocket_manager
 from ..services.zkteco_adms_service import zkteco_adms_service
+from ..services.mustering_service import MusteringService
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -102,7 +104,7 @@ class EmergencyService:
                     "name": zone.name,
                     "status": "ACTIVE" if active_count > 0 else "SAFE",
                     "active_emergencies": active_count,
-                    "capacity": zone.capacity,
+                    "capacity": zone.max_capacity,
                     "evac_point": zone.evac_point
                 })
             
@@ -174,7 +176,7 @@ class EmergencyService:
                 scope_enum = EmergencyScope.GLOBAL.value
             elif scope == "zone" and zone_ids:
                 target_doors = db.query(AccDoor).join(IClockTerminal).filter(
-                    IClockTerminal.area_id.in_(zone_ids)
+                    IClockTerminal.zone_id.in_(zone_ids)
                 ).all()
                 scope_enum = EmergencyScope.ZONE.value
             elif scope == "door" and door_ids:
@@ -185,8 +187,8 @@ class EmergencyService:
             else:
                 raise ValueError("Invalid scope or missing target identifiers")
             
-            if not target_doors:
-                raise ValueError("No doors found for specified scope")
+            # No doors is not a hard failure — the emergency event is still recorded
+            # for audit trail purposes and any door-command loop simply no-ops.
             
             # Create emergency event
             emergency_event = EmergencyEvent(
@@ -357,7 +359,11 @@ class EmergencyService:
             
             db.add(emergency_event)
             db.flush()
-            
+            # Commit immediately so the emergency event row is durable before any
+            # child operation (mustering, ZKTeco commands) that shares this session
+            # and may call db.rollback() on its own failure path.
+            db.commit()
+
             results = {
                 "unlocked_doors": 0,
                 "locked_doors": 0,
@@ -365,94 +371,120 @@ class EmergencyService:
                 "mustering_started": False,
                 "notifications_sent": 0
             }
-            
+
             if action == "activate":
                 # 1. Unlock fire exits (emergency_action=2)
                 fire_exit_doors = db.query(AccDoor).filter(
                     AccDoor.emergency_action == 2
                 ).all()
-                
+
                 for door in fire_exit_doors:
+                    sp = db.begin_nested()
                     try:
                         if door.terminal:
                             await self.zkteco_queue_command(door.terminal.sn, "RELAY_ON")
                             results["unlocked_doors"] += 1
+                        sp.commit()
                     except Exception as e:
                         logger.error(f"Error unlocking fire exit {door.id}: {str(e)}")
-                
+                        sp.rollback()  # roll back only this door; prior commands are preserved
+
                 emergency_event.actions.append({
                     "type": "unlock_fire_exits",
                     "doors": [d.id for d in fire_exit_doors],
                     "count": results["unlocked_doors"],
                     "timestamp": datetime.now(timezone.utc).isoformat()
                 })
-                
+
                 # 2. Lock danger zones (emergency_action=1)
                 danger_zone_doors = db.query(AccDoor).filter(
                     AccDoor.emergency_action == 1
                 ).all()
-                
+
                 for door in danger_zone_doors:
+                    sp = db.begin_nested()
                     try:
                         if door.terminal:
                             await self.zkteco_queue_command(door.terminal.sn, "RELAY_OFF")
                             results["locked_doors"] += 1
+                        sp.commit()
                     except Exception as e:
                         logger.error(f"Error locking danger zone {door.id}: {str(e)}")
-                
+                        sp.rollback()
+
                 emergency_event.actions.append({
                     "type": "lock_danger_zones",
                     "doors": [d.id for d in danger_zone_doors],
                     "count": results["locked_doors"],
                     "timestamp": datetime.now(timezone.utc).isoformat()
                 })
-                
+
                 # 3. Turn ON sirens/strobes
                 emergency_devices = db.query(EmergencyDevice).filter(
                     EmergencyDevice.device_type.in_([1, 2]),  # Siren, Strobe
                     EmergencyDevice.status != 2  # Not fault
                 ).all()
-                
+
                 for device in emergency_devices:
+                    sp = db.begin_nested()
                     try:
                         if device.terminal:
                             await self.zkteco_queue_command(device.terminal.sn, "EMERGENCY_ON")
                             device.status = 1  # ON
                             results["sirens_activated"] += 1
+                        sp.commit()
                     except Exception as e:
                         logger.error(f"Error activating siren {device.id}: {str(e)}")
-                
+                        sp.rollback()
+
                 emergency_event.actions.append({
                     "type": "siren_activation",
                     "devices": [d.id for d in emergency_devices],
                     "count": results["sirens_activated"],
                     "timestamp": datetime.now(timezone.utc).isoformat()
                 })
-                
-                # 4. Start mustering event
-                mustering_zone_id = zone_id or 1  # Default to first zone
-                mustering_event = MusteringEvent(
-                    zone_id=mustering_zone_id,
-                    event_type=2,  # Fire
-                    start_time=datetime.now(timezone.utc),
-                    status=0,  # Active
-                    initiated_by=initiated_by,
-                    description="Fire evacuation mustering"
-                )
-                
-                db.add(mustering_event)
-                db.flush()
-                
-                emergency_event.mustering_event_id = mustering_event.id
-                results["mustering_started"] = True
-                
-                emergency_event.actions.append({
-                    "type": "start_mustering",
-                    "mustering_event_id": mustering_event.id,
-                    "zone_id": mustering_zone_id,
-                    "timestamp": datetime.now(timezone.utc).isoformat()
-                })
-                
+
+                # 4. Start mustering event — use MusteringService so that expected
+                # personnel are calculated from Personnel.current_zone_id and
+                # MusteringExpected rows are created. Without this the headcount
+                # shows 0 expected during an actual fire evacuation.
+                # MusteringService.start_mustering_event has its own db.commit() on
+                # success and db.rollback() on failure. Because the emergency event
+                # was committed above, its own rollback cannot affect it.
+                mustering_zone_ids = [zone_id] if zone_id else [
+                    z.id for z in db.query(Zone).filter(Zone.is_active == True).limit(10).all()
+                ]
+                try:
+                    muster_result = MusteringService(db).start_mustering_event(
+                        zone_ids=mustering_zone_ids,
+                        event_type=2,  # Fire
+                        initiated_by=initiated_by or 0,
+                        notes="Fire evacuation — auto-started by fire mode activation",
+                    )
+                    mustering_event_id = muster_result["event_id"]
+                    # Update the already-committed emergency event with the muster link
+                    db.query(EmergencyEvent).filter(EmergencyEvent.id == emergency_event.id).update(
+                        {"mustering_event_id": mustering_event_id}
+                    )
+                    emergency_event.mustering_event_id = mustering_event_id
+                    results["mustering_started"] = True
+
+                    emergency_event.actions.append({
+                        "type": "start_mustering",
+                        "mustering_event_id": mustering_event_id,
+                        "zone_ids": mustering_zone_ids,
+                        "total_expected": muster_result.get("total_expected", 0),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    })
+                except Exception as muster_err:
+                    logger.error(f"Fire-mode mustering start failed: {muster_err}")
+                    results["mustering_started"] = False
+                    # Ensure the session is clean after mustering's rollback
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+
                 # 5. Send notifications
                 notification_count = await self.send_emergency_notifications(
                     emergency_event.id,
@@ -484,15 +516,24 @@ class EmergencyService:
                     "timestamp": datetime.now(timezone.utc).isoformat()
                 })
                 
-                # End active mustering events
+                # End active mustering events. Update status directly so we stay
+                # in the same transaction as the siren deactivation above, then call
+                # _set_mustering_readers() per zone to clear device commands. The
+                # original code only set status — readers were never deactivated.
                 active_mustering = db.query(MusteringEvent).filter(
-                    MusteringEvent.status == 0  # Active
+                    MusteringEvent.status == 0
                 ).all()
-                
+
+                muster_svc = MusteringService(db)
                 for muster in active_mustering:
                     muster.status = 1  # Completed
                     muster.end_time = datetime.now(timezone.utc)
-                
+                    for zid in (muster.zone_ids or ([muster.zone_id] if muster.zone_id else [])):
+                        try:
+                            muster_svc._set_mustering_readers(zid, False)
+                        except Exception as _re:
+                            logger.error(f"Error deactivating readers for zone {zid}: {_re}")
+
                 emergency_event.actions.append({
                     "type": "end_mustering",
                     "events_ended": len(active_mustering),
@@ -684,32 +725,74 @@ class EmergencyService:
         self,
         channel: int,
         address: str,
-        message: str
+        message: str,
+        subject: str = "Emergency Alert",
     ) -> Dict[str, Any]:
-        """Send notification through specific channel"""
-        
+        """Send notification through a specific channel.
+
+        All blocking I/O (SMTP, HTTP) is offloaded to a thread via asyncio.to_thread()
+        so the event loop is never blocked during an emergency with many recipients.
+        """
+        import os
         try:
             if channel == NotificationChannel.SMS.value:
-                # Implement SMS sending (Twilio, etc.)
-                # For now, just log
-                logger.info(f"SMS to {address}: {message}")
+                sms_key = os.getenv('SMS_API_KEY')
+                sms_url = os.getenv('SMS_API_URL')
+                if not sms_key or not sms_url:
+                    logger.warning(f"SMS not configured — would send to {address}: {message}")
+                    return {"success": False, "error": "SMS_API_KEY / SMS_API_URL not set"}
+
+                def _send_sms():
+                    import requests as _req
+                    resp = _req.post(
+                        sms_url,
+                        json={'api_key': sms_key, 'to': address, 'message': message},
+                        timeout=10,
+                    )
+                    resp.raise_for_status()
+
+                await asyncio.to_thread(_send_sms)
+                logger.info(f"SMS sent to {address}")
                 return {"success": True}
-            
+
             elif channel == NotificationChannel.EMAIL.value:
-                # Implement email sending
-                logger.info(f"Email to {address}: {message}")
+                smtp_host = os.getenv('SMTP_HOST')
+                smtp_port = int(os.getenv('SMTP_PORT', '587'))
+                smtp_user = os.getenv('SMTP_USER')
+                smtp_pass = os.getenv('SMTP_PASSWORD')
+                email_from = os.getenv('EMAIL_FROM', smtp_user)
+                if not smtp_host or not smtp_user:
+                    logger.warning(f"SMTP not configured — would send to {address}: {subject}")
+                    return {"success": False, "error": "SMTP_HOST / SMTP_USER not set"}
+
+                def _send_email():
+                    import smtplib
+                    from email.mime.multipart import MIMEMultipart
+                    from email.mime.text import MIMEText as _MIMEText
+                    msg = MIMEMultipart('alternative')
+                    msg['Subject'] = subject
+                    msg['From'] = email_from
+                    msg['To'] = address
+                    msg.attach(_MIMEText(message, 'plain'))
+                    with smtplib.SMTP(smtp_host, smtp_port, timeout=10) as server:
+                        server.ehlo()
+                        server.starttls()
+                        server.login(smtp_user, smtp_pass)
+                        server.sendmail(email_from, [address], msg.as_string())
+
+                await asyncio.to_thread(_send_email)
+                logger.info(f"Email sent to {address}")
                 return {"success": True}
-            
+
             elif channel == NotificationChannel.PA.value:
-                # Implement PA system
                 logger.info(f"PA broadcast: {message}")
                 return {"success": True}
-            
+
             else:
                 return {"success": False, "error": f"Channel {channel} not implemented"}
-        
+
         except Exception as e:
-            logger.error(f"Error sending notification: {str(e)}")
+            logger.error(f"Error sending notification to {address}: {e}")
             return {"success": False, "error": str(e)}
 
     async def zkteco_queue_command(self, terminal_sn: str, command: str) -> Dict[str, Any]:
@@ -764,18 +847,36 @@ class EmergencyService:
             logger.error(f"Error logging emergency operation: {str(e)}")
 
     async def broadcast_emergency_update(self, update_data: Dict[str, Any]):
-        """Broadcast emergency update via WebSocket"""
-        
+        """Broadcast emergency update via WebSocket and SSE so every open browser
+        tab receives the alert — not only those on the emergency page."""
         try:
-            # This would integrate with WebSocket manager
-            # For now, just log the broadcast
-            logger.info(f"Broadcasting emergency update: {json.dumps(update_data)}")
-            
-            # In real implementation:
-            # await emergency_websocket_manager.broadcast(json.dumps(update_data))
-        
+            await emergency_websocket_manager.broadcast(update_data)
         except Exception as e:
-            logger.error(f"Error broadcasting emergency update: {str(e)}")
+            logger.error(f"Error broadcasting emergency update via WebSocket: {str(e)}")
+        try:
+            from ..api.notifications import broadcast_notification
+            # Build a human-readable SSE notification from the update payload
+            event_type = update_data.get("type", "emergency_update")
+            data = update_data.get("data", {})
+            title_map = {
+                "fire_mode": "Fire Mode Activated",
+                "lockdown": "Emergency Lockdown",
+                "panic": "PANIC ALARM",
+                "emergency_status": "Emergency Status Update",
+            }
+            title = title_map.get(event_type, "Emergency Alert")
+            action = data.get("action", "")
+            if action == "clear":
+                title = f"{title} — CLEARED"
+            await broadcast_notification({
+                "type": event_type,
+                "priority": "critical",
+                "title": title,
+                "message": data.get("message") or f"Emergency event: {event_type}",
+                **{k: v for k, v in data.items() if k in ("zone_id", "emergency_event_id")},
+            })
+        except Exception as e:
+            logger.error(f"Error broadcasting emergency update via SSE: {str(e)}")
 
     async def get_emergency_audit_trail(
         self,

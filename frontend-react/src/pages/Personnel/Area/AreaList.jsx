@@ -285,7 +285,7 @@ const AreaList = () => {
   });
 
   const deleteMutation = useMutation({
-    mutationFn: (id) => apiService.delete(`/api/v1/zones/${id}/`),
+    mutationFn: (id) => apiService.delete(`/api/v1/zones/${id}`),
     onSuccess: () => {
       message.success('Zone deactivated');
       queryClient.invalidateQueries(['zones']);

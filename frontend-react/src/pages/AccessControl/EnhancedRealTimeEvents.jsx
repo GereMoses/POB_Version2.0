@@ -49,7 +49,8 @@ const EnhancedRealTimeEvents = () => {
     const connectWebSocket = () => {
       try {
         const token = localStorage.getItem('authToken') || localStorage.getItem('token');
-        const wsBase = (process.env.REACT_APP_WS_URL || 'ws://localhost:8000').replace(/\/$/, '');
+        const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsBase = (process.env.REACT_APP_WS_URL || `${proto}//${window.location.host}`).replace(/\/$/, '');
         const wsUrl = `${wsBase}/ws/access-control/events/?token=${token}`;
         
         wsRef.current = new WebSocket(wsUrl);

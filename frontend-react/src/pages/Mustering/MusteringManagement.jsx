@@ -237,7 +237,8 @@ const ZoneMapCanvas = ({ zones, allLogs, editMode, connectFrom, setConnectFrom, 
     const m = {};
     for (const z of zones) m[z.id] = { total: 0, found: 0, missing: 0, injured: 0 };
     for (const l of allLogs) {
-      const z = zones.find(z => z.reader_sn && l.last_punch_area && z.reader_sn === l.last_punch_area);
+      // Match by zone name (last_punch_area = zone name at event start)
+      const z = zones.find(z => z.name && l.last_punch_area && z.name === l.last_punch_area);
       if (z) {
         m[z.id].total++;
         if (l.status === 1) m[z.id].found++;
@@ -506,12 +507,13 @@ const MusteringManagement = ({ embedded = false, onSectionSwitch }) => {
   });
   const templates = Array.isArray(templatesRaw?.data) ? templatesRaw.data : [];
 
-  /* ── WebSocket ── */
+  /* ── Mustering event WebSocket ── */
   const wsRef = useRef(null);
   useEffect(() => {
     if (!selectedEventId) { wsRef.current?.close(); return; }
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(`${proto}//${window.location.hostname}:8000/ws/mustering/events/${selectedEventId}`);
+    const token = localStorage.getItem('token') || localStorage.getItem('authToken') || localStorage.getItem('access_token') || '';
+    const ws = new WebSocket(`${proto}//${window.location.host}/ws/mustering/events/${selectedEventId}?token=${token}`);
     ws.onmessage = (e) => {
       try {
         const d = JSON.parse(e.data);
@@ -527,6 +529,34 @@ const MusteringManagement = ({ embedded = false, onSectionSwitch }) => {
     wsRef.current = ws;
     return () => ws.close();
   }, [selectedEventId]);
+
+  /* ── Zone occupancy WebSocket (real-time ADMS badge counts) ── */
+  const [zoneLiveCounts, setZoneLiveCounts] = useState({});
+  const zoneWsRef = useRef(null);
+  useEffect(() => {
+    let retryTimer = null;
+    const connect = () => {
+      const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const ws = new WebSocket(`${proto}//${window.location.host}/api/v1/zones/ws`);
+      zoneWsRef.current = ws;
+      ws.onmessage = (e) => {
+        try {
+          const d = JSON.parse(e.data);
+          if (Array.isArray(d)) {
+            const m = {};
+            d.forEach(i => { if (i.zone_id != null) m[i.zone_id] = i.count; });
+            setZoneLiveCounts(m);
+          } else if (d.type === 'zone_update' && d.zone_id != null) {
+            setZoneLiveCounts(p => ({ ...p, [d.zone_id]: d.count }));
+          }
+        } catch (_) {}
+      };
+      ws.onclose = () => { retryTimer = setTimeout(connect, 5000); };
+      ws.onerror = () => ws.close();
+    };
+    connect();
+    return () => { clearTimeout(retryTimer); zoneWsRef.current?.close(); };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   /* ── Derived ── */
   const selectedEvent = events.find(e => e.id === selectedEventId) || activeEvents.find(e => e.id === selectedEventId);
@@ -610,7 +640,7 @@ const MusteringManagement = ({ embedded = false, onSectionSwitch }) => {
     onError: e => message.error(e?.response?.data?.detail || 'Failed'),
   });
   const deleteZoneMut = useMutation({
-    mutationFn: (id) => apiService.delete(`/api/mustering/zones/${id}/`),
+    mutationFn: (id) => apiService.delete(`/api/mustering/zones/${id}`),
     onSuccess: () => { message.success('Zone deleted'); qc.invalidateQueries(['muster-zones']); },
     onError: e => message.error(e?.response?.data?.detail || 'Failed'),
   });
@@ -1089,6 +1119,96 @@ const MusteringManagement = ({ embedded = false, onSectionSwitch }) => {
             </div>
           </div>
 
+          {/* ── Zone Breakdown ── */}
+          {headcount?.zone_breakdown?.length > 0 && (
+            <div style={{ padding: '8px 14px', background: '#f8fafc', borderBottom: '1px solid #e5e7eb', flexShrink: 0 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: '#374151', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                Zone Headcount
+              </div>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                {headcount.zone_breakdown.map(z => (
+                  <div key={z.zone_name} style={{
+                    display: 'flex', alignItems: 'center', gap: 6,
+                    background: 'white', border: `1px solid ${z.missing > 0 ? '#fca5a5' : '#e5e7eb'}`,
+                    borderLeft: `4px solid ${z.missing > 0 ? '#ef4444' : z.safe > 0 ? '#22c55e' : '#d1d5db'}`,
+                    borderRadius: 8, padding: '5px 10px', minWidth: 140,
+                  }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 12, fontWeight: 600, color: '#111827', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {z.zone_name}
+                      </div>
+                      <div style={{ fontSize: 10, color: '#6b7280', marginTop: 1 }}>
+                        {z.safe > 0 && <span style={{ color: '#16a34a', marginRight: 6 }}>✓ {z.safe} safe</span>}
+                        {z.missing > 0 && <span style={{ color: '#dc2626', marginRight: 6 }}>✗ {z.missing} missing</span>}
+                        {z.injured > 0 && <span style={{ color: '#ea580c' }}>⚠ {z.injured} injured</span>}
+                      </div>
+                    </div>
+                    <div style={{ fontSize: 20, fontWeight: 900, color: z.missing > 0 ? '#ef4444' : '#374151', flexShrink: 0 }}>
+                      {z.total}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* ── Rescue Intelligence: zone-based search guide for missing personnel ── */}
+          {selectedEvent?.status === 0 && missingCount > 0 && (() => {
+            const missingWithZone = allLogs.filter(l => l.status === 0 && (l.last_known_zone || l.last_punch_area));
+            if (!missingWithZone.length) return null;
+
+            const zoneGroups = {};
+            for (const l of missingWithZone) {
+              const key = l.last_known_zone || l.last_punch_area;
+              if (!zoneGroups[key]) zoneGroups[key] = { zone: key, code: l.last_known_zone_code, count: 0 };
+              zoneGroups[key].count++;
+            }
+            const sortedGroups = Object.values(zoneGroups).sort((a, b) => b.count - a.count);
+            const noZoneCount = missingCount - missingWithZone.length;
+
+            return (
+              <div style={{ padding: '8px 14px', background: '#fff1f0', borderBottom: '2px solid #f5222d', flexShrink: 0 }}>
+                <div style={{ fontSize: 11, fontWeight: 800, color: '#dc2626', marginBottom: 7,
+                  display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%',
+                    background: '#f5222d', animation: 'msPulse 1.4s infinite' }} />
+                  RESCUE SEARCH — Last known locations
+                  <span style={{ fontWeight: 400, color: '#9ca3af', fontSize: 10, textTransform: 'none' }}>
+                    ({missingWithZone.length} of {missingCount} missing have zone data)
+                  </span>
+                </div>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  {sortedGroups.map(g => (
+                    <Tooltip key={g.zone} title={`${g.count} missing person${g.count > 1 ? 's' : ''} last seen in ${g.zone} — dispatch rescue here`}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 7,
+                        background: 'white', border: '2px solid #f5222d', borderRadius: 8, padding: '5px 10px',
+                        cursor: 'default', boxShadow: '0 1px 4px rgba(220,38,38,0.15)' }}>
+                        <EnvironmentOutlined style={{ color: '#f5222d', fontSize: 13 }} />
+                        <div>
+                          <div style={{ fontSize: 12, fontWeight: 700, color: '#111827', lineHeight: 1.2 }}>{g.zone}</div>
+                          {g.code && <div style={{ fontSize: 9, color: '#9ca3af', fontFamily: 'monospace', letterSpacing: '0.04em' }}>{g.code}</div>}
+                        </div>
+                        <div style={{ background: '#f5222d', color: 'white', borderRadius: '50%',
+                          width: 24, height: 24, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          fontSize: 11, fontWeight: 900, flexShrink: 0, marginLeft: 2 }}>{g.count}</div>
+                      </div>
+                    </Tooltip>
+                  ))}
+                  {noZoneCount > 0 && (
+                    <Tooltip title="These personnel had no active zone badge when the event started (e.g. just arrived or on break)">
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6,
+                        background: '#fafafa', border: '1px dashed #d1d5db', borderRadius: 8, padding: '5px 10px' }}>
+                        <span style={{ fontSize: 11, color: '#6b7280', fontWeight: 600 }}>
+                          + {noZoneCount} with no zone record
+                        </span>
+                      </div>
+                    </Tooltip>
+                  )}
+                </div>
+              </div>
+            );
+          })()}
+
           {/* ── Split pane ── */}
           <div style={{ flex: 1, display: 'flex', overflow: 'hidden', minHeight: 0 }}>
 
@@ -1156,8 +1276,16 @@ const MusteringManagement = ({ embedded = false, onSectionSwitch }) => {
                         </div>
                         <div style={{ fontSize: 10, color: '#9ca3af', display: 'flex', gap: 4, marginTop: 1 }}>
                           <span style={{ fontFamily: 'monospace' }}>{p.emp_code}</span>
-                          {p.dept_name && <><span>·</span><span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 88 }}>{p.dept_name}</span></>}
+                          {p.dept_name && <><span>·</span><span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 80 }}>{p.dept_name}</span></>}
                         </div>
+                        {/* Last known zone — rescue intelligence for MISSING personnel */}
+                        {p.status === 0 && (p.last_known_zone || p.last_punch_area) && (
+                          <div style={{ fontSize: 10, color: '#dc2626', marginTop: 2, fontWeight: 700,
+                            display: 'flex', alignItems: 'center', gap: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            <EnvironmentOutlined style={{ fontSize: 9, flexShrink: 0 }} />
+                            {p.last_known_zone || p.last_punch_area}
+                          </div>
+                        )}
                       </div>
                       {/* Status + action */}
                       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 3, flexShrink: 0, marginLeft: 6 }}>
@@ -1192,6 +1320,8 @@ const MusteringManagement = ({ embedded = false, onSectionSwitch }) => {
                 zones={zones}
                 activeZoneId={selectedEvent?.zone_id ?? null}
                 allLogs={allLogs}
+                isEventActive={selectedEvent?.status === 0}
+                zoneLiveCounts={zoneLiveCounts}
               />
             </div>
           </div>
@@ -1738,51 +1868,46 @@ const MusteringManagement = ({ embedded = false, onSectionSwitch }) => {
   ];
 
   return (
-    <div style={{ background: '#f0f2f5', minHeight: embedded ? 0 : '100vh', width: '100%' }}>
-      {/* ── Header / Tab bar ── */}
-      <div style={{
-        background: embedded
-          ? 'white'
-          : isActive ? 'linear-gradient(135deg, #3b0000 0%, #7f1d1d 100%)' : '#0f172a',
-        padding: embedded ? 0 : '20px 28px 0',
-        boxShadow: embedded ? 'none' : '0 2px 12px rgba(0,0,0,0.3)',
-        borderBottom: embedded ? '1px solid #f0f0f0' : 'none',
-        transition: 'background 0.6s ease',
-      }}>
-        {/* Full title row — hidden when embedded */}
-        {!embedded && (
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-            <Space size={14}>
-              <div style={{ width: 48, height: 48, borderRadius: 12, flexShrink: 0, background: 'rgba(255,255,255,0.1)', border: '1px solid rgba(255,255,255,0.15)', backdropFilter: 'blur(8px)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                <TeamOutlined style={{ color: 'white', fontSize: 22 }} />
+    <div className="mustering-mgmt-module">
+      <Card
+        title={!embedded ? (
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', overflow: 'visible' }}>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 16 }}>Mustering &amp; Headcount</div>
+              <div style={{ fontSize: 12, color: '#94a3b8', fontWeight: 400, marginTop: 1 }}>
+                Personnel accountability and emergency response
               </div>
-              <div>
-                <div style={{ color: 'white', fontSize: 20, fontWeight: 800, lineHeight: 1.2, letterSpacing: '-0.3px' }}>Mustering & Headcount</div>
-                <div style={{ color: 'rgba(255,255,255,0.45)', fontSize: 12, marginTop: 3 }}>Personnel accountability and emergency response</div>
-              </div>
-            </Space>
-            <Space size={10}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 7, background: isActive ? 'rgba(239,68,68,0.2)' : 'rgba(255,255,255,0.08)', border: `1px solid ${isActive ? 'rgba(239,68,68,0.4)' : 'rgba(255,255,255,0.12)'}`, borderRadius: 8, padding: '6px 12px' }}>
-                <span style={{ width: 7, height: 7, borderRadius: '50%', background: isActive ? '#f87171' : '#4ade80', boxShadow: `0 0 0 2px ${isActive ? 'rgba(248,113,113,0.25)' : 'rgba(74,222,128,0.2)'}`, animation: isActive ? 'msPulse 1.2s infinite' : 'none' }} />
-                <span style={{ fontSize: 12, fontWeight: 700, color: isActive ? '#fca5a5' : 'rgba(255,255,255,0.7)', letterSpacing: '0.03em' }}>{isActive ? `${activeEvents.length} ACTIVE` : 'NORMAL'}</span>
-              </div>
-              <Button icon={<ReloadOutlined />} size="small" onClick={() => { qc.invalidateQueries(['muster-active']); qc.invalidateQueries(['muster-events']); }} style={{ background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.15)', color: 'rgba(255,255,255,0.8)', borderRadius: 8 }}>Refresh</Button>
-              <Button icon={<PlayCircleOutlined />} size="small" onClick={() => setStartModal(true)} style={{ background: isActive ? '#dc2626' : 'rgba(255,255,255,0.15)', border: `1px solid ${isActive ? '#ef4444' : 'rgba(255,255,255,0.25)'}`, color: 'white', fontWeight: 600, borderRadius: 8 }}>Start Muster</Button>
+            </div>
+            <Space size={10} style={{ overflow: 'visible' }}>
+              <Space size={12} split={<span style={{ color: '#e2e8f0' }}>|</span>} style={{ fontSize: 11, color: '#94a3b8' }}>
+                <span style={{ color: isActive ? '#dc2626' : '#94a3b8', fontWeight: isActive ? 600 : 400 }}>
+                  {isActive ? `${activeEvents.length} Active` : 'Normal'}
+                </span>
+              </Space>
+              <Button icon={<ReloadOutlined />} size="small"
+                onClick={() => { qc.invalidateQueries(['muster-active']); qc.invalidateQueries(['muster-events']); }}>
+                Refresh
+              </Button>
+              <Button icon={<PlayCircleOutlined />} size="small" danger={isActive}
+                onClick={() => setStartModal(true)}>
+                Start Muster
+              </Button>
             </Space>
           </div>
-        )}
-
-        {/* Tab bar row — always shown */}
-        <div style={{ padding: embedded ? '0 20px' : '0' }}>
-          <Tabs
-            activeKey={activeTab}
-            onChange={setActiveTab}
-            items={tabItems}
-            className={embedded ? 'ms-tabs-light' : 'ms-root-tabs'}
-            tabBarStyle={{ marginBottom: 0 }}
-          />
-        </div>
-      </div>
+        ) : undefined}
+        bordered={!embedded}
+        styles={{ header: { overflow: 'visible' }, body: { padding: 0 } }}
+      >
+        <Tabs
+          activeKey={activeTab}
+          onChange={setActiveTab}
+          items={tabItems}
+          size="middle"
+          className="ms-tabs-light"
+          style={{ paddingLeft: 24, paddingRight: 24 }}
+          tabBarStyle={{ marginBottom: 0 }}
+        />
+      </Card>
 
       {/* ════════════════ MODALS ════════════════ */}
 
@@ -1796,16 +1921,33 @@ const MusteringManagement = ({ embedded = false, onSectionSwitch }) => {
         width={460}
       >
         <Form form={startForm} layout="vertical" style={{ marginTop: 16 }}>
-          <Form.Item name="zone_ids" label="Muster Zones" rules={[{ required: true, type: 'array', min: 1, message: 'Select at least one zone' }]}>
+          <Form.Item
+            name="zone_ids"
+            label="Coverage Areas (Work Zones)"
+            rules={[{ required: true, type: 'array', min: 1, message: 'Select at least one work zone' }]}
+            extra="Select the work areas to cover. Muster points are excluded — personnel will scan in there to mark themselves safe."
+          >
             <Select
               mode="multiple"
-              placeholder="Select one or more zones (all zones = entire installation)"
+              placeholder="Select work zones — leave blank to cover all onboard personnel"
               showSearch
               optionFilterProp="label"
               size="large"
               maxTagCount="responsive"
             >
-              {zones.map(z => <Select.Option key={z.id} value={z.id} label={z.name}>{z.name}</Select.Option>)}
+              {zones
+                .filter(z => z.zone_type !== 'MUSTER_POINT')
+                .map(z => (
+                  <Select.Option key={z.id} value={z.id} label={z.name}>
+                    <span>{z.name}</span>
+                    {z.zone_type && (
+                      <span style={{ marginLeft: 6, fontSize: 11, color: '#8c8c8c' }}>
+                        [{z.zone_type}]
+                      </span>
+                    )}
+                  </Select.Option>
+                ))
+              }
             </Select>
           </Form.Item>
           <Form.Item name="event_type" label="Emergency Type" rules={[{ required: true }]}>

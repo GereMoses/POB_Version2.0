@@ -165,7 +165,7 @@ const PersonnelDashboard = () => {
 
   // Delete employee mutation
   const deleteMutation = useMutation({
-    mutationFn: async (employeeId) => apiService.delete(`/api/v1/personnel/${employeeId}/`),
+    mutationFn: async (employeeId) => apiService.delete(`/api/v1/personnel/${employeeId}`),
     onSuccess: () => {
       message.success('Employee deleted successfully');
       queryClient.invalidateQueries({ queryKey: ['personnel'] });

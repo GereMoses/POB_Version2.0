@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import {
   Card, Button, Space, Row, Col, Divider,
   Select, DatePicker, Statistic, Table, Tag,
@@ -56,7 +56,7 @@ const AnalyticsTab = () => {
     },
     refetchInterval: 60000,
   });
-  const stats = statsData?.data || {};
+  const stats = useMemo(() => statsData?.data || {}, [statsData]);
 
   /* ---- exception breakdown ---- */
   const { data: exData, isLoading: exLoading } = useQuery({
@@ -69,7 +69,7 @@ const AnalyticsTab = () => {
     },
     refetchInterval: 60000,
   });
-  const exBreakdown = exData?.data || [];
+  const exBreakdown = useMemo(() => exData?.data || [], [exData]);
 
   /* ---- top exceptions by employee ---- */
   const { data: topExData, isLoading: topExLoading } = useQuery({
@@ -83,7 +83,7 @@ const AnalyticsTab = () => {
     },
     refetchInterval: 60000,
   });
-  const topEx = topExData?.data || [];
+  const topEx = useMemo(() => topExData?.data || [], [topExData]);
 
   /* ---- attendance trends ---- */
   const { data: trendData, isLoading: trendLoading } = useQuery({
@@ -96,14 +96,15 @@ const AnalyticsTab = () => {
     },
     refetchInterval: 60000,
   });
-  const trends = trendData?.data || [];
+  const trends = useMemo(() => trendData?.data || [], [trendData]);
 
   /* ---- departments for filter ---- */
   const { data: deptData } = useQuery({
     queryKey: ['departments'],
     queryFn: () => apiService.get('/api/v1/departments/'),
   });
-  const departments = deptData?.data || deptData?.results || [];
+  const departments = useMemo(() => deptData?.data || deptData?.results || [], [deptData]);
+  const exTotal     = useMemo(() => exBreakdown.reduce((s, e) => s + (e.count || 0), 0), [exBreakdown]);
 
   const isAnyLoading = statsLoading || exLoading || topExLoading || trendLoading;
 
@@ -196,8 +197,7 @@ const AnalyticsTab = () => {
             {exBreakdown.length === 0
               ? <div style={{ textAlign:'center', color:'#8c8c8c', padding:'24px 0' }}>No exceptions this period</div>
               : exBreakdown.map(ex => {
-                const total = exBreakdown.reduce((s,e) => s + (e.count||0), 0);
-                const pct   = total > 0 ? Math.round(((ex.count||0)/total)*100) : 0;
+                const pct = exTotal > 0 ? Math.round(((ex.count || 0) / exTotal) * 100) : 0;
                 return (
                   <div key={ex.exception_type} style={{ marginBottom:12 }}>
                     <div style={{ display:'flex', justifyContent:'space-between', marginBottom:4 }}>

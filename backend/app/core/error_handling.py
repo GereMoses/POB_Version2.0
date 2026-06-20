@@ -16,7 +16,7 @@ from pydantic import ValidationError
 logger = logging.getLogger(__name__)
 
 class POBException(Exception):
-    """Base exception class for POB system"""
+    """Base exception class for Apex POB"""
     def __init__(
         self,
         message: str,

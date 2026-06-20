@@ -3,6 +3,7 @@ WebSocket Connection Manager
 Basic WebSocket connection management for real-time features
 """
 
+import asyncio
 import json
 import logging
 from typing import Dict, List, Optional
@@ -36,27 +37,44 @@ class ConnectionManager:
             "message": f"User {user_id} joined the room"
         }, exclude_websocket=websocket)
     
-    async def disconnect(self, websocket: WebSocket):
-        """Disconnect a WebSocket client"""
+    def disconnect(self, websocket: WebSocket):
+        """Disconnect a WebSocket client.
+
+        Synchronous on purpose: it is called from cleanup paths inside async
+        broadcast loops where awaiting is unsafe (and where the previous async
+        version was never awaited — so dead sockets were never removed and the
+        connection dicts leaked). The "user left" notice is fire-and-forget via
+        a background task so cleanup itself never blocks or mutates-during-iterate.
+        """
         user_id = self.user_connections.get(websocket, "unknown")
-        
-        # Find and remove from all rooms
-        for room, connections in self.active_connections.items():
+        left_rooms = []
+
+        # Iterate over a snapshot of items; mutate the underlying lists safely.
+        for room, connections in list(self.active_connections.items()):
             if websocket in connections:
                 connections.remove(websocket)
+                left_rooms.append(room)
                 logger.info(f"User {user_id} disconnected from room {room}")
-                
-                # Notify others in the room
-                await self.broadcast_to_room(room, {
-                    "type": "user_disconnected",
-                    "user_id": user_id,
-                    "message": f"User {user_id} left the room"
-                })
-        
+
         # Remove from user connections
         if websocket in self.user_connections:
             del self.user_connections[websocket]
-    
+
+        # Fire-and-forget leave notices (only if an event loop is running).
+        for room in left_rooms:
+            self._schedule_broadcast(room, {
+                "type": "user_disconnected",
+                "user_id": user_id,
+                "message": f"User {user_id} left the room",
+            })
+
+    def _schedule_broadcast(self, room: str, message: dict) -> None:
+        """Schedule a room broadcast without blocking the caller."""
+        try:
+            asyncio.get_running_loop().create_task(self.broadcast_to_room(room, message))
+        except RuntimeError:
+            pass  # no running loop (e.g. called from sync context/tests) — skip notice
+
     async def send_personal_message(self, websocket: WebSocket, message: dict):
         """Send a message to a specific WebSocket client"""
         try:
@@ -64,24 +82,25 @@ class ConnectionManager:
         except Exception as e:
             logger.error(f"Error sending personal message: {e}")
             self.disconnect(websocket)
-    
+
     async def broadcast_to_room(self, room: str, message: dict, exclude_websocket: Optional[WebSocket] = None):
         """Broadcast a message to all clients in a room"""
         if room not in self.active_connections:
             return
-        
+
         disconnected = []
-        for connection in self.active_connections[room]:
+        # Iterate a copy so disconnect()-driven mutation can't corrupt iteration.
+        for connection in list(self.active_connections[room]):
             if connection == exclude_websocket:
                 continue
-            
+
             try:
                 await connection.send_text(json.dumps(message))
             except Exception as e:
                 logger.error(f"Error broadcasting to room {room}: {e}")
                 disconnected.append(connection)
-        
-        # Clean up disconnected connections
+
+        # Clean up disconnected connections (now a real, synchronous removal)
         for connection in disconnected:
             self.disconnect(connection)
     

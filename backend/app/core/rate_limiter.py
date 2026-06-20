@@ -19,15 +19,13 @@ class RateLimiter:
     
     def __init__(self):
         self.redis_client = None
-        self._memory_store = {}
-        self._memory_expiry = {}
         self._connect_redis()
     
     def _connect_redis(self):
-        """Connect to Redis with fallback to in-memory storage"""
+        """Connect to Redis. No in-memory fallback — shared state is required for multi-worker correctness."""
         max_retries = 3
         retry_delay = 2
-        
+
         for attempt in range(max_retries):
             try:
                 import redis
@@ -39,67 +37,44 @@ class RateLimiter:
                     socket_connect_timeout=10,
                     socket_timeout=5,
                     retry_on_timeout=True,
-                    health_check_interval=30
+                    health_check_interval=30,
                 )
-                # Test connection
                 self.redis_client.ping()
                 logger.info("✅ Rate limiter connected to Redis")
                 return
             except Exception as e:
                 if attempt < max_retries - 1:
-                    logger.warning(f"Redis connection attempt {attempt + 1} failed, retrying in {retry_delay}s: {e}")
+                    logger.warning("Redis connection attempt %d failed, retrying in %ds: %s",
+                                   attempt + 1, retry_delay, e)
                     time.sleep(retry_delay)
                     retry_delay *= 2
                 else:
-                    logger.warning(f"⚠️ Redis not available after {max_retries} attempts, using in-memory rate limiting: {e}")
+                    logger.error("Redis unavailable after %d attempts — rate limiter disabled: %s",
+                                 max_retries, e)
                     self.redis_client = None
-                    self._memory_store = {}
-                    self._memory_expiry = {}
     
-    def _get_key(self, key: str) -> Optional[str]:
-        """Get value from Redis or memory store"""
-        if self.redis_client:
-            try:
-                return self.redis_client.get(key)
-            except Exception as e:
-                logger.error(f"Redis get error: {e}")
-                return self._memory_store.get(key)
-        return self._memory_store.get(key)
-    
-    def _set_key(self, key: str, value: str, expire: int):
-        """Set value in Redis or memory store"""
-        if self.redis_client:
-            try:
-                self.redis_client.setex(key, expire, value)
-                return
-            except Exception as e:
-                logger.error(f"Redis set error: {e}")
-        
-        # Fallback to memory store
-        self._memory_store[key] = value
-        # Simple expiration for memory store
-        if not hasattr(self, '_memory_expiry'):
-            self._memory_expiry = {}
-        self._memory_expiry[key] = time.time() + expire
-    
+    # Lua script: atomically INCR the key and set its TTL on first creation.
+    # KEYS[1] = the rate-limit key; ARGV[1] = window in seconds.
+    # Returns the new count. Single-command atomicity avoids the INCR+EXPIRE
+    # split that leaves a key with no TTL when the process crashes mid-pipeline.
+    _LUA_INCR_EXPIRE = """
+local count = redis.call('INCR', KEYS[1])
+if count == 1 then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return count
+"""
+
     def _increment_key(self, key: str, expire: int) -> int:
-        """Increment counter in Redis or memory store"""
-        if self.redis_client:
-            try:
-                pipe = self.redis_client.pipeline()
-                pipe.incr(key)
-                pipe.expire(key, expire)
-                results = pipe.execute()
-                return results[0]
-            except Exception as e:
-                logger.error(f"Redis increment error: {e}")
-        
-        # Fallback to memory store
-        current = self._memory_store.get(key, 0)
-        current += 1
-        self._memory_store[key] = current
-        self._memory_expiry[key] = time.time() + expire
-        return current
+        """Atomically increment counter via Lua. Returns 0 (allow) on Redis failure."""
+        if not self.redis_client:
+            return 0  # Redis unavailable — fail open rather than block all requests
+        try:
+            result = self.redis_client.eval(self._LUA_INCR_EXPIRE, 1, key, expire)
+            return int(result)
+        except Exception as e:
+            logger.error("Redis rate-limit increment error: %s", e)
+            return 0  # fail open
     
     def is_allowed(self, key: str, limit: int, window: int) -> tuple[bool, Dict]:
         """
@@ -116,18 +91,7 @@ class RateLimiter:
         current_time = int(time.time())
         window_start = current_time - (current_time % window)
         rate_key = f"rate_limit:{key}:{window_start}"
-        
-        # Clean expired memory entries
-        if not self.redis_client and hasattr(self, '_memory_expiry'):
-            expired_keys = [
-                k for k, exp in self._memory_expiry.items() 
-                if exp < current_time
-            ]
-            for k in expired_keys:
-                self._memory_store.pop(k, None)
-                self._memory_expiry.pop(k, None)
-        
-        # Get current count
+
         current_count = self._increment_key(rate_key, window)
         
         # Calculate remaining requests and reset time
@@ -148,33 +112,41 @@ rate_limiter = RateLimiter()
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
     """Rate limiting middleware for FastAPI"""
-    
-    def __init__(self, app, calls: int = 100, period: int = 60):
+
+    # Auth endpoints get a much stricter limit than the general API.
+    _AUTH_PREFIXES = ("/api/auth/", "/api/v1/auth/")
+
+    def __init__(self, app, calls: int = 100, period: int = 60,
+                 auth_calls: int = None, auth_period: int = None):
         super().__init__(app)
-        self.calls = calls  # Number of calls allowed
-        self.period = period  # Time period in seconds
-    
+        self.calls = calls  # Number of calls allowed (general API)
+        self.period = period  # Time period in seconds (general API)
+        # Auth-specific limits — wired from settings so RATE_LIMIT_AUTH_* is no
+        # longer dead config. Defaults are conservative if not provided.
+        self.auth_calls = auth_calls if auth_calls is not None else 10
+        self.auth_period = auth_period if auth_period is not None else 300
+
     async def dispatch(self, request: Request, call_next):
         """Process request through rate limiting"""
-        
-        # Get client identifier
+
         client_id = self._get_client_id(request)
-        
-        # Check rate limit
+
+        # Apply the stricter auth limit to login/refresh/MFA endpoints.
+        path = request.url.path
+        if any(path.startswith(p) for p in self._AUTH_PREFIXES):
+            limit, window = self.auth_calls, self.auth_period
+            scope = "auth"
+        else:
+            limit, window = self.calls, self.period
+            scope = "api"
+
         allowed, info = rate_limiter.is_allowed(
-            key=client_id,
-            limit=self.calls,
-            window=self.period
+            key=f"{scope}:{client_id}",
+            limit=limit,
+            window=window
         )
-        
-        # Add rate limit headers to response
-        response = await call_next(request)
-        response.headers["X-RateLimit-Limit"] = str(info["limit"])
-        response.headers["X-RateLimit-Remaining"] = str(info["remaining"])
-        response.headers["X-RateLimit-Reset"] = str(info["reset"])
-        response.headers["X-RateLimit-RetryAfter"] = str(info["retry_after"])
-        
-        # Block request if rate limit exceeded
+
+        # Reject BEFORE the handler runs so no DB/CPU work is done for limited requests
         if not allowed:
             logger.warning(f"Rate limit exceeded for {client_id}")
             raise HTTPException(
@@ -194,33 +166,70 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                     "Retry-After": str(info["retry_after"])
                 }
             )
-        
+
+        response = await call_next(request)
+        response.headers["X-RateLimit-Limit"] = str(info["limit"])
+        response.headers["X-RateLimit-Remaining"] = str(info["remaining"])
+        response.headers["X-RateLimit-Reset"] = str(info["reset"])
+        response.headers["X-RateLimit-RetryAfter"] = str(info["retry_after"])
         return response
     
     def _get_client_id(self, request: Request) -> str:
-        """Get unique client identifier"""
-        # Try to get user ID from authenticated request
+        """Get a spoof-resistant client identifier.
+
+        IMPORTANT: this middleware runs OUTSIDE RBACMiddleware, so request.state.user
+        is not yet populated — keying must be IP-based here. We therefore derive the IP
+        from headers our OWN reverse proxy sets, NOT from client-controllable ones:
+
+          1. X-Real-IP — nginx sets this to $remote_addr (the true TCP peer) and
+             overwrites any client value, so it cannot be spoofed through nginx.
+          2. The RIGHTMOST entry of X-Forwarded-For — nginx APPENDS $remote_addr to
+             the right via $proxy_add_x_forwarded_for, so the last token is the real
+             peer. (Taking the LEFTMOST token, as before, trusted client input and let
+             an attacker mint unlimited buckets by rotating the header.)
+          3. request.client.host as a last resort.
+        """
+        # Try to get user ID from authenticated request (rarely set at this layer)
         if hasattr(request.state, 'user') and request.state.user:
             return f"user:{request.state.user.id}"
-        
-        # Fall back to IP address
-        forwarded_for = request.headers.get("X-Forwarded-For")
-        if forwarded_for:
-            # Get the first IP in the list
-            ip = forwarded_for.split(",")[0].strip()
+
+        real_ip = request.headers.get("X-Real-IP")
+        if real_ip:
+            ip = real_ip.strip()
         else:
-            ip = request.client.host if request.client else "unknown"
-        
+            forwarded_for = request.headers.get("X-Forwarded-For")
+            if forwarded_for:
+                # Rightmost token = appended by our proxy = the genuine peer
+                ip = forwarded_for.split(",")[-1].strip()
+            else:
+                ip = request.client.host if request.client else "unknown"
+
         return f"ip:{ip}"
 
 def add_rate_limit_middleware(app):
-    """Add rate limiting middleware to FastAPI app"""
-    
+    """Add rate limiting middleware to FastAPI app.
+
+    General API limit and the stricter auth limit are both sourced from settings
+    so RATE_LIMIT_AUTH_REQUESTS / RATE_LIMIT_AUTH_WINDOW are actually enforced.
+    """
+    # General limit stays at the proven 1000/min/IP — dropping to the low config
+    # default would break offices where many users share one NAT'd IP. The strict
+    # auth limit is sourced from settings (defense-in-depth behind nginx auth_limit).
+    api_calls = 1000
+    api_period = 60
+    auth_calls = getattr(settings, "RATE_LIMIT_AUTH_REQUESTS", 10)
+    auth_period = getattr(settings, "RATE_LIMIT_AUTH_WINDOW", 300)
+
     app.add_middleware(
         RateLimitMiddleware,
-        calls=1000,  # 1000 requests
-        period=60    # per minute per client
+        calls=api_calls,
+        period=api_period,
+        auth_calls=auth_calls,
+        auth_period=auth_period,
     )
-    
-    logger.info("✅ Rate limiting middleware added")
+
+    logger.info(
+        "✅ Rate limiting middleware added (api=%s/%ss, auth=%s/%ss)",
+        api_calls, api_period, auth_calls, auth_period,
+    )
     return app

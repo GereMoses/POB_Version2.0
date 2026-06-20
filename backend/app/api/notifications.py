@@ -10,18 +10,121 @@ Generators run on every GET, each in a savepoint — one failure never
 blocks the others. dedup_key prevents the same alert appearing twice.
 """
 
+import asyncio
+import json
 import logging
 from datetime import date, datetime, timezone, timedelta
-from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, Query
+from typing import Dict, Optional, Set
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
-from ..core.database import get_db
-from ..core.dependencies import get_current_user
+from ..core.database import get_db, SessionLocal
+from ..core.dependencies import get_current_user, get_current_user_sse
 
 router = APIRouter(tags=["notifications"])
 logger = logging.getLogger(__name__)
+
+# ── SSE broadcaster — Redis Pub/Sub for cross-worker delivery ─────────────────
+#
+# Architecture:
+#   broadcast_notification(payload) → publishes to Redis channel pob:sse_broadcast
+#   _redis_subscriber_task() (started at app startup) → subscribes and routes to
+#   local asyncio queues for each connected client in this worker.
+#
+# _sse_clients: Dict[user_id → Set[Queue]] — enables user-scoped delivery.
+# payload["_to"] = user_id   → delivered only to that user's queues
+# payload["_to"] = None/absent → delivered to every connected client
+
+_sse_clients: Dict[int, Set[asyncio.Queue]] = {}
+_sse_lock = asyncio.Lock()
+
+_SSE_CHANNEL = "pob:sse_broadcast"
+
+
+async def broadcast_notification(payload: dict) -> None:
+    """
+    Publish a notification to the Redis Pub/Sub channel so all workers deliver it.
+    Falls back to local delivery when Redis is unavailable.
+    """
+    try:
+        import redis.asyncio as aioredis
+        from ..core.config import settings
+        r = aioredis.Redis.from_url(settings.REDIS_URL, decode_responses=True)
+        await r.publish(_SSE_CHANNEL, json.dumps(payload))
+        await r.aclose()
+        return
+    except Exception as exc:
+        logger.debug("Redis publish failed (%s) — falling back to local delivery", exc)
+
+    # Local fallback (single-worker or Redis down)
+    await _deliver_local(payload)
+
+
+async def _deliver_local(payload: dict) -> None:
+    """Route a payload to local SSE queues, respecting user scope."""
+    target_user = payload.get("_to")
+    async with _sse_lock:
+        if target_user is not None:
+            queues = list(_sse_clients.get(int(target_user), set()))
+        else:
+            queues = [q for qs in _sse_clients.values() for q in qs]
+
+        dead_users: Dict[int, Set[asyncio.Queue]] = {}
+        for q in queues:
+            try:
+                q.put_nowait(payload)
+            except asyncio.QueueFull:
+                for uid, qs in _sse_clients.items():
+                    if q in qs:
+                        dead_users.setdefault(uid, set()).add(q)
+
+        for uid, dead_qs in dead_users.items():
+            if uid in _sse_clients:
+                _sse_clients[uid].difference_update(dead_qs)
+                if not _sse_clients[uid]:
+                    del _sse_clients[uid]
+
+
+async def start_redis_subscriber() -> None:
+    """
+    Background task: subscribe to the Redis Pub/Sub channel and route messages
+    to local clients. Restarts automatically on disconnection.
+    Intended to be called once from main.py startup for the leader worker.
+    """
+    import redis.asyncio as aioredis
+    from ..core.config import settings
+
+    while True:
+        try:
+            r = aioredis.Redis.from_url(settings.REDIS_URL, decode_responses=True)
+            pubsub = r.pubsub()
+            await pubsub.subscribe(_SSE_CHANNEL)
+            logger.info("SSE Redis subscriber connected to channel %s", _SSE_CHANNEL)
+            async for message in pubsub.listen():
+                if message["type"] == "message":
+                    try:
+                        payload = json.loads(message["data"])
+                        await _deliver_local(payload)
+                    except Exception as exc:
+                        logger.debug("SSE message parse error: %s", exc)
+        except asyncio.CancelledError:
+            logger.info("SSE Redis subscriber stopped")
+            return
+        except Exception as exc:
+            logger.warning("SSE Redis subscriber disconnected (%s) — reconnecting in 5s", exc)
+            await asyncio.sleep(5)
+
+
+def notify_sync(payload: dict) -> None:
+    """Thread-safe wrapper for broadcasting from sync code / Celery tasks."""
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.run_coroutine_threadsafe(broadcast_notification(payload), loop)
+    except Exception:
+        pass
 
 
 # ── notification generators ───────────────────────────────────────────────────
@@ -226,12 +329,40 @@ def _check_access_denied(db: Session) -> None:
                 "high", "/access-control", expires_hours=2)
 
 
+def _check_pob_zone_discrepancy(db: Session) -> None:
+    """Alert when is_onboard=True but current_zone_id=NULL for >4 hours.
+    This catches the transport-departure data gap where a passenger was confirmed
+    OUTBOUND but their biometric zone was never cleared (no gangway reader, or
+    reader has no zone_id configured). Without this check, the POB count is
+    inflated and the next muster expected list will include departed personnel.
+    """
+    bucket = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H')
+    stale = db.execute(text("""
+        SELECT COUNT(*) AS c FROM personnel
+        WHERE is_onboard = TRUE
+          AND is_active = TRUE
+          AND current_zone_id IS NULL
+          AND updated_at < NOW() - INTERVAL '4 hours'
+    """)).fetchone()
+    if stale and stale[0] > 0:
+        _upsert(db, f"pob-zone-discrepancy-{bucket}", "warning",
+                f"POB Discrepancy — {stale[0]} Personnel Onboard With No Zone",
+                (
+                    f"{stale[0]} personnel are marked onboard (is_onboard=TRUE) but have "
+                    f"no zone location on record for over 4 hours. They may have departed "
+                    f"without a biometric exit scan, causing an inflated POB count. "
+                    f"Review transport manifests and access control logs."
+                ),
+                "high", "/pob-status", expires_hours=4)
+
+
 def _generate_notifications(db: Session) -> None:
     """Run all generators, each in an isolated savepoint."""
     _run_check(db, _check_subscription)
     _run_check(db, _check_offline_devices)
     _run_check(db, _check_recent_punches)
     _run_check(db, _check_pob_summary)
+    _run_check(db, _check_pob_zone_discrepancy)
     _run_check(db, _check_mtd_certifications)
     _run_check(db, _check_medical_records)
     _run_check(db, _check_employment_contracts)
@@ -408,3 +539,67 @@ async def delete_notification(
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── SSE streaming endpoint ────────────────────────────────────────────────────
+
+@router.get("/stream")
+async def notification_stream(
+    request: Request,
+    current_user=Depends(get_current_user_sse),
+):
+    """
+    Server-Sent Events stream — push real-time notifications to the browser.
+    Connects immediately and streams events as they are broadcast.
+
+    Clients reconnect automatically via EventSource (browser) or custom hook.
+    """
+    queue: asyncio.Queue = asyncio.Queue(maxsize=50)
+    user_id = current_user.id
+
+    async with _sse_lock:
+        _sse_clients.setdefault(user_id, set()).add(queue)
+
+    async def event_generator():
+        yield f"data: {json.dumps({'type': 'connected', 'ts': datetime.now(timezone.utc).isoformat()})}\n\n"
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    payload = await asyncio.wait_for(queue.get(), timeout=30)
+                    # Strip internal routing key before sending to client
+                    clean = {k: v for k, v in payload.items() if not k.startswith("_")}
+                    yield f"data: {json.dumps(clean)}\n\n"
+                except asyncio.TimeoutError:
+                    yield f": heartbeat\n\n"
+        finally:
+            async with _sse_lock:
+                if user_id in _sse_clients:
+                    _sse_clients[user_id].discard(queue)
+                    if not _sse_clients[user_id]:
+                        del _sse_clients[user_id]
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post("/broadcast")
+async def broadcast_manual(
+    payload: dict,
+    current_user=Depends(get_current_user),
+):
+    """Admin: manually broadcast a notification to all connected clients."""
+    if not getattr(current_user, "is_superuser", False):
+        raise HTTPException(status_code=403, detail="Admin only")
+    payload["ts"] = datetime.now(timezone.utc).isoformat()
+    payload["type"] = payload.get("type", "manual")
+    await broadcast_notification(payload)
+    total_clients = sum(len(qs) for qs in _sse_clients.values())
+    return {"broadcast": True, "clients": total_clients}

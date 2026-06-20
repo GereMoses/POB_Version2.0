@@ -3,7 +3,7 @@ Emergency Management API - POB v2.0
 Complete REST API for emergency operations, lockdown, fire mode, notifications
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status, Query, WebSocket, WebSocketDisconnect, BackgroundTasks, Header
+from fastapi import APIRouter, Depends, HTTPException, status, Query, WebSocket, WebSocketDisconnect, BackgroundTasks, Header, Request
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_, func, text
 from pydantic import BaseModel, Field
@@ -36,6 +36,7 @@ try:
 except Exception:
     async def log_operation(*args, **kwargs): pass
 from app.services.emergency_service import emergency_service
+from app.services.emergency_websocket import emergency_websocket_manager
 
 # Router
 router = APIRouter(prefix="/api/emergency", tags=["emergency"])
@@ -43,28 +44,9 @@ router = APIRouter(prefix="/api/emergency", tags=["emergency"])
 # Configure logging
 logger = logging.getLogger(__name__)
 
-# WebSocket connection manager
-class EmergencyConnectionManager:
-    def __init__(self):
-        self.active_connections: List[WebSocket] = []
-
-    async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.active_connections.append(websocket)
-
-    def disconnect(self, websocket: WebSocket):
-        if websocket in self.active_connections:
-            self.active_connections.remove(websocket)
-
-    async def broadcast(self, message: str):
-        for connection in self.active_connections:
-            try:
-                await connection.send_text(message)
-            except Exception as e:
-                # Remove dead connections
-                self.active_connections.remove(connection)
-
-emergency_manager = EmergencyConnectionManager()
+# Use the shared singleton so that emergency_service.broadcast_emergency_update()
+# and the WS endpoint both write to the same connection list.
+emergency_manager = emergency_websocket_manager
 
 # Pydantic Models
 class LockdownRequest(BaseModel):
@@ -151,13 +133,6 @@ async def emergency_lockdown(
     Execute emergency lockdown
     """
     try:
-        # Validate user permissions (Emergency Admin or Superuser)
-        if not current_user.is_superuser and not hasattr(current_user, 'emergency_admin'):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Insufficient permissions for emergency operations"
-            )
-        
         # Validate reason is provided
         if not request.reason:
             raise HTTPException(
@@ -182,6 +157,8 @@ async def emergency_lockdown(
         
     except HTTPException:
         raise
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:
         logger.error(f"Error executing lockdown: {str(e)}")
         raise HTTPException(
@@ -193,14 +170,26 @@ async def emergency_lockdown(
 
 @router.post("/fire-mode/")
 async def fire_mode_control(
+    raw_request: Request,
     request: FireModeRequest,
     current_user: AuthUser = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
-    Activate or clear fire mode
+    Activate or clear fire mode — requires emergency.manage permission (enforced by RBAC middleware).
+    Defense-in-depth: explicit check here in case middleware is bypassed (tests, internal calls).
     """
     try:
+        user_perms = getattr(raw_request.state, 'user_permissions', set())
+        if (
+            not current_user.is_superuser
+            and "*" not in user_perms
+            and "emergency.manage" not in user_perms
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Insufficient permissions for fire mode activation"
+            )
         result = await emergency_service.activate_fire_mode(
             zone_id=request.zone_id,
             action=request.action,
@@ -702,10 +691,16 @@ async def emergency_trigger_webhook(
     from ..core.config import settings
     webhook_key = getattr(settings, "EMERGENCY_WEBHOOK_KEY", None)
     try:
-        if not api_key or (webhook_key and api_key != webhook_key):
+        # Reject if no key is configured in production — misconfiguration must be explicit
+        if not webhook_key:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Emergency webhook not configured — set EMERGENCY_WEBHOOK_KEY",
+            )
+        if not api_key or api_key != webhook_key:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid API key"
+                detail="Invalid API key",
             )
         
         # Map trigger type to event type
@@ -1001,22 +996,45 @@ async def get_transport_fleet(
 
 @router.websocket("/ws/emergency/")
 async def emergency_websocket(websocket: WebSocket):
+    """WebSocket endpoint for real-time emergency updates — requires valid JWT via ?token= param.
+
+    We call receive_text() with a 30-second timeout so that client disconnects
+    are detected promptly. On timeout we send a keepalive ping to this connection
+    only. Broadcasts (lockdown, fire mode, etc.) come through emergency_manager
+    and reach all connections independently.
     """
-    WebSocket endpoint for real-time emergency updates
-    """
+    from datetime import timezone as _tz
+    token = websocket.query_params.get("token")
+    if not token:
+        await websocket.accept()
+        await websocket.close(code=4001, reason="Missing token")
+        return
+    try:
+        from ..core.security import verify_token
+        verify_token(token, token_type="access")
+    except Exception:
+        await websocket.accept()
+        await websocket.close(code=4001, reason="Invalid token")
+        return
+
     await emergency_manager.connect(websocket)
     try:
         while True:
-            # Keep connection alive
-            await asyncio.sleep(30)
-            await websocket.send_text(json.dumps({"type": "ping"}))
+            try:
+                await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
+            except asyncio.TimeoutError:
+                await emergency_manager.send_to_connection(
+                    websocket,
+                    {"type": "ping", "timestamp": datetime.now(_tz.utc).isoformat()},
+                )
     except WebSocketDisconnect:
+        pass
+    finally:
         emergency_manager.disconnect(websocket)
 
-# Helper function for broadcasting
 async def broadcast_emergency_update(update_data: Dict[str, Any]):
-    """Broadcast emergency update to all connected clients"""
-    await emergency_manager.broadcast(json.dumps(update_data))
+    """Broadcast emergency update to all connected clients."""
+    await emergency_manager.broadcast(update_data)
 
 # ================================
 # ENHANCED EMERGENCY FEATURES

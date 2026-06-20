@@ -22,8 +22,8 @@ class FileUploadService:
     def __init__(self):
         self.upload_dir = "uploads"
         self.personnel_photos_dir = os.path.join(self.upload_dir, "personnel_photos")
-        self.max_file_size = 5 * 1024 * 1024  # 5MB
-        self.allowed_extensions = {'.jpg', '.jpeg', '.png', '.gif'}
+        self.max_file_size = 20 * 1024 * 1024  # 20MB
+        self.allowed_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tiff', '.tif'}
         
         # Create directories if they don't exist
         os.makedirs(self.personnel_photos_dir, exist_ok=True)
@@ -48,19 +48,27 @@ class FileUploadService:
         Raises:
             HTTPException: If file upload fails
         """
-        # Validate file
-        if not file.filename:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No file provided"
-            )
-        
-        # Check file extension
-        file_ext = os.path.splitext(file.filename)[1].lower()
+        # Validate file — derive extension from filename or content-type (for Blob uploads)
+        if not file.filename or file.filename in ('', 'blob', 'file'):
+            # Browser sent a Blob with no real filename; map content-type to extension
+            ct_map = {
+                'image/jpeg': '.jpg', 'image/jpg': '.jpg', 'image/png': '.png',
+                'image/gif': '.gif', 'image/webp': '.webp', 'image/bmp': '.bmp',
+            }
+            ct = (file.content_type or '').lower()
+            file_ext = ct_map.get(ct, '')
+            if not file_ext:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Could not determine file type. Please upload a JPEG, PNG, GIF, or WebP image."
+                )
+        else:
+            file_ext = os.path.splitext(file.filename)[1].lower()
+
         if file_ext not in self.allowed_extensions:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"File type {file_ext} not allowed. Allowed types: {', '.join(self.allowed_extensions)}"
+                detail=f"File type '{file_ext}' is not supported. Please upload a JPEG, PNG, GIF, or WebP image."
             )
         
         # Check file size

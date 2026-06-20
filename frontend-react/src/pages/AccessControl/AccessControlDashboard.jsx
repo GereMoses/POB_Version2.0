@@ -169,8 +169,8 @@ const AccessControlDashboard = () => {
   // ── WebSocket live feed ──
   const connectWs = useCallback(() => {
     const token = localStorage.getItem('token') || sessionStorage.getItem('token') || '';
-    const host = window.location.hostname;
-    const ws = new WebSocket(`ws://${host}:8000/api/access-control/events/ws?token=${token}`);
+    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(`${proto}//${window.location.host}/api/access-control/events/ws?token=${token}`);
     wsRef.current = ws;
     setWsState('connecting');
 
@@ -211,13 +211,13 @@ const AccessControlDashboard = () => {
   });
 
   const emergencyLock = useMutation({
-    mutationFn: () => apiService.post('/api/access-control/emergency/lock-all/'),
+    mutationFn: (reason) => apiService.post('/api/access-control/emergency/lock-all/', { reason }),
     onSuccess: () => { message.success('Emergency lock sent to all doors'); refetch(); },
     onError: e => message.error(e?.message || 'Command failed'),
   });
 
   const emergencyUnlock = useMutation({
-    mutationFn: () => apiService.post('/api/access-control/emergency/unlock-all/'),
+    mutationFn: (reason) => apiService.post('/api/access-control/emergency/unlock-all/', { reason }),
     onSuccess: () => { message.success('Emergency unlock sent to all doors'); refetch(); },
     onError: e => message.error(e?.message || 'Command failed'),
   });
@@ -293,13 +293,29 @@ const AccessControlDashboard = () => {
           <Button
             icon={<LockOutlined />}
             loading={emergencyLock.isPending}
-            onClick={() => modal.confirm({
-              title: 'Emergency Lock All Doors?',
-              icon: <AlertOutlined style={{ color: '#f5222d' }} />,
-              content: 'This will lock all doors immediately.',
-              okType: 'danger', okText: 'Lock All',
-              onOk: () => emergencyLock.mutateAsync(),
-            })}
+            onClick={() => {
+              let reason = '';
+              modal.confirm({
+                title: 'Emergency Lock All Doors?',
+                icon: <AlertOutlined style={{ color: '#f5222d' }} />,
+                content: (
+                  <div>
+                    <p style={{ marginBottom: 8 }}>This will lock all doors immediately. Provide a reason:</p>
+                    <input
+                      autoFocus
+                      placeholder="e.g. Security drill, threat detected…"
+                      style={{ width: '100%', padding: '6px 8px', borderRadius: 6, border: '1px solid #d9d9d9', fontSize: 13 }}
+                      onChange={e => { reason = e.target.value; }}
+                    />
+                  </div>
+                ),
+                okType: 'danger', okText: 'Lock All',
+                onOk: () => {
+                  if (!reason || reason.trim().length < 5) return Promise.reject('Please provide a reason (at least 5 characters)');
+                  return emergencyLock.mutateAsync(reason.trim());
+                },
+              });
+            }}
             danger
             style={{ borderRadius: 8, fontWeight: 600 }}
           >
@@ -308,13 +324,29 @@ const AccessControlDashboard = () => {
           <Button
             icon={<UnlockOutlined />}
             loading={emergencyUnlock.isPending}
-            onClick={() => modal.confirm({
-              title: 'Emergency Unlock All Doors?',
-              icon: <AlertOutlined style={{ color: '#52c41a' }} />,
-              content: 'This will unlock all doors immediately.',
-              okText: 'Unlock All',
-              onOk: () => emergencyUnlock.mutateAsync(),
-            })}
+            onClick={() => {
+              let reason = '';
+              modal.confirm({
+                title: 'Emergency Unlock All Doors?',
+                icon: <AlertOutlined style={{ color: '#52c41a' }} />,
+                content: (
+                  <div>
+                    <p style={{ marginBottom: 8 }}>This will unlock all doors immediately. Provide a reason:</p>
+                    <input
+                      autoFocus
+                      placeholder="e.g. All-clear confirmed, drill complete…"
+                      style={{ width: '100%', padding: '6px 8px', borderRadius: 6, border: '1px solid #d9d9d9', fontSize: 13 }}
+                      onChange={e => { reason = e.target.value; }}
+                    />
+                  </div>
+                ),
+                okText: 'Unlock All',
+                onOk: () => {
+                  if (!reason || reason.trim().length < 5) return Promise.reject('Please provide a reason (at least 5 characters)');
+                  return emergencyUnlock.mutateAsync(reason.trim());
+                },
+              });
+            }}
             style={{ borderRadius: 8, fontWeight: 600, background: 'rgba(82,196,26,0.15)', borderColor: 'rgba(82,196,26,0.4)', color: '#52c41a' }}
           >
             Unlock All

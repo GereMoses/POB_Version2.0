@@ -100,6 +100,8 @@ class TrainingEnrollmentResponse(BaseModel):
     course_category: Optional[str] = None
     is_mandatory: Optional[bool] = None
     valid_period_months: Optional[int] = None
+    department_id:   Optional[int] = None
+    department_name: Optional[str] = None
     # Computed
     cert_status: Optional[str] = None   # valid|expiring|expired|no_expiry
 
@@ -114,7 +116,9 @@ class ComplianceRecord(BaseModel):
     personnel_name: str
     personnel_emp_code: str
     personnel_type: str
-    personnel_company: Optional[str] = None
+    personnel_company:  Optional[str] = None
+    department_id:      Optional[int] = None
+    department_name:    Optional[str] = None
     course_id: int
     course_name: str
     course_code: str

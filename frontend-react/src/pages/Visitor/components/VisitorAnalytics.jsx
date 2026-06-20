@@ -1,500 +1,447 @@
-/**
- * Visitor Analytics Dashboard Component
- * BioTime 9.5 compatible visitor analytics with POB extensions
- * Comprehensive visitor analytics with real-time insights and trends
- */
+import React, { useState } from 'react';
+import {
+  Card, Row, Col, Statistic, Typography, Space, Spin, Select,
+  Progress, Tag, Empty, Button, Divider, List, Avatar,
+} from 'antd';
+import {
+  UserOutlined, TeamOutlined, ClockCircleOutlined, LoginOutlined,
+  WarningOutlined, StopOutlined, CheckCircleOutlined, RiseOutlined,
+  ReloadOutlined, BarChartOutlined, TrophyOutlined,
+} from '@ant-design/icons';
+import {
+  ResponsiveContainer, AreaChart, Area, BarChart, Bar,
+  PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid,
+  Tooltip as ReTooltip, Legend,
+} from 'recharts';
+import { useQuery } from '@tanstack/react-query';
+import dayjs from 'dayjs';
+import visitorAPI from '../../../services/visitorAPI';
 
-import React, { useState, useEffect } from 'react';
-import { 
-  TrendingUp, 
-  TrendingDown, 
-  Users, 
-  Clock, 
-  Calendar, 
-  MapPin, 
-  BarChart3, 
-  PieChart, 
-  Activity,
-  Eye,
-  Shield,
-  AlertTriangle,
-  UserCheck,
-  UserX,
-  Filter,
-  Download,
-  RefreshCw,
-  Building,
-  HardHat
-} from 'lucide-react';
-import { visitorAPI } from '../../../services/visitorAPI';
+const { Text, Title } = Typography;
 
+// ── colour palette (matches POBStatus pattern) ───────────────────────────────
+const PIE_COLORS = ['#1677ff', '#52c41a', '#faad14', '#722ed1', '#13c2c2', '#eb2f96', '#fa8c16'];
+
+const RANGE_OPTIONS = [
+  { label: 'Last 7 days',  value: 7  },
+  { label: 'Last 30 days', value: 30 },
+  { label: 'Last 90 days', value: 90 },
+  { label: 'Last 365 days',value: 365},
+];
+
+// ── small helpers ─────────────────────────────────────────────────────────────
+const kpiColor = (key) => ({
+  total_visitors:          '#1677ff',
+  active_visitors:         '#52c41a',
+  total_visits:            '#722ed1',
+  avg_visit_duration_hours:'#13c2c2',
+  today_checkins:          '#fa8c16',
+  overstay_count:          '#ff4d4f',
+  blacklist_count:         '#cf1322',
+  pre_reg_rate:            '#52c41a',
+}[key] || '#1677ff');
+
+const complianceColor = (pct) => {
+  if (pct >= 90) return '#52c41a';
+  if (pct >= 70) return '#faad14';
+  return '#ff4d4f';
+};
+
+// ── custom tooltip for recharts ───────────────────────────────────────────────
+const ChartTooltip = ({ active, payload, label }) => {
+  if (!active || !payload?.length) return null;
+  return (
+    <div style={{ background: '#fff', border: '1px solid #f0f0f0', borderRadius: 6, padding: '8px 12px' }}>
+      <div style={{ marginBottom: 4 }}><Text strong>{label}</Text></div>
+      {payload.map((p) => (
+        <div key={p.dataKey}>
+          <Text style={{ color: p.color }}>{p.name ?? p.dataKey}: </Text>
+          <Text strong>{p.value}</Text>
+        </div>
+      ))}
+    </div>
+  );
+};
+
+// ── KPI card ─────────────────────────────────────────────────────────────────
+const KpiCard = ({ title, value, suffix, icon, colorKey }) => (
+  <Card size="small" style={{ height: '100%' }}>
+    <Statistic
+      title={title}
+      value={value ?? 0}
+      suffix={suffix}
+      prefix={icon}
+      valueStyle={{ color: kpiColor(colorKey), fontSize: 22 }}
+    />
+  </Card>
+);
+
+// ── Section wrapper ───────────────────────────────────────────────────────────
+const Section = ({ title, children, extra }) => (
+  <Card
+    title={<Text strong style={{ fontSize: 14 }}>{title}</Text>}
+    extra={extra}
+    size="small"
+    style={{ height: '100%' }}
+    bodyStyle={{ padding: '12px 16px' }}
+  >
+    {children}
+  </Card>
+);
+
+// ── Main component ────────────────────────────────────────────────────────────
 const VisitorAnalytics = () => {
-  const [analyticsData, setAnalyticsData] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [dateRange, setDateRange] = useState({
-    startDate: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0], // 30 days ago
-    endDate: new Date().toISOString().split('T')[0]
+  const [days, setDays] = useState(30);
+
+  const { data, isLoading, refetch, isFetching } = useQuery({
+    queryKey: ['visitor-analytics', days],
+    queryFn:  () => visitorAPI.getAnalytics(days),
+    staleTime: 120000,
+    keepPreviousData: true,
   });
-  const [selectedMetric, setSelectedMetric] = useState('overview');
-  const [timeFilter, setTimeFilter] = useState('30d');
 
-  // Load analytics data
-  useEffect(() => {
-    loadAnalyticsData();
-  }, [dateRange, selectedMetric, timeFilter]);
-
-  const loadAnalyticsData = async () => {
-    try {
-      setLoading(true);
-      // TODO: Implement actual analytics API
-      // const response = await visitorAPI.getAnalytics({
-      //   start_date: dateRange.startDate,
-      //   end_date: dateRange.endDate,
-      //   metric: selectedMetric,
-      //   time_filter: timeFilter
-      // });
-      
-      // Mock data for demonstration
-      const mockData = {
-        overview: {
-          total_visitors: 1247,
-          active_visitors: 45,
-          total_visits: 1892,
-          average_visit_duration: 2.3,
-          compliance_rate: 94.2,
-          blacklist_count: 12,
-          overstay_rate: 3.1,
-          satisfaction_score: 4.6
-        },
-        trends: {
-          daily_visits: [
-            { date: '2024-01-01', count: 45 },
-            { date: '2024-01-02', count: 52 },
-            { date: '2024-01-03', count: 38 },
-            { date: '2024-01-04', count: 61 },
-            { date: '2024-01-05', count: 47 },
-            { date: '2024-01-06', count: 55 },
-            { date: '2024-01-07', count: 49 }
-          ],
-          visitor_types: [
-            { type: 'Contractor', count: 623, percentage: 50.0 },
-            { type: 'Vendor', count: 311, percentage: 25.0 },
-            { type: 'Interview', count: 187, percentage: 15.0 },
-            { type: 'VIP', count: 87, percentage: 7.0 },
-            { type: 'Delivery', count: 39, percentage: 3.0 }
-          ],
-          peak_hours: [
-            { hour: '08:00', count: 85 },
-            { hour: '09:00', count: 124 },
-            { hour: '10:00', count: 98 },
-            { hour: '11:00', count: 76 },
-            { hour: '12:00', count: 45 },
-            { hour: '13:00', count: 67 },
-            { hour: '14:00', count: 89 },
-            { hour: '15:00', count: 72 },
-            { hour: '16:00', count: 58 },
-            { hour: '17:00', count: 41 }
-          ],
-          monthly_trend: [
-            { month: 'Jan', visitors: 1247, visits: 1892 },
-            { month: 'Feb', visitors: 1156, visits: 1723 },
-            { month: 'Mar', visitors: 1324, visits: 1987 },
-            { month: 'Apr', visitors: 1089, visits: 1634 },
-            { month: 'May', visitors: 1456, visits: 2184 },
-            { month: 'Jun', visitors: 1234, visits: 1851 }
-          ]
-        },
-        compliance: {
-          pre_registration_rate: 78.5,
-          approval_rate: 92.3,
-          check_in_rate: 95.1,
-          safety_induction_rate: 67.8,
-          mustering_compliance: 94.2,
-          access_control_compliance: 96.5
-        },
-        security: {
-          blacklist_hits: 23,
-          overstay_incidents: 45,
-          security_alerts: 12,
-          access_violations: 8,
-          incident_trend: 'decreasing'
-        },
-        performance: {
-          average_check_in_time: 3.2, // minutes
-          average_check_out_time: 2.1,
-          badge_print_success_rate: 98.7,
-          device_sync_success_rate: 99.2,
-          qr_scan_success_rate: 94.5
-        }
-      };
-      
-      setAnalyticsData(mockData);
-    } catch (error) {
-      console.error('Failed to load analytics data:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleExport = async (format) => {
-    try {
-      // TODO: Implement analytics export
-      console.log(`Exporting analytics as ${format}`);
-    } catch (error) {
-      console.error('Export failed:', error);
-    }
-  };
-
-  const getTrendIcon = (current, previous) => {
-    if (current > previous) return <TrendingUp className="w-4 h-4 text-green-500" />;
-    if (current < previous) return <TrendingDown className="w-4 h-4 text-red-500" />;
-    return <div className="w-4 h-4 bg-gray-300 rounded-full" />;
-  };
-
-  const getComplianceColor = (rate) => {
-    if (rate >= 95) return 'text-green-600';
-    if (rate >= 85) return 'text-yellow-600';
-    if (rate >= 70) return 'text-orange-600';
-    return 'text-red-600';
-  };
-
-  const OverviewCards = () => {
-    if (!analyticsData?.overview) return null;
-
-    const { overview } = analyticsData;
-
-    return (
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-6">
-        <div className="bg-white rounded-lg shadow p-6">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm font-medium text-gray-600">Total Visitors</p>
-              <p className="text-2xl font-bold text-gray-900">{overview.total_visitors.toLocaleString()}</p>
-              <div className="flex items-center mt-2">
-                <TrendingUp className="w-4 h-4 text-green-500 mr-1" />
-                <span className="text-sm text-green-600">+12.5% from last month</span>
-              </div>
-            </div>
-            <div className="p-3 rounded-full bg-blue-100">
-              <Users className="w-6 h-6 text-blue-600" />
-            </div>
-          </div>
-        </div>
-
-        <div className="bg-white rounded-lg shadow p-6">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm font-medium text-gray-600">Active Visitors</p>
-              <p className="text-2xl font-bold text-orange-600">{overview.active_visitors}</p>
-              <div className="flex items-center mt-2">
-                <Activity className="w-4 h-4 text-orange-500 mr-1" />
-                <span className="text-sm text-gray-600">Currently on-site</span>
-              </div>
-            </div>
-            <div className="p-3 rounded-full bg-orange-100">
-              <Eye className="w-6 h-6 text-orange-600" />
-            </div>
-          </div>
-        </div>
-
-        <div className="bg-white rounded-lg shadow p-6">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm font-medium text-gray-600">Compliance Rate</p>
-              <p className={`text-2xl font-bold ${getComplianceColor(overview.compliance_rate)}`}>
-                {overview.compliance_rate}%
-              </p>
-              <div className="flex items-center mt-2">
-                <Shield className="w-4 h-4 text-green-500 mr-1" />
-                <span className="text-sm text-green-600">Good standing</span>
-              </div>
-            </div>
-            <div className="p-3 rounded-full bg-green-100">
-              <Shield className="w-6 h-6 text-green-600" />
-            </div>
-          </div>
-        </div>
-
-        <div className="bg-white rounded-lg shadow p-6">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm font-medium text-gray-600">Avg Visit Duration</p>
-              <p className="text-2xl font-bold text-gray-900">{overview.average_visit_duration}h</p>
-              <div className="flex items-center mt-2">
-                <Clock className="w-4 h-4 text-blue-500 mr-1" />
-                <span className="text-sm text-blue-600">Within limits</span>
-              </div>
-            </div>
-            <div className="p-3 rounded-full bg-blue-100">
-              <Clock className="w-6 h-6 text-blue-600" />
-            </div>
-          </div>
-        </div>
-      </div>
-    );
-  };
-
-  const VisitorTypesChart = () => {
-    if (!analyticsData?.trends?.visitor_types) return null;
-
-    return (
-      <div className="bg-white rounded-lg shadow p-6">
-        <h3 className="text-lg font-semibold text-gray-900 mb-4">Visitor Types Distribution</h3>
-        <div className="space-y-3">
-          {analyticsData.trends.visitor_types.map((type, index) => (
-            <div key={index} className="flex items-center justify-between">
-              <div className="flex items-center">
-                <div className={`w-3 h-3 rounded-full mr-3 ${
-                  type.type === 'Contractor' ? 'bg-orange-500' :
-                  type.type === 'Vendor' ? 'bg-blue-500' :
-                  type.type === 'Interview' ? 'bg-green-500' :
-                  type.type === 'VIP' ? 'bg-purple-500' :
-                  'bg-gray-500'
-                }`} />
-                <span className="text-sm font-medium text-gray-900">{type.type}</span>
-              </div>
-              <div className="flex items-center">
-                <span className="text-sm text-gray-600 mr-3">{type.count}</span>
-                <div className="w-24 bg-gray-200 rounded-full h-2">
-                  <div 
-                    className="bg-blue-600 h-2 rounded-full" 
-                    style={{ width: `${type.percentage}%` }}
-                  />
-                </div>
-                <span className="text-sm text-gray-600 ml-2">{type.percentage}%</span>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    );
-  };
-
-  const PeakHoursChart = () => {
-    if (!analyticsData?.trends?.peak_hours) return null;
-
-    const maxCount = Math.max(...analyticsData.trends.peak_hours.map(h => h.count));
-
-    return (
-      <div className="bg-white rounded-lg shadow p-6">
-        <h3 className="text-lg font-semibold text-gray-900 mb-4">Peak Visit Hours</h3>
-        <div className="h-48 flex items-end space-x-1">
-          {analyticsData.trends.peak_hours.map((hour, index) => (
-            <div key={index} className="flex-1 flex flex-col items-center">
-              <div 
-                className="w-full bg-blue-500 rounded-t"
-                style={{ height: `${(hour.count / maxCount) * 100}%` }}
-              />
-              <span className="text-xs text-gray-600 mt-1">{hour.hour}</span>
-            </div>
-          ))}
-        </div>
-      </div>
-    );
-  };
-
-  const ComplianceMetrics = () => {
-    if (!analyticsData?.compliance) return null;
-
-    const { compliance } = analyticsData;
-
-    return (
-      <div className="bg-white rounded-lg shadow p-6">
-        <h3 className="text-lg font-semibold text-gray-900 mb-4">Compliance Metrics</h3>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <span className="text-sm text-gray-600">Pre-Registration Rate</span>
-              <span className={`text-sm font-medium ${getComplianceColor(compliance.pre_registration_rate)}`}>
-                {compliance.pre_registration_rate}%
-              </span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-sm text-gray-600">Approval Rate</span>
-              <span className={`text-sm font-medium ${getComplianceColor(compliance.approval_rate)}`}>
-                {compliance.approval_rate}%
-              </span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-sm text-gray-600">Check-in Rate</span>
-              <span className={`text-sm font-medium ${getComplianceColor(compliance.check_in_rate)}`}>
-                {compliance.check_in_rate}%
-              </span>
-            </div>
-          </div>
-          <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <span className="text-sm text-gray-600">Safety Induction Rate</span>
-              <span className={`text-sm font-medium ${getComplianceColor(compliance.safety_induction_rate)}`}>
-                {compliance.safety_induction_rate}%
-              </span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-sm text-gray-600">Mustering Compliance</span>
-              <span className={`text-sm font-medium ${getComplianceColor(compliance.mustering_compliance)}`}>
-                {compliance.mustering_compliance}%
-              </span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-sm text-gray-600">Access Control Compliance</span>
-              <span className={`text-sm font-medium ${getComplianceColor(compliance.access_control_compliance)}`}>
-                {compliance.access_control_compliance}%
-              </span>
-            </div>
-          </div>
-        </div>
-      </div>
-    );
-  };
-
-  const SecurityAlerts = () => {
-    if (!analyticsData?.security) return null;
-
-    const { security } = analyticsData;
-
-    return (
-      <div className="bg-white rounded-lg shadow p-6">
-        <h3 className="text-lg font-semibold text-gray-900 mb-4">Security Overview</h3>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-          <div className="text-center">
-            <div className="flex items-center justify-center mb-2">
-              <AlertTriangle className="w-5 h-5 text-red-500 mr-2" />
-              <span className="text-2xl font-bold text-red-600">{security.blacklist_hits}</span>
-            </div>
-            <p className="text-sm text-gray-600">Blacklist Hits</p>
-          </div>
-          <div className="text-center">
-            <div className="flex items-center justify-center mb-2">
-              <Clock className="w-5 h-5 text-orange-500 mr-2" />
-              <span className="text-2xl font-bold text-orange-600">{security.overstay_incidents}</span>
-            </div>
-            <p className="text-sm text-gray-600">Overstay Incidents</p>
-          </div>
-          <div className="text-center">
-            <div className="flex items-center justify-center mb-2">
-              <Shield className="w-5 h-5 text-yellow-500 mr-2" />
-              <span className="text-2xl font-bold text-yellow-600">{security.security_alerts}</span>
-            </div>
-            <p className="text-sm text-gray-600">Security Alerts</p>
-          </div>
-          <div className="text-center">
-            <div className="flex items-center justify-center mb-2">
-              <UserX className="w-5 h-5 text-purple-500 mr-2" />
-              <span className="text-2xl font-bold text-purple-600">{security.access_violations}</span>
-            </div>
-            <p className="text-sm text-gray-600">Access Violations</p>
-          </div>
-        </div>
-        <div className="mt-4 p-3 bg-green-50 rounded-lg">
-          <div className="flex items-center">
-            <TrendingDown className="w-4 h-4 text-green-600 mr-2" />
-            <span className="text-sm text-green-800">
-              Security incidents are decreasing by 15% compared to last month
-            </span>
-          </div>
-        </div>
-      </div>
-    );
-  };
+  const analytics = data?.data ?? null;
+  const ov        = analytics?.overview ?? {};
 
   return (
-    <div className="p-6">
-      {/* Header */}
-      <div className="flex items-center justify-between mb-6">
-        <div>
-          <h2 className="text-xl font-semibold text-gray-900">Visitor Analytics</h2>
-          <p className="text-gray-600 mt-1">Comprehensive visitor insights and trends</p>
-        </div>
-        <div className="flex space-x-3">
-          <button
-            onClick={loadAnalyticsData}
-            className="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 flex items-center"
-          >
-            <RefreshCw className="w-4 h-4 mr-2" />
-            Refresh
-          </button>
-          <button
-            onClick={() => handleExport('pdf')}
-            className="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 flex items-center"
-          >
-            <Download className="w-4 h-4 mr-2" />
-            Export PDF
-          </button>
-        </div>
-      </div>
-
-      {/* Date Range Filter */}
-      <div className="bg-white rounded-lg shadow p-4 mb-6">
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Start Date</label>
-            <input
-              type="date"
-              value={dateRange.startDate}
-              onChange={(e) => setDateRange({...dateRange, startDate: e.target.value})}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+    <div>
+      {/* ── Header row ───────────────────────────────────────────────────── */}
+      <Row justify="space-between" align="middle" style={{ marginBottom: 20 }}>
+        <Col>
+          <Space align="baseline">
+            <BarChartOutlined style={{ fontSize: 18, color: '#1677ff' }} />
+            <Title level={5} style={{ margin: 0 }}>Visitor Analytics</Title>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              {dayjs().subtract(days, 'day').format('DD MMM')} – {dayjs().format('DD MMM YYYY')}
+            </Text>
+          </Space>
+        </Col>
+        <Col>
+          <Space>
+            <Select
+              value={days}
+              onChange={setDays}
+              options={RANGE_OPTIONS}
+              style={{ width: 140 }}
+              size="small"
             />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">End Date</label>
-            <input
-              type="date"
-              value={dateRange.endDate}
-              onChange={(e) => setDateRange({...dateRange, endDate: e.target.value})}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Time Filter</label>
-            <select
-              value={timeFilter}
-              onChange={(e) => setTimeFilter(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+            <Button
+              size="small"
+              icon={<ReloadOutlined />}
+              onClick={refetch}
+              loading={isFetching}
             >
-              <option value="7d">Last 7 Days</option>
-              <option value="30d">Last 30 Days</option>
-              <option value="90d">Last 90 Days</option>
-              <option value="1y">Last Year</option>
-            </select>
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Metric</label>
-            <select
-              value={selectedMetric}
-              onChange={(e) => setSelectedMetric(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              Refresh
+            </Button>
+          </Space>
+        </Col>
+      </Row>
+
+      <Spin spinning={isLoading && !analytics}>
+
+        {/* ── Row 1 — KPI cards ─────────────────────────────────────────── */}
+        <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
+          {[
+            { title: 'Total Visitors',    colorKey: 'total_visitors',          value: ov.total_visitors,          icon: <UserOutlined />,         suffix: '' },
+            { title: 'On Site Now',       colorKey: 'active_visitors',         value: ov.active_visitors,         icon: <LoginOutlined />,        suffix: '' },
+            { title: 'Visits (Period)',   colorKey: 'total_visits',            value: ov.total_visits,            icon: <TeamOutlined />,         suffix: '' },
+            { title: "Today's Check-ins", colorKey: 'today_checkins',          value: ov.today_checkins,          icon: <CheckCircleOutlined />,  suffix: '' },
+            { title: 'Avg Duration',      colorKey: 'avg_visit_duration_hours',value: ov.avg_visit_duration_hours,icon: <ClockCircleOutlined />,  suffix: 'h' },
+            { title: 'Pre-reg Rate',      colorKey: 'pre_reg_rate',            value: ov.pre_reg_rate,            icon: <RiseOutlined />,         suffix: '%' },
+            { title: 'Overstay',          colorKey: 'overstay_count',          value: ov.overstay_count,          icon: <WarningOutlined />,      suffix: '' },
+            { title: 'Blacklisted',       colorKey: 'blacklist_count',         value: ov.blacklist_count,         icon: <StopOutlined />,         suffix: '' },
+          ].map(({ title, colorKey, value, icon, suffix }) => (
+            <Col span={3} key={colorKey}>
+              <KpiCard title={title} value={value} suffix={suffix} icon={icon} colorKey={colorKey} />
+            </Col>
+          ))}
+        </Row>
+
+        {/* ── Row 2 — Daily trend + Visitor type pie ────────────────────── */}
+        <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
+          <Col span={16}>
+            <Section title={`Daily Visit Trend — Last ${days} Days`}>
+              {analytics?.daily_trend?.length ? (
+                <ResponsiveContainer width="100%" height={220}>
+                  <AreaChart data={analytics.daily_trend} margin={{ top: 5, right: 10, left: -20, bottom: 0 }}>
+                    <defs>
+                      <linearGradient id="visitorGrad" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%"  stopColor="#1677ff" stopOpacity={0.25} />
+                        <stop offset="95%" stopColor="#1677ff" stopOpacity={0.02} />
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+                    <XAxis
+                      dataKey="label"
+                      tick={{ fontSize: 11 }}
+                      tickFormatter={(v) => dayjs(v).format('DD MMM')}
+                      interval="preserveStartEnd"
+                    />
+                    <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
+                    <ReTooltip
+                      content={<ChartTooltip />}
+                      labelFormatter={(v) => dayjs(v).format('DD MMM YYYY')}
+                    />
+                    <Area
+                      type="monotone"
+                      dataKey="count"
+                      name="Visits"
+                      stroke="#1677ff"
+                      strokeWidth={2}
+                      fill="url(#visitorGrad)"
+                      dot={false}
+                      activeDot={{ r: 4 }}
+                    />
+                  </AreaChart>
+                </ResponsiveContainer>
+              ) : (
+                <Empty description="No trend data" image={Empty.PRESENTED_IMAGE_SIMPLE} style={{ padding: '40px 0' }} />
+              )}
+            </Section>
+          </Col>
+
+          <Col span={8}>
+            <Section title="Visitor Type Distribution">
+              {analytics?.type_distribution?.length ? (
+                <>
+                  <ResponsiveContainer width="100%" height={140}>
+                    <PieChart>
+                      <Pie
+                        data={analytics.type_distribution}
+                        dataKey="count"
+                        nameKey="type_name"
+                        cx="50%"
+                        cy="50%"
+                        outerRadius={60}
+                        innerRadius={30}
+                      >
+                        {analytics.type_distribution.map((_, i) => (
+                          <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />
+                        ))}
+                      </Pie>
+                      <ReTooltip
+                        content={({ active, payload }) =>
+                          active && payload?.[0] ? (
+                            <div style={{ background: '#fff', border: '1px solid #f0f0f0', borderRadius: 6, padding: '6px 10px' }}>
+                              <Text strong>{payload[0].name}</Text>
+                              <br />
+                              <Text>{payload[0].value} visits ({payload[0].payload.percentage}%)</Text>
+                            </div>
+                          ) : null
+                        }
+                      />
+                    </PieChart>
+                  </ResponsiveContainer>
+                  <Divider style={{ margin: '8px 0' }} />
+                  <div style={{ maxHeight: 80, overflowY: 'auto' }}>
+                    {analytics.type_distribution.map((t, i) => (
+                      <Row key={t.type_name} justify="space-between" align="middle" style={{ marginBottom: 4 }}>
+                        <Col>
+                          <Space size={6}>
+                            <span style={{ width: 10, height: 10, borderRadius: 2, background: PIE_COLORS[i % PIE_COLORS.length], display: 'inline-block' }} />
+                            <Text style={{ fontSize: 12 }}>{t.type_name}</Text>
+                          </Space>
+                        </Col>
+                        <Col>
+                          <Space size={4}>
+                            <Text strong style={{ fontSize: 12 }}>{t.count}</Text>
+                            <Text type="secondary" style={{ fontSize: 11 }}>({t.percentage}%)</Text>
+                          </Space>
+                        </Col>
+                      </Row>
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <Empty description="No type data" image={Empty.PRESENTED_IMAGE_SIMPLE} style={{ padding: '40px 0' }} />
+              )}
+            </Section>
+          </Col>
+        </Row>
+
+        {/* ── Row 3 — Peak hours + Top hosts ───────────────────────────── */}
+        <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
+          <Col span={14}>
+            <Section title="Peak Visit Hours">
+              {analytics?.peak_hours?.length ? (
+                <ResponsiveContainer width="100%" height={200}>
+                  <BarChart data={analytics.peak_hours} margin={{ top: 5, right: 10, left: -20, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" vertical={false} />
+                    <XAxis dataKey="label" tick={{ fontSize: 11 }} />
+                    <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
+                    <ReTooltip content={<ChartTooltip />} />
+                    <Bar dataKey="count" name="Visits" radius={[4, 4, 0, 0]}>
+                      {analytics.peak_hours.map((entry, i) => {
+                        const maxCount = Math.max(...analytics.peak_hours.map(h => h.count));
+                        const intensity = entry.count / (maxCount || 1);
+                        const fill = intensity > 0.7 ? '#1677ff' : intensity > 0.4 ? '#4096ff' : '#91caff';
+                        return <Cell key={i} fill={fill} />;
+                      })}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              ) : (
+                <Empty description="No peak hour data" image={Empty.PRESENTED_IMAGE_SIMPLE} style={{ padding: '40px 0' }} />
+              )}
+            </Section>
+          </Col>
+
+          <Col span={10}>
+            <Section
+              title="Top Hosts by Visitors Received"
+              extra={<Tag icon={<TrophyOutlined />} color="gold">Period Ranking</Tag>}
             >
-              <option value="overview">Overview</option>
-              <option value="trends">Trends</option>
-              <option value="compliance">Compliance</option>
-              <option value="security">Security</option>
-            </select>
-          </div>
-        </div>
-      </div>
+              {analytics?.top_hosts?.length ? (
+                <List
+                  size="small"
+                  dataSource={analytics.top_hosts.slice(0, 8)}
+                  renderItem={(item, index) => {
+                    const maxCount = analytics.top_hosts[0]?.count || 1;
+                    const pct = Math.round((item.count / maxCount) * 100);
+                    const medalColor = ['#FFD700', '#C0C0C0', '#CD7F32'][index] ?? '#1677ff';
+                    return (
+                      <List.Item style={{ padding: '5px 0' }}>
+                        <Row style={{ width: '100%' }} align="middle" gutter={8}>
+                          <Col flex="24px">
+                            <Avatar
+                              size={20}
+                              style={{
+                                background: medalColor,
+                                fontSize: 10,
+                                lineHeight: '20px',
+                              }}
+                            >
+                              {index + 1}
+                            </Avatar>
+                          </Col>
+                          <Col flex="1" style={{ minWidth: 0 }}>
+                            <Text
+                              ellipsis
+                              style={{ fontSize: 12, display: 'block' }}
+                            >
+                              {item.host || '—'}
+                            </Text>
+                            <Progress
+                              percent={pct}
+                              showInfo={false}
+                              size="small"
+                              strokeColor="#1677ff"
+                              style={{ margin: 0 }}
+                            />
+                          </Col>
+                          <Col flex="30px" style={{ textAlign: 'right' }}>
+                            <Text strong style={{ fontSize: 12, color: '#1677ff' }}>{item.count}</Text>
+                          </Col>
+                        </Row>
+                      </List.Item>
+                    );
+                  }}
+                />
+              ) : (
+                <Empty description="No host data" image={Empty.PRESENTED_IMAGE_SIMPLE} style={{ padding: '30px 0' }} />
+              )}
+            </Section>
+          </Col>
+        </Row>
 
-      {loading ? (
-        <div className="text-center py-12 text-gray-500">
-          <RefreshCw className="w-6 h-6 animate-spin mx-auto mb-2" />
-          Loading analytics data...
-        </div>
-      ) : (
-        <>
-          {/* Overview Cards */}
-          <OverviewCards />
+        {/* ── Row 4 — Quick stats summary ──────────────────────────────── */}
+        <Row gutter={[12, 12]}>
+          <Col span={12}>
+            <Section title="Pre-Registration Adoption">
+              <Space direction="vertical" style={{ width: '100%' }} size={12}>
+                <div>
+                  <Row justify="space-between" style={{ marginBottom: 4 }}>
+                    <Text style={{ fontSize: 13 }}>Pre-registered visits</Text>
+                    <Text strong style={{ color: complianceColor(ov.pre_reg_rate ?? 0) }}>
+                      {ov.pre_reg_rate ?? 0}%
+                    </Text>
+                  </Row>
+                  <Progress
+                    percent={ov.pre_reg_rate ?? 0}
+                    showInfo={false}
+                    strokeColor={complianceColor(ov.pre_reg_rate ?? 0)}
+                  />
+                </div>
+                <Row gutter={12}>
+                  <Col span={8}>
+                    <Card size="small" style={{ textAlign: 'center', background: '#f6ffed', border: '1px solid #b7eb8f' }}>
+                      <Text strong style={{ fontSize: 18, color: '#52c41a', display: 'block' }}>{ov.total_visits ?? 0}</Text>
+                      <Text type="secondary" style={{ fontSize: 11 }}>Total Visits</Text>
+                    </Card>
+                  </Col>
+                  <Col span={8}>
+                    <Card size="small" style={{ textAlign: 'center', background: '#e6f4ff', border: '1px solid #91caff' }}>
+                      <Text strong style={{ fontSize: 18, color: '#1677ff', display: 'block' }}>{ov.active_visitors ?? 0}</Text>
+                      <Text type="secondary" style={{ fontSize: 11 }}>On Site Now</Text>
+                    </Card>
+                  </Col>
+                  <Col span={8}>
+                    <Card size="small" style={{ textAlign: 'center', background: '#fff7e6', border: '1px solid #ffd591' }}>
+                      <Text strong style={{ fontSize: 18, color: '#fa8c16', display: 'block' }}>{ov.overstay_count ?? 0}</Text>
+                      <Text type="secondary" style={{ fontSize: 11 }}>Overstay</Text>
+                    </Card>
+                  </Col>
+                </Row>
+              </Space>
+            </Section>
+          </Col>
 
-          {/* Analytics Grid */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
-            <VisitorTypesChart />
-            <PeakHoursChart />
-          </div>
+          <Col span={12}>
+            <Section title="Security & Compliance Summary">
+              <Space direction="vertical" style={{ width: '100%' }} size={10}>
+                {[
+                  {
+                    label: 'Blacklisted visitors blocked',
+                    value: ov.blacklist_count ?? 0,
+                    icon: <StopOutlined />,
+                    color: '#ff4d4f',
+                    suffix: 'profiles',
+                    bg: '#fff2f0',
+                    border: '#ffccc7',
+                  },
+                  {
+                    label: 'Avg. visit duration',
+                    value: ov.avg_visit_duration_hours ?? 0,
+                    icon: <ClockCircleOutlined />,
+                    color: '#13c2c2',
+                    suffix: 'hours',
+                    bg: '#e6fffb',
+                    border: '#87e8de',
+                  },
+                  {
+                    label: "Today's check-ins",
+                    value: ov.today_checkins ?? 0,
+                    icon: <CheckCircleOutlined />,
+                    color: '#52c41a',
+                    suffix: 'visitors',
+                    bg: '#f6ffed',
+                    border: '#b7eb8f',
+                  },
+                ].map(({ label, value, icon, color, suffix, bg, border }) => (
+                  <Row
+                    key={label}
+                    align="middle"
+                    gutter={12}
+                    style={{ background: bg, border: `1px solid ${border}`, borderRadius: 6, padding: '8px 12px' }}
+                  >
+                    <Col flex="28px">
+                      <span style={{ color, fontSize: 18 }}>{icon}</span>
+                    </Col>
+                    <Col flex="1">
+                      <Text style={{ fontSize: 12 }}>{label}</Text>
+                    </Col>
+                    <Col>
+                      <Text strong style={{ color, fontSize: 15 }}>{value}</Text>
+                      <Text type="secondary" style={{ fontSize: 11, marginLeft: 4 }}>{suffix}</Text>
+                    </Col>
+                  </Row>
+                ))}
+              </Space>
+            </Section>
+          </Col>
+        </Row>
 
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            <ComplianceMetrics />
-            <SecurityAlerts />
-          </div>
-        </>
-      )}
+      </Spin>
     </div>
   );
 };

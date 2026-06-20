@@ -35,10 +35,35 @@ import httpx
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
+import asyncio
+
 logger = logging.getLogger(__name__)
+
+# ── Shared httpx client — reused across all calls to avoid per-request TCP overhead ──
+_http_client: Optional[httpx.AsyncClient] = None
+_http_client_lock = asyncio.Lock()
+
+
+async def _get_http_client() -> httpx.AsyncClient:
+    global _http_client
+    if _http_client is None or _http_client.is_closed:
+        async with _http_client_lock:
+            if _http_client is None or _http_client.is_closed:
+                _http_client = httpx.AsyncClient(timeout=30)
+    return _http_client
+
+
+async def close_http_client() -> None:
+    """Close the shared httpx client on app shutdown. Called from main.py lifespan."""
+    global _http_client
+    if _http_client and not _http_client.is_closed:
+        await _http_client.aclose()
+        _http_client = None
+
 
 # ── Token cache (in-process; valid for 1 hour) ────────────────────────────────
 _token_cache: Dict[str, Any] = {}   # keyed by tenant_id
+_token_lock = asyncio.Lock()        # prevent concurrent token refreshes
 _TOKEN_GRACE = 60                   # refresh 60s before expiry
 
 
@@ -59,10 +84,7 @@ def _get_cached_token(cfg: Dict) -> Optional[str]:
 
 
 async def _fetch_token(cfg: Dict) -> Tuple[Optional[str], Optional[str]]:
-    """
-    Obtain OAuth 2.0 access token via client_credentials grant.
-    Returns (token, error_message).
-    """
+    """Obtain OAuth 2.0 access token via client_credentials grant."""
     url = f"https://login.microsoftonline.com/{cfg['tenant_id']}/oauth2/v2.0/token"
     data = {
         "grant_type":    "client_credentials",
@@ -71,21 +93,18 @@ async def _fetch_token(cfg: Dict) -> Tuple[Optional[str], Optional[str]]:
         "scope":         "https://api.businesscentral.dynamics.com/.default",
     }
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.post(url, data=data)
+        client = await _get_http_client()
+        resp = await client.post(url, data=data, timeout=15)
         if resp.status_code != 200:
             err = resp.json().get("error_description") or resp.text[:200]
             return None, f"Token request failed ({resp.status_code}): {err}"
         body   = resp.json()
         token  = body["access_token"]
         expiry = time.time() + body.get("expires_in", 3600)
-        _token_cache[_token_cache_key(cfg)] = {
-            "access_token": token,
-            "expires_at":   expiry,
-        }
+        _token_cache[_token_cache_key(cfg)] = {"access_token": token, "expires_at": expiry}
         return token, None
     except httpx.ConnectError:
-        return None, f"Cannot reach login.microsoftonline.com — check internet/firewall"
+        return None, "Cannot reach login.microsoftonline.com — check internet/firewall"
     except Exception as e:
         return None, str(e)
 
@@ -93,7 +112,11 @@ async def _fetch_token(cfg: Dict) -> Tuple[Optional[str], Optional[str]]:
 async def _get_token(cfg: Dict) -> Tuple[Optional[str], Optional[str]]:
     if _token_is_valid(cfg):
         return _get_cached_token(cfg), None
-    return await _fetch_token(cfg)
+    # Serialize token refresh to avoid concurrent duplicate requests
+    async with _token_lock:
+        if _token_is_valid(cfg):  # re-check under lock
+            return _get_cached_token(cfg), None
+        return await _fetch_token(cfg)
 
 
 def _bc_base(cfg: Dict) -> str:
@@ -106,7 +129,44 @@ def _bc_base(cfg: Dict) -> str:
 
 # ── Config helpers ────────────────────────────────────────────────────────────
 
+def _ensure_bc_tables(db: Session) -> None:
+    """Create BC integration tables if they don't exist (idempotent)."""
+    try:
+        db.execute(text("""
+            CREATE TABLE IF NOT EXISTS bc_integration_config (
+                id             SERIAL PRIMARY KEY,
+                tenant_id      VARCHAR(200),
+                client_id      VARCHAR(200),
+                client_secret  VARCHAR(500),
+                environment    VARCHAR(50)  DEFAULT 'Production',
+                company_id     VARCHAR(100),
+                company_name   VARCHAR(200),
+                is_enabled     BOOLEAN      DEFAULT FALSE,
+                sync_time      VARCHAR(10)  DEFAULT '01:00',
+                updated_at     TIMESTAMPTZ  DEFAULT NOW()
+            )
+        """))
+        db.execute(text("""
+            CREATE TABLE IF NOT EXISTS bc_sync_log (
+                id              SERIAL PRIMARY KEY,
+                sync_date       DATE,
+                triggered_by    VARCHAR(50),
+                status          VARCHAR(20),
+                records_built   INTEGER DEFAULT 0,
+                records_sent    INTEGER DEFAULT 0,
+                records_failed  INTEGER DEFAULT 0,
+                message         VARCHAR(500),
+                created_at      TIMESTAMPTZ DEFAULT NOW()
+            )
+        """))
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        logger.warning(f"Could not ensure BC tables: {e}")
+
+
 def get_bc_config(db: Session) -> Optional[Dict[str, Any]]:
+    _ensure_bc_tables(db)
     try:
         row = db.execute(text(
             "SELECT tenant_id, client_id, client_secret, environment, "
@@ -115,10 +175,11 @@ def get_bc_config(db: Session) -> Optional[Dict[str, Any]]:
         )).fetchone()
         if not row or not row[0] or not row[1] or not row[2]:
             return None
+        from ..core.crypto import decrypt_secret
         return {
             "tenant_id":     row[0],
             "client_id":     row[1],
-            "client_secret": row[2],
+            "client_secret": decrypt_secret(row[2]),  # transparently handles legacy plaintext
             "environment":   row[3] or "Production",
             "company_id":    row[4],
             "company_name":  row[5],
@@ -126,7 +187,7 @@ def get_bc_config(db: Session) -> Optional[Dict[str, Any]]:
             "sync_time":     row[7] or "01:00",
         }
     except Exception as e:
-        logger.debug(f"bc_integration_config not found: {e}")
+        logger.warning(f"bc_integration_config read error: {e}")
         return None
 
 
@@ -139,8 +200,8 @@ async def fetch_companies(cfg: Dict) -> Tuple[List[Dict], Optional[str]]:
         return [], err
     url = f"{_bc_base(cfg)}/companies"
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(url, headers={"Authorization": f"Bearer {token}"})
+        client = await _get_http_client()
+        resp = await client.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=15)
         if resp.status_code == 200:
             companies = [
                 {"id": c["id"], "name": c["displayName"]}
@@ -156,38 +217,33 @@ async def fetch_companies(cfg: Dict) -> Tuple[List[Dict], Optional[str]]:
 
 def _build_time_entries(db: Session, sync_date: date) -> List[Dict]:
     """
-    Build time registration entries for sync_date.
-    One entry per employee = first check-in → last check-out → total hours.
-    """
-    rows = db.execute(text("""
-        SELECT emp_code, punch_time, punch_state
-        FROM iclock_transaction
-        WHERE punch_time::date = :d
-        ORDER BY emp_code, punch_time
-    """), {"d": sync_date}).fetchall()
+    Build BC time-registration entries for sync_date — one per employee.
 
-    by_emp: Dict[str, List] = {}
-    for r in rows:
-        by_emp.setdefault(r[0], []).append((r[1], r[2]))
+    Source of truth is the COMPUTED attendance in att_report (via the shared
+    attendance_export.build_daily_attendance), NOT raw iclock_transaction. This fixes
+    the same defects as the SeamlessHR exporter: access-control door swipes no longer
+    inflate hours, night/cross-midnight shifts land on the correct business day, and
+    `quantity` is the shift/break-aware computed work time (not a raw in→out span).
+
+    Each entry carries an idempotency key so a re-run cannot double-post to finance.
+    """
+    from .attendance_export import build_daily_attendance
 
     entries = []
-    for emp_code, punches in by_emp.items():
-        check_ins  = [p[0] for p in punches if p[1] == 0]
-        check_outs = [p[0] for p in punches if p[1] == 1]
-        if not check_ins:
+    for c in build_daily_attendance(db, sync_date):
+        # Authoritative computed work time → hours (include overtime in the total).
+        total_minutes = c["work_minutes"] + c["overtime_minutes"]
+        if total_minutes <= 0:
             continue
-        clock_in   = min(check_ins)
-        clock_out  = max(check_outs) if check_outs else None
-        hours      = round((clock_out - clock_in).total_seconds() / 3600, 2) if clock_out else None
-
+        hours = round(total_minutes / 60, 2)
         entries.append({
-            "employeeNumber": emp_code,
-            "date":           str(sync_date),
-            "quantity":       hours if hours is not None else 0,
-            "status":         "Open",
-            # Internal fields used for logging — not sent to BC
-            "_clock_in":      clock_in.strftime("%H:%M:%S"),
-            "_clock_out":     clock_out.strftime("%H:%M:%S") if clock_out else None,
+            "employeeNumber":  c["emp_code"],
+            "date":            str(c["att_date"]),
+            "quantity":        hours,
+            "status":          "Open",
+            "idempotencyKey":  c["idempotency_key"],
+            "_clock_in":       c["check_in"].isoformat() if c["check_in"] else None,
+            "_clock_out":      c["check_out"].isoformat() if c["check_out"] else None,
         })
     return entries
 
@@ -250,23 +306,23 @@ async def push_attendance(
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
     sent = failed = 0
-    async with httpx.AsyncClient(timeout=30) as client:
-        for entry in entries:
-            # Strip internal fields before sending
-            payload = {k: v for k, v in entry.items() if not k.startswith("_")}
-            try:
-                resp = await client.post(url, json=payload, headers=headers)
-                if resp.status_code in (200, 201, 204):
-                    sent += 1
-                else:
-                    logger.warning(
-                        f"BC rejected entry for {entry['employeeNumber']}: "
-                        f"HTTP {resp.status_code} — {resp.text[:200]}"
-                    )
-                    failed += 1
-            except httpx.RequestError as e:
-                logger.error(f"BC request error for {entry['employeeNumber']}: {e}")
+    client = await _get_http_client()
+    for entry in entries:
+        # Strip internal fields before sending
+        payload = {k: v for k, v in entry.items() if not k.startswith("_")}
+        try:
+            resp = await client.post(url, json=payload, headers=headers)
+            if resp.status_code in (200, 201, 204):
+                sent += 1
+            else:
+                logger.warning(
+                    "BC rejected entry for %s: HTTP %s — %s",
+                    entry.get("employeeNumber"), resp.status_code, resp.text[:200],
+                )
                 failed += 1
+        except httpx.RequestError as e:
+            logger.error("BC request error for %s: %s", entry.get("employeeNumber"), e)
+            failed += 1
 
     result["records_sent"]   = sent
     result["records_failed"] = failed

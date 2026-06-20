@@ -708,11 +708,38 @@ const Mustering = () => {
   ];
 
   return (
-    <div style={{ padding: '24px' }}>
-      <h1>Mustering Management</h1>
-      
-      {/* Active Events Banner */}
-      {activeEvents.length > 0 && (
+    <div className="mustering-module">
+      <Card
+        title={
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', overflow: 'visible' }}>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 16 }}>Mustering Management</div>
+              <div style={{ fontSize: 12, color: '#64748b', fontWeight: 400, marginTop: 2 }}>
+                Emergency headcount and muster zone management
+              </div>
+            </div>
+            <Space size="middle" style={{ overflow: 'visible' }}>
+              {activeEvents.length > 0 && (
+                <Badge count={activeEvents.length} color="#cf1322">
+                  <BellOutlined style={{ fontSize: 16 }} />
+                </Badge>
+              )}
+              <Button
+                type="primary"
+                danger
+                icon={<PlayCircleOutlined />}
+                size="small"
+                onClick={() => setShowStartEventModal(true)}
+              >
+                Start Muster
+              </Button>
+            </Space>
+          </div>
+        }
+        styles={{ header: { overflow: 'visible' } }}
+      >
+        {/* Active Events Banner */}
+        {activeEvents.length > 0 && (
         <Card 
           style={{ marginBottom: 24, backgroundColor: '#fff2e8', borderColor: '#ffbb96' }}
           title={
@@ -1050,17 +1077,12 @@ const Mustering = () => {
         </Form>
       </Modal>
 
-      <style jsx>{`
-        .row-missing {
-          background-color: #fff1f0;
-        }
-        .row-safe {
-          background-color: #f6ffed;
-        }
-        .row-injured {
-          background-color: #fffbe6;
-        }
+      <style>{`
+        .row-missing td { background-color: #fff1f0 !important; }
+        .row-safe td { background-color: #f6ffed !important; }
+        .row-injured td { background-color: #fffbe6 !important; }
       `}</style>
+      </Card>
     </div>
   );
 };

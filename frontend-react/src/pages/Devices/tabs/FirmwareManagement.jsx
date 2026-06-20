@@ -147,7 +147,7 @@ const FirmwareManagement = () => {
   const fetchDevices = async () => {
     try {
       const response = await deviceAPI.getTerminals({ limit: 1000 });
-      setDevices(response || []);
+      setDevices(Array.isArray(response) ? response : (response?.data || []));
     } catch (error) {
       console.error('Error fetching devices:', error);
     }

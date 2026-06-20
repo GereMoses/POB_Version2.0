@@ -63,7 +63,7 @@ const PPETypesTab = ({ ppeTypes, isLoading, qc }) => {
             }} />
           </Tooltip>
           <Popconfirm title="Delete this PPE type?" okType="danger"
-            onConfirm={() => apiService.delete(`/api/mtd/ppe-types/${r.id}/`).then(() => qc.invalidateQueries(['mtd-ppe-types']))}>
+            onConfirm={() => apiService.delete(`/api/mtd/ppe-types/${r.id}`).then(() => qc.invalidateQueries(['mtd-ppe-types']))}>
             <Tooltip title="Delete"><Button size="small" type="text" danger icon={<DeleteOutlined />} /></Tooltip>
           </Popconfirm>
         </Space>

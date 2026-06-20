@@ -39,6 +39,11 @@ class DeviceRegisterRequest(BaseModel):
         description="'adms' — device pushes events; 'direct' — server polls via ZKLib; 'both' — dual mode",
     )
     auto_poll: bool = Field(True, description="Automatically poll this device for attendance records")
+    skip_connection_test: bool = Field(
+        False,
+        description="Register without verifying ZKLib connectivity — use for ADMS/push-mode devices "
+                    "where port 4370 is blocked but the device will connect inbound via ADMS.",
+    )
     poll_interval_sec: int = Field(300, ge=60, description="Seconds between automatic polls (min 60)")
 
 
@@ -119,32 +124,44 @@ async def register_device(
     A test connection is performed immediately; the endpoint fails if the
     reader cannot be reached.
     """
-    # Test connection first
-    probe = await zkteco_direct.test_connection(
-        body.ip_address, body.port, password=body.device_password
-    )
-    if not probe.get("connected"):
-        raise HTTPException(
-            status_code=502,
-            detail=f"Cannot reach reader at {body.ip_address}:{body.port} — {probe.get('error')}",
+    # Test connection first (skip if explicitly requested — e.g. ADMS-only devices
+    # where port 4370 is blocked but the device will connect inbound via ADMS).
+    probe: dict = {}
+    if body.skip_connection_test or body.connection_mode == "adms":
+        # No ZKLib test — device is ADMS-push only
+        probe = {"connected": False, "serial_number": None}
+    else:
+        probe = await zkteco_direct.test_connection(
+            body.ip_address, body.port, password=body.device_password
         )
+        if not probe.get("connected"):
+            raise HTTPException(
+                status_code=502,
+                detail=f"Cannot reach reader at {body.ip_address}:{body.port} — {probe.get('error')}",
+            )
 
-    sn = probe.get("serial_number", f"IP-{body.ip_address}")
+    sn = probe.get("serial_number") or f"ADMS-{body.ip_address.replace('.', '-')}"
     device_id = f"ZK-{sn}"
 
-    # Upsert into devices table
-    existing = db.query(Device).filter(Device.device_id == device_id).first()
+    # Upsert into devices table — check by device_id first, then by serial_number.
+    # Devices registered via the discovery/scan flow may have no device_id but the
+    # same serial_number, which caused "Record already exists" on re-registration.
+    existing = (
+        db.query(Device).filter(Device.device_id == device_id).first()
+        or db.query(Device).filter(Device.serial_number == sn).first()
+    )
     if existing:
-        existing.ip_address = body.ip_address
-        existing.port = body.port
-        existing.name = body.name
-        existing.zone_id = body.zone_id
+        existing.device_id         = device_id          # ensure device_id is stamped
+        existing.ip_address        = body.ip_address
+        existing.port              = body.port
+        existing.name              = body.name
+        existing.zone_id           = body.zone_id
         existing.location_description = body.location_description
-        existing.status = DeviceStatus.ONLINE
-        existing.last_seen = datetime.utcnow()
-        existing.firmware_version = probe.get("firmware")
-        existing.connection_mode = body.connection_mode
-        existing.auto_poll = body.auto_poll
+        existing.status            = DeviceStatus.ONLINE
+        existing.last_seen         = datetime.utcnow()
+        existing.firmware_version  = probe.get("firmware")
+        existing.connection_mode   = body.connection_mode
+        existing.auto_poll         = body.auto_poll
         existing.poll_interval_sec = body.poll_interval_sec
         db.commit()
         db.refresh(existing)

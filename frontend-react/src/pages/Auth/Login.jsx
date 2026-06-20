@@ -3,7 +3,7 @@ import { Form, Input, Button, App, Checkbox } from 'antd';
 import {
   UserOutlined, LockOutlined, SafetyOutlined, TeamOutlined,
   ApartmentOutlined, AlertOutlined, DashboardOutlined, CheckCircleFilled,
-  EyeInvisibleOutlined, EyeTwoTone, RightOutlined,
+  EyeInvisibleOutlined, EyeTwoTone, RightOutlined, MobileOutlined,
 } from '@ant-design/icons';
 
 /* ─── Feature list shown in the left panel ─────────────── */
@@ -26,9 +26,14 @@ const ORB_DEFS = [
 
 const Login = ({ onLogin }) => {
   const { message } = App.useApp();
-  const [loading, setLoading]   = useState(false);
-  const [focused, setFocused]   = useState(null);
-  const [year]                  = useState(new Date().getFullYear());
+  const [loading, setLoading]       = useState(false);
+  const [focused, setFocused]       = useState(null);
+  const [year]                      = useState(new Date().getFullYear());
+  // MFA step state
+  const [mfaRequired, setMfaRequired] = useState(false);
+  const [mfaPendingToken, setMfaPendingToken] = useState(null);
+  const [mfaLoading, setMfaLoading] = useState(false);
+  const [mfaForm] = Form.useForm();
 
   const handleSubmit = async (values) => {
     setLoading(true);
@@ -37,7 +42,7 @@ const Login = ({ onLogin }) => {
       formData.append('username', values.username);
       formData.append('password', values.password);
 
-      const response = await fetch('/api/v1/auth/login', {
+      const response = await fetch('/api/v1/auth/production-login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: formData.toString(),
@@ -49,9 +54,18 @@ const Login = ({ onLogin }) => {
       }
 
       const data = await response.json();
-      localStorage.setItem('authToken', data.access_token);
+
+      // If backend requires MFA, show the TOTP step instead of logging in
+      if (data.mfa_required) {
+        setMfaPendingToken(data.access_token);
+        setMfaRequired(true);
+        message.info('Enter the code from your authenticator app to continue.');
+        return;
+      }
+
       localStorage.setItem('token', data.access_token);
-      localStorage.setItem('access_token', data.access_token);
+      localStorage.removeItem('authToken');
+      localStorage.removeItem('access_token');
       localStorage.setItem('user_info', JSON.stringify(data.user));
       onLogin(data.user, data.access_token);
       message.success('Welcome back — access granted');
@@ -59,6 +73,46 @@ const Login = ({ onLogin }) => {
       message.error(error.message || 'Login failed. Please check your credentials.');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleMfaSubmit = async (values) => {
+    setMfaLoading(true);
+    try {
+      const response = await fetch('/api/v1/mfa/verify', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${mfaPendingToken}`,
+        },
+        body: JSON.stringify({ code: values.totp_code }),
+      });
+
+      if (!response.ok) {
+        const err = await response.json();
+        throw new Error(err.detail || 'MFA verification failed');
+      }
+
+      const data = await response.json();
+      // Fetch full user profile with the real token
+      const meRes = await fetch('/api/v1/auth/me', {
+        headers: { Authorization: `Bearer ${data.access_token}` },
+      });
+      if (!meRes.ok) {
+        throw new Error('Failed to load your profile after MFA. Please try again.');
+      }
+      const userData = await meRes.json();
+
+      localStorage.setItem('token', data.access_token);
+      localStorage.removeItem('authToken');
+      localStorage.removeItem('access_token');
+      localStorage.setItem('user_info', JSON.stringify(userData));
+      onLogin(userData, data.access_token);
+      message.success('Welcome back — access granted');
+    } catch (error) {
+      message.error(error.message || 'Invalid code. Try again.');
+    } finally {
+      setMfaLoading(false);
     }
   };
 
@@ -295,7 +349,7 @@ const Login = ({ onLogin }) => {
               marginBottom: 18,
             }}>
               <img
-                src="/logo/image.png"
+                src="/logo/apex-pob.png"
                 alt="Marconi"
                 style={{
                   height: 72, width: 'auto',
@@ -315,11 +369,58 @@ const Login = ({ onLogin }) => {
               Welcome back
             </div>
             <div style={{ color: '#94a3b8', fontSize: 13, marginTop: 6 }}>
-              Sign in to your POB System account
+              Sign in to your Apex POB account
             </div>
           </div>
 
+          {/* ── MFA Step ── */}
+          {mfaRequired && (
+            <div style={{ marginBottom: 8 }}>
+              <div style={{ textAlign: 'center', marginBottom: 20 }}>
+                <MobileOutlined style={{ fontSize: 32, color: '#4f8ef7', marginBottom: 8 }} />
+                <div style={{ fontWeight: 700, fontSize: 16, color: '#0f172a' }}>Two-Factor Authentication</div>
+                <div style={{ color: '#94a3b8', fontSize: 13, marginTop: 4 }}>
+                  Enter the 6-digit code from your authenticator app
+                </div>
+              </div>
+              <Form form={mfaForm} onFinish={handleMfaSubmit} layout="vertical" requiredMark={false}>
+                <Form.Item
+                  name="totp_code"
+                  rules={[
+                    { required: true, message: 'Code is required' },
+                    { len: 6, message: 'Code must be 6 digits' },
+                    { pattern: /^\d+$/, message: 'Digits only' },
+                  ]}
+                  style={{ marginBottom: 16 }}
+                >
+                  <Input
+                    prefix={<SafetyOutlined style={{ color: '#4f8ef7' }} />}
+                    placeholder="000000"
+                    maxLength={6}
+                    size="large"
+                    style={{ textAlign: 'center', letterSpacing: 8, fontSize: 20, borderRadius: 10, height: 52 }}
+                    autoFocus
+                  />
+                </Form.Item>
+                <Form.Item style={{ marginBottom: 12 }}>
+                  <Button
+                    type="primary" htmlType="submit" loading={mfaLoading} block
+                    style={{ height: 50, borderRadius: 12, background: 'linear-gradient(135deg,#4f8ef7,#1d5ed8)', border: 'none', fontWeight: 700, fontSize: 15 }}
+                  >
+                    {mfaLoading ? 'Verifying…' : 'Verify Code'}
+                  </Button>
+                </Form.Item>
+                <div style={{ textAlign: 'center' }}>
+                  <Button type="link" size="small" onClick={() => { setMfaRequired(false); setMfaPendingToken(null); }}>
+                    ← Back to login
+                  </Button>
+                </div>
+              </Form>
+            </div>
+          )}
+
           {/* Form */}
+          {!mfaRequired && (
           <Form name="login" onFinish={handleSubmit} layout="vertical" requiredMark={false}>
 
             <Form.Item
@@ -402,6 +503,7 @@ const Login = ({ onLogin }) => {
               </Button>
             </Form.Item>
           </Form>
+          )}
 
           {/* Trust indicators */}
           <div style={{
@@ -435,7 +537,7 @@ const Login = ({ onLogin }) => {
             >
               mtxtechpro.ng
             </a>
-            <span style={{ color: '#cbd5e1' }}> · POB Management System v2.0</span>
+            <span style={{ color: '#cbd5e1' }}> · Apex POB v2.0 · Marconi.ng EPC Limited</span>
           </div>
         </div>
       </div>

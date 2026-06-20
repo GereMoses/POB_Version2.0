@@ -6,7 +6,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { websocketService } from '../services/websocketService';
 
-const _defaultWsBase = () => `ws://${window.location.hostname}:8000`;
+const _defaultWsBase = () =>
+  `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}`;
 
 export const useWebSocket = (url = _defaultWsBase(), options = {}) => {
   const [connectionStatus, setConnectionStatus] = useState('disconnected');

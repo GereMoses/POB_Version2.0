@@ -790,12 +790,12 @@ const ShiftsTab = () => {
           <Row gutter={12}>
             <Col span={8}>
               <Form.Item name="working_hours" label="Work Hours" initialValue={8}>
-                <InputNumber min={1} max={24} addonAfter="h" style={{ width: '100%' }} size="middle" />
+                <Space.Compact style={{ width: '100%' }}><InputNumber min={1} max={24} size="middle" style={{ flex: 1 }} /><Input readOnly value="h" style={{ width: 36, textAlign: 'center' }} size="middle" /></Space.Compact>
               </Form.Item>
             </Col>
             <Col span={8}>
               <Form.Item name="break_duration" label="Break" initialValue={0}>
-                <InputNumber min={0} max={120} addonAfter="min" style={{ width: '100%' }} size="middle" />
+                <Space.Compact style={{ width: '100%' }}><InputNumber min={0} max={120} size="middle" style={{ flex: 1 }} /><Input readOnly value="min" style={{ width: 44, textAlign: 'center' }} size="middle" /></Space.Compact>
               </Form.Item>
             </Col>
             <Col span={8}>
@@ -882,25 +882,25 @@ const ShiftsTab = () => {
             <Col span={12}>
               <Form.Item name="grace_period_minutes" label="Grace Period" initialValue={15}
                 tooltip="Minutes after start before marking late">
-                <InputNumber min={0} max={60} addonAfter="min" style={{ width: '100%' }} size="middle" />
+                <Space.Compact style={{ width: '100%' }}><InputNumber min={0} max={60} size="middle" style={{ flex: 1 }} /><Input readOnly value="min" style={{ width: 44, textAlign: 'center' }} size="middle" /></Space.Compact>
               </Form.Item>
             </Col>
             <Col span={12}>
               <Form.Item name="max_late_minutes" label="Max Late" initialValue={60}>
-                <InputNumber min={0} max={180} addonAfter="min" style={{ width: '100%' }} size="middle" />
+                <Space.Compact style={{ width: '100%' }}><InputNumber min={0} max={180} size="middle" style={{ flex: 1 }} /><Input readOnly value="min" style={{ width: 44, textAlign: 'center' }} size="middle" /></Space.Compact>
               </Form.Item>
             </Col>
           </Row>
           <Row gutter={12}>
             <Col span={12}>
               <Form.Item name="max_early_departure_minutes" label="Max Early Exit" initialValue={30}>
-                <InputNumber min={0} max={120} addonAfter="min" style={{ width: '100%' }} size="middle" />
+                <Space.Compact style={{ width: '100%' }}><InputNumber min={0} max={120} size="middle" style={{ flex: 1 }} /><Input readOnly value="min" style={{ width: 44, textAlign: 'center' }} size="middle" /></Space.Compact>
               </Form.Item>
             </Col>
             <Col span={12}>
               <Form.Item name="overtime_threshold_minutes" label="OT After" initialValue={30}
                 tooltip="Minutes past end time before counting as overtime">
-                <InputNumber min={0} max={120} addonAfter="min" style={{ width: '100%' }} size="middle" />
+                <Space.Compact style={{ width: '100%' }}><InputNumber min={0} max={120} size="middle" style={{ flex: 1 }} /><Input readOnly value="min" style={{ width: 44, textAlign: 'center' }} size="middle" /></Space.Compact>
               </Form.Item>
             </Col>
           </Row>

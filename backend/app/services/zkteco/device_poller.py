@@ -75,9 +75,21 @@ def _resolve_emp_code(db: Session, user_id: str) -> str:
 def _save_records(db: Session, device: Device, records: list, sn: str) -> int:
     """
     Insert attendance records into iclock_transaction, skipping duplicates.
+    For ACCESS_ENTRY / ACCESS_EXIT readers also fires zone tracking so that
+    ZKLib-polled devices update zone occupancy exactly like ADMS-push devices.
     Returns count of newly inserted rows.
     """
+    from ...api.adms_protocol import _handle_zone_access
+
+    # Resolve terminal once so we don't query on every record.
+    terminal = db.query(IClockTerminal).filter(IClockTerminal.sn == sn).first()
+    reader_purpose = terminal.reader_purpose if terminal and terminal.reader_purpose else 'ATTENDANCE'
+    is_access_reader = reader_purpose in ('ACCESS_ENTRY', 'ACCESS_EXIT')
+    direction = 'ENTRY' if reader_purpose == 'ACCESS_ENTRY' else 'EXIT'
+
     inserted = 0
+    zone_updates: dict = {}
+
     for rec in records:
         ts_str = rec["timestamp"]               # already ISO string from direct_connection
         ts = datetime.fromisoformat(ts_str)
@@ -87,7 +99,12 @@ def _save_records(db: Session, device: Device, records: list, sn: str) -> int:
         # user_id from ZKLib is the badge_id set on the device (may differ from emp_code)
         raw_id = str(rec["user_id"]) if rec.get("user_id") else str(rec["uid"])
         emp_code = _resolve_emp_code(db, raw_id)
-        punch_state = _PUNCH_MAP.get(rec.get("punch", 0), 0)
+
+        # Access readers get a forced direction; attendance readers use the device punch type
+        if is_access_reader:
+            punch_state = 0 if reader_purpose == 'ACCESS_ENTRY' else 1
+        else:
+            punch_state = _PUNCH_MAP.get(rec.get("punch", 0), 0)
 
         # Dedup: same device + employee + timestamp (to the second)
         exists = db.query(IClockTransaction).filter(
@@ -98,6 +115,20 @@ def _save_records(db: Session, device: Device, records: list, sn: str) -> int:
 
         if exists:
             continue
+
+        # Zone tracking for access-control readers — mirrors handle_attlog behaviour
+        if is_access_reader:
+            try:
+                from ...api.adms_protocol import _ensure_access_control_records
+                _ensure_access_control_records(
+                    sn, getattr(terminal, 'alias', None) or sn,
+                    terminal.zone_id, direction, db,
+                )
+                updates = _handle_zone_access(emp_code, sn, ts, terminal, direction, db)
+                zone_updates.update(updates)
+            except Exception as exc:
+                logger.error("Poller: zone access error %s@%s: %s", emp_code, sn, exc)
+                db.rollback()
 
         db.add(IClockTransaction(
             emp_code=emp_code,
@@ -113,6 +144,15 @@ def _save_records(db: Session, device: Device, records: list, sn: str) -> int:
         db.commit()
         logger.info("Poller: inserted %d new records from %s (%s)", inserted, device.name, device.ip_address)
 
+    # Broadcast zone occupancy changes to WebSocket clients
+    if zone_updates:
+        try:
+            from ...core.websocket import broadcast_zone_update
+            for zone_id, count in zone_updates.items():
+                asyncio.ensure_future(broadcast_zone_update(zone_id, count))
+        except Exception as exc:
+            logger.warning("Poller: zone broadcast error: %s", exc)
+
     return inserted
 
 
@@ -124,23 +164,36 @@ async def poll_device(device: Device, db: Session) -> dict:
     ip = device.ip_address
     port = device.port or 4370
     sn = device.serial_number or f"IP-{ip}"
-    # ZKLib returns naive datetimes (device local time); strip tzinfo from the
-    # DB timestamp so the comparison inside get_attendance doesn't crash.
+    # ZKLib returns naive device-local datetimes.  Always pass `since` as a
+    # naive datetime so the comparison inside get_attendance is consistent.
+    # DB may store TIMESTAMPTZ (aware) or naive; normalise to naive UTC here.
     since_raw = device.last_attendance_pull
-    since = since_raw.replace(tzinfo=None) if since_raw and since_raw.tzinfo else since_raw
+    if since_raw is None:
+        since = None
+    elif since_raw.tzinfo is not None:
+        since = since_raw.astimezone(timezone.utc).replace(tzinfo=None)
+    else:
+        since = since_raw
 
-    result = await zkteco_direct.get_attendance(
-        ip=ip, port=port, since=since
-    )
+    try:
+        result = await asyncio.wait_for(
+            zkteco_direct.get_attendance(ip=ip, port=port, since=since),
+            timeout=30.0,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("Poller: get_attendance timed out for %s after 30s", ip)
+        device.status = DeviceStatus.OFFLINE
+        db.commit()
+        return {"device_id": device.id, "success": False, "error": "Connection timed out"}
 
     if not result.get("success"):
         logger.warning("Poller: failed to pull from %s — %s", ip, result.get("error"))
         device.status = DeviceStatus.OFFLINE
         db.commit()
-        # Mark the iclock_terminal as offline so the terminal list reflects reality
+        # STATE_OFFLINE = 3  (NOT 0 — 0 is STATE_PENDING / awaiting admin approval)
         term = db.query(IClockTerminal).filter(IClockTerminal.sn == sn).first()
-        if term:
-            term.state = 0  # 0 = offline/inactive
+        if term and term.state not in (0, 2):  # preserve PENDING and REJECTED
+            term.state = 3
             db.commit()
         return {"device_id": device.id, "success": False, "error": result.get("error")}
 
@@ -165,13 +218,17 @@ async def poll_device(device: Device, db: Session) -> dict:
     # Sync device clock immediately after every successful pull so attendance
     # timestamps are accurate without waiting for the hourly time-sync loop.
     try:
-        time_result = await zkteco_direct.sync_time(ip=ip, port=port)
+        time_result = await asyncio.wait_for(
+            zkteco_direct.sync_time(ip=ip, port=port), timeout=15.0,
+        )
         if time_result.get("success"):
             logger.info("Poller: time sync OK for %s — device reported %s",
                         ip, time_result.get("device_reports"))
         else:
             logger.warning("Poller: time sync failed for %s: %s",
                            ip, time_result.get("error"))
+    except asyncio.TimeoutError:
+        logger.warning("Poller: time sync timed out for %s after 15s", ip)
     except Exception as exc:
         logger.warning("Poller: time sync error for %s: %s", ip, exc)
 

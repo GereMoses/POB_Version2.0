@@ -10,6 +10,24 @@ from pydantic import BaseModel, EmailStr, Field
 from app.schemas.base import APIResponse
 
 
+# Lightweight nested schemas for related objects ──────────────────────────────
+class EmployeeBasic(BaseModel):
+    id: int
+    first_name: Optional[str] = None
+    last_name: str
+
+    class Config:
+        from_attributes = True
+
+
+class AreaBasic(BaseModel):
+    id: int
+    area_name: str
+
+    class Config:
+        from_attributes = True
+
+
 # Visitor Type Schemas
 class VisitorTypeBase(BaseModel):
     type_name: str = Field(..., max_length=50)
@@ -153,7 +171,8 @@ class VisitorVisitLogBase(BaseModel):
 
 class VisitorCheckIn(BaseModel):
     pre_reg_id: Optional[int] = None
-    visitor_data: Optional[VisitorCreate] = None  # For walk-in
+    visitor_id: Optional[int] = None       # Existing visitor walk-in
+    visitor_data: Optional[VisitorCreate] = None  # New walk-in visitor
     host_emp_id: Optional[int] = None
     area_id: Optional[int] = None
     device_sn: Optional[str] = None
@@ -179,6 +198,8 @@ class VisitorVisitLog(VisitorVisitLogBase):
     created_time: datetime
     visitor: Optional[Visitor] = None
     pre_registration: Optional[VisitorPreRegistration] = None
+    host_employee: Optional[EmployeeBasic] = None
+    area: Optional[AreaBasic] = None
 
     class Config:
         from_attributes = True
@@ -311,3 +332,54 @@ class VisitorDailyReportResponse(APIResponse):
 
 class VisitorOverstayReportListResponse(APIResponse):
     data: Optional[List[VisitorOverstayReport]] = None
+
+
+# Analytics Schemas
+class VisitorAnalyticsOverview(BaseModel):
+    total_visitors: int
+    active_visitors: int
+    total_visits: int
+    avg_visit_duration_hours: float
+    today_checkins: int
+    overstay_count: int
+    blacklist_count: int
+    pre_reg_rate: float  # % of visits that were pre-registered
+
+
+class VisitorAnalyticsTrend(BaseModel):
+    label: str  # date or hour
+    count: int
+
+
+class VisitorTypeDistribution(BaseModel):
+    type_name: str
+    count: int
+    percentage: float
+
+
+class VisitorAnalyticsData(BaseModel):
+    overview: VisitorAnalyticsOverview
+    daily_trend: List[VisitorAnalyticsTrend]   # last 30 days
+    peak_hours: List[VisitorAnalyticsTrend]     # 00-23 hour buckets
+    type_distribution: List[VisitorTypeDistribution]
+    top_hosts: List[dict]                        # host name + count
+
+
+class VisitorAnalyticsResponse(APIResponse):
+    data: Optional[VisitorAnalyticsData] = None
+
+
+# Visitor Frequency Schema
+class VisitorFrequency(BaseModel):
+    visitor_id: int
+    visitor_code: str
+    full_name: str
+    company: Optional[str] = None
+    phone: Optional[str] = None
+    visit_count: int
+    last_visit: Optional[datetime] = None
+    visitor_type: Optional[str] = None
+
+
+class VisitorFrequencyListResponse(APIResponse):
+    data: Optional[List[VisitorFrequency]] = None

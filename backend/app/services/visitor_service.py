@@ -207,29 +207,30 @@ class VisitorService:
     def check_in_visitor(self, check_in_data: VisitorCheckIn, device_sn: Optional[str] = None,
                         created_by: Optional[int] = None) -> VisitorVisitLog:
         """Check-in visitor"""
-        # Get visitor information
         visitor = None
         pre_reg = None
-        
+
         if check_in_data.pre_reg_id:
             pre_reg = self.db.query(VisitorPreRegistration).filter(
                 VisitorPreRegistration.id == check_in_data.pre_reg_id
             ).first()
             if not pre_reg:
                 raise NotFoundError("Pre-registration not found")
-            
             visitor = pre_reg.visitor
             if not visitor:
                 raise NotFoundError("Visitor not found")
-            
-            # Update pre-registration status
             pre_reg.status = 3  # checked_in
-        
+
+        elif check_in_data.visitor_id:
+            # Returning visitor walk-in — look up existing profile
+            visitor = self.db.query(Visitor).filter(Visitor.id == check_in_data.visitor_id).first()
+            if not visitor:
+                raise NotFoundError("Visitor not found")
+
         elif check_in_data.visitor_data:
-            # Walk-in visitor
             visitor = self.create_visitor(check_in_data.visitor_data)
         else:
-            raise ValidationError("Either pre_reg_id or visitor_data required")
+            raise ValidationError("Either pre_reg_id, visitor_id, or visitor_data required")
         
         # Check blacklist
         if self._is_blacklisted(visitor):
@@ -385,12 +386,15 @@ class VisitorService:
             VisitorVisitLog.check_in_time <= today_end
         ).count()
 
+        overstay_count = self.db.query(VisitorVisitLog).filter(VisitorVisitLog.status == 2).count()
+
         return {
             "total_visitors": total_visitors,
             "on_site": on_site,
             "pending_approval": pending_approval,
             "blacklisted": blacklisted,
             "today_checkins": today_checkins,
+            "overstay_count": overstay_count,
         }
 
     # Blacklist Management
@@ -493,7 +497,8 @@ class VisitorService:
         by_host = {}
         for visit in visits:
             if visit.host_employee:
-                host_name = visit.host_employee.full_name
+                emp = visit.host_employee
+                host_name = f"{(emp.first_name or '').strip()} {(emp.last_name or '').strip()}".strip()
                 by_host[host_name] = by_host.get(host_name, 0) + 1
         
         return {
@@ -526,7 +531,7 @@ class VisitorService:
                 'visitor_id': visit.visitor_id,
                 'visitor_name': visit.visitor.full_name if visit.visitor else 'Unknown',
                 'company': visit.visitor.company if visit.visitor else None,
-                'host_name': visit.host_employee.full_name if visit.host_employee else None,
+                'host_name': (f"{(visit.host_employee.first_name or '').strip()} {(visit.host_employee.last_name or '').strip()}".strip() if visit.host_employee else None),
                 'check_in_time': visit.check_in_time,
                 'hours_overdue': hours_overdue,
                 'contact_info': {
@@ -537,6 +542,213 @@ class VisitorService:
         
         return results
     
+    def force_check_out_by_log_id(self, log_id: int) -> VisitorVisitLog:
+        """Force check-out a visitor by visit log ID"""
+        visit_log = self.db.query(VisitorVisitLog).filter(
+            VisitorVisitLog.id == log_id,
+            VisitorVisitLog.status == 0
+        ).first()
+        if not visit_log:
+            raise NotFoundError(f"Active visit log {log_id} not found")
+
+        visit_log.check_out_time = datetime.utcnow()
+        visit_log.status = 1
+
+        # Update pre-registration status if linked
+        if visit_log.pre_reg_id:
+            pre_reg = self.db.query(VisitorPreRegistration).filter(
+                VisitorPreRegistration.id == visit_log.pre_reg_id
+            ).first()
+            if pre_reg:
+                pre_reg.status = 4  # checked_out
+
+        self.db.commit()
+        self.db.refresh(visit_log)
+        self._remove_visitor_from_device(visit_log.visitor_id)
+        return visit_log
+
+    def get_visitor_frequency(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """Get most frequent visitors by visit count"""
+        from sqlalchemy import desc
+        rows = (
+            self.db.query(
+                Visitor,
+                func.count(VisitorVisitLog.id).label("visit_count"),
+                func.max(VisitorVisitLog.check_in_time).label("last_visit"),
+            )
+            .join(VisitorVisitLog, VisitorVisitLog.visitor_id == Visitor.id)
+            .group_by(Visitor.id)
+            .order_by(desc("visit_count"))
+            .limit(limit)
+            .all()
+        )
+        return [
+            {
+                "visitor_id":   v.id,
+                "visitor_code": v.visitor_code,
+                "full_name":    v.full_name,
+                "company":      v.company,
+                "phone":        v.phone,
+                "visit_count":  cnt,
+                "last_visit":   last,
+                "visitor_type": v.visitor_type.type_name if v.visitor_type else None,
+            }
+            for v, cnt, last in rows
+        ]
+
+    def get_analytics(self, days: int = 30) -> Dict[str, Any]:
+        """Return real aggregated analytics data"""
+        from sqlalchemy import cast, Date as SADate, extract
+        today = date.today()
+        period_start = datetime.combine(today - timedelta(days=days), time.min)
+
+        # Overview
+        total_visitors = self.db.query(Visitor).count()
+        active_visitors = self.db.query(VisitorVisitLog).filter(VisitorVisitLog.status == 0).count()
+        total_visits = self.db.query(VisitorVisitLog).filter(
+            VisitorVisitLog.check_in_time >= period_start
+        ).count()
+        blacklist_count = self.db.query(VisitorBlacklist).filter(VisitorBlacklist.is_active == True).count()
+
+        today_start = datetime.combine(today, time.min)
+        today_end = datetime.combine(today, time.max)
+        today_checkins = self.db.query(VisitorVisitLog).filter(
+            VisitorVisitLog.check_in_time >= today_start,
+            VisitorVisitLog.check_in_time <= today_end
+        ).count()
+
+        overstay_count = self.db.query(VisitorVisitLog).filter(VisitorVisitLog.status == 2).count()
+
+        # Average duration (checked-out visits in period)
+        completed = self.db.query(VisitorVisitLog).filter(
+            VisitorVisitLog.check_in_time >= period_start,
+            VisitorVisitLog.check_out_time != None
+        ).all()
+        avg_hours = 0.0
+        if completed:
+            total_secs = sum(
+                (v.check_out_time - v.check_in_time).total_seconds()
+                for v in completed
+            )
+            avg_hours = round(total_secs / len(completed) / 3600, 2)
+
+        pre_reg_count = self.db.query(VisitorVisitLog).filter(
+            VisitorVisitLog.check_in_time >= period_start,
+            VisitorVisitLog.pre_reg_id != None
+        ).count()
+        pre_reg_rate = round(pre_reg_count / total_visits * 100, 1) if total_visits else 0.0
+
+        # Daily trend – last `days` days
+        daily_rows = (
+            self.db.query(
+                cast(VisitorVisitLog.check_in_time, SADate).label("day"),
+                func.count().label("cnt")
+            )
+            .filter(VisitorVisitLog.check_in_time >= period_start)
+            .group_by("day")
+            .order_by("day")
+            .all()
+        )
+        daily_trend = [{"label": str(r.day), "count": r.cnt} for r in daily_rows]
+
+        # Peak hours (0–23)
+        hour_rows = (
+            self.db.query(
+                extract("hour", VisitorVisitLog.check_in_time).label("hr"),
+                func.count().label("cnt")
+            )
+            .filter(VisitorVisitLog.check_in_time >= period_start)
+            .group_by("hr")
+            .order_by("hr")
+            .all()
+        )
+        peak_hours = [{"label": f"{int(r.hr):02d}:00", "count": r.cnt} for r in hour_rows]
+
+        # Type distribution
+        type_rows = (
+            self.db.query(VisitorType.type_name, func.count(VisitorVisitLog.id).label("cnt"))
+            .join(Visitor, Visitor.visitor_type_id == VisitorType.id)
+            .join(VisitorVisitLog, VisitorVisitLog.visitor_id == Visitor.id)
+            .filter(VisitorVisitLog.check_in_time >= period_start)
+            .group_by(VisitorType.type_name)
+            .order_by(func.count(VisitorVisitLog.id).desc())
+            .all()
+        )
+        type_total = sum(r.cnt for r in type_rows) or 1
+        type_distribution = [
+            {"type_name": r.type_name, "count": r.cnt, "percentage": round(r.cnt / type_total * 100, 1)}
+            for r in type_rows
+        ]
+
+        # Top hosts
+        from app.models.biotime_models import PersonnelEmployee
+        host_rows = (
+            self.db.query(
+                PersonnelEmployee.first_name,
+                PersonnelEmployee.last_name,
+                func.count(VisitorVisitLog.id).label("cnt")
+            )
+            .join(VisitorVisitLog, VisitorVisitLog.host_emp_id == PersonnelEmployee.id)
+            .filter(VisitorVisitLog.check_in_time >= period_start)
+            .group_by(PersonnelEmployee.id, PersonnelEmployee.first_name, PersonnelEmployee.last_name)
+            .order_by(func.count(VisitorVisitLog.id).desc())
+            .limit(10)
+            .all()
+        )
+        top_hosts = [
+            {"host": f"{(r.first_name or '').strip()} {(r.last_name or '').strip()}".strip(), "count": r.cnt}
+            for r in host_rows
+        ]
+
+        return {
+            "overview": {
+                "total_visitors": total_visitors,
+                "active_visitors": active_visitors,
+                "total_visits": total_visits,
+                "avg_visit_duration_hours": avg_hours,
+                "today_checkins": today_checkins,
+                "overstay_count": overstay_count,
+                "blacklist_count": blacklist_count,
+                "pre_reg_rate": pre_reg_rate,
+            },
+            "daily_trend": daily_trend,
+            "peak_hours": peak_hours,
+            "type_distribution": type_distribution,
+            "top_hosts": top_hosts,
+        }
+
+    def get_records_for_export(self, start_date: Optional[date] = None,
+                               end_date: Optional[date] = None,
+                               host_id: Optional[int] = None,
+                               status: Optional[int] = None,
+                               search: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Return visit records flattened for CSV export"""
+        logs = self.get_visit_records(start_date, end_date, host_id, status, search, skip=0, limit=10000)
+        rows = []
+        for log in logs:
+            duration_hours = None
+            if log.check_in_time and log.check_out_time:
+                duration_hours = round(
+                    (log.check_out_time - log.check_in_time).total_seconds() / 3600, 2
+                )
+            status_map = {0: "On Site", 1: "Checked Out", 2: "Overstay"}
+            rows.append({
+                "visitor_code":   log.visitor.visitor_code if log.visitor else "",
+                "full_name":      log.visitor.full_name if log.visitor else "",
+                "company":        log.visitor.company if log.visitor else "",
+                "phone":          log.visitor.phone if log.visitor else "",
+                "visitor_type":   log.visitor.visitor_type.type_name if (log.visitor and log.visitor.visitor_type) else "",
+                "host":           (f"{(log.host_employee.first_name or '').strip()} {(log.host_employee.last_name or '').strip()}".strip() if log.host_employee else ""),
+                "check_in_time":  log.check_in_time.strftime("%Y-%m-%d %H:%M:%S") if log.check_in_time else "",
+                "check_out_time": log.check_out_time.strftime("%Y-%m-%d %H:%M:%S") if log.check_out_time else "",
+                "duration_hours": duration_hours,
+                "card_no":        log.card_no or "",
+                "status":         status_map.get(log.status, str(log.status)),
+                "area":           log.area.area_name if log.area else "",
+                "purpose":        log.pre_registration.purpose if log.pre_registration else "",
+            })
+        return rows
+
     # Helper Methods
     def _generate_visitor_code(self) -> str:
         """Generate unique visitor code"""

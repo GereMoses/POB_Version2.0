@@ -1,21 +1,28 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useCallback } from 'react';
 import {
   Table, Button, Space, Input, Select, Modal, Form, Row, Col,
   Tag, App, Popconfirm, DatePicker, InputNumber, Tabs, Descriptions,
   Alert, Progress, Switch, Tooltip, Typography, Checkbox, Avatar,
+  Badge, Empty, Card,
 } from 'antd';
 import {
   PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined,
   CalendarOutlined, CheckCircleOutlined, CloseCircleOutlined,
   FileTextOutlined, WalletOutlined, StopOutlined, ThunderboltOutlined,
   InfoCircleOutlined, SearchOutlined, FilterOutlined, CloseOutlined,
-  UserOutlined, ArrowRightOutlined,
+  UserOutlined, ArrowRightOutlined, DownloadOutlined, CheckOutlined,
+  TeamOutlined, LeftOutlined, RightOutlined, ExclamationCircleOutlined,
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
+import isBetween from 'dayjs/plugin/isBetween';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import apiService from '../../../services/api';
+import TeamCalendar from './TeamCalendar';
+
+dayjs.extend(isBetween);
 
 const { Text } = Typography;
+const { RangePicker } = DatePicker;
 
 // ── Shared helpers ──────────────────────────────────────────────────────────────
 const AVATAR_PALETTE = [
@@ -24,6 +31,36 @@ const AVATAR_PALETTE = [
 const avatarColor = (str) => AVATAR_PALETTE[(str || '').charCodeAt(0) % AVATAR_PALETTE.length];
 const initials    = (name) =>
   (name || '').split(' ').filter(Boolean).slice(0, 2).map(w => w[0]).join('').toUpperCase() || '?';
+
+// Working-days calc: exclude Saturdays (6) and Sundays (0)
+const countWorkingDays = (start, end) => {
+  if (!start || !end) return 0;
+  let count = 0;
+  let cur = start.startOf('day');
+  const last = end.startOf('day');
+  while (cur.isBefore(last) || cur.isSame(last, 'day')) {
+    const dow = cur.day();
+    if (dow !== 0 && dow !== 6) count++;
+    cur = cur.add(1, 'day');
+  }
+  return count;
+};
+
+// CSV export helper
+const exportCSV = (columns, rows, filename) => {
+  const headers = columns.map(c => `"${c.title}"`).join(',');
+  const body = rows.map(r =>
+    columns.map(c => {
+      const raw = typeof c.exportValue === 'function' ? c.exportValue(r) : (r[c.dataIndex] ?? '');
+      return `"${String(raw).replace(/"/g, '""')}"`;
+    }).join(',')
+  ).join('\n');
+  const blob = new Blob([headers + '\n' + body], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename; a.click();
+  URL.revokeObjectURL(url);
+};
 
 // ── Status pills ────────────────────────────────────────────────────────────────
 const STATUS_PILL_CFG = {
@@ -48,8 +85,8 @@ const LeaveStatusPill = ({ status }) => {
   );
 };
 
-// ── Bulk action bar (shared style) ──────────────────────────────────────────────
-const BulkBar = ({ count, noun, onClear, onDelete, deletePending }) =>
+// ── Bulk action bar ─────────────────────────────────────────────────────────────
+const BulkBar = ({ count, noun, onClear, onDelete, deletePending, onApprove, approvePending }) =>
   count > 0 ? (
     <div style={{
       background: '#1d4ed8', borderRadius: 10, padding: '10px 16px', marginBottom: 10,
@@ -60,6 +97,16 @@ const BulkBar = ({ count, noun, onClear, onDelete, deletePending }) =>
         {count} {noun}{count !== 1 ? 's' : ''} selected
       </span>
       <div style={{ flex: 1 }} />
+      {onApprove && (
+        <Button
+          size="small" icon={<CheckOutlined />}
+          loading={approvePending}
+          onClick={onApprove}
+          style={{ borderRadius: 6, background: '#16a34a', border: 'none', color: '#fff' }}
+        >
+          Approve all
+        </Button>
+      )}
       <Popconfirm
         title={`Delete ${count} ${noun}${count !== 1 ? 's' : ''}?`}
         description="This cannot be undone."
@@ -98,6 +145,7 @@ const EmployeeCell = ({ name, empCode }) => (
   </div>
 );
 
+
 // ──────────────────────────────────────────────────────────────────────────────
 const LeaveManagement = () => {
   const { message } = App.useApp();
@@ -107,6 +155,8 @@ const LeaveManagement = () => {
   const [searchText,    setSearchText]    = useState('');
   const [filterStatus,  setFilterStatus]  = useState(null);
   const [filterType,    setFilterType]    = useState(null);
+  const [filterDateRange, setFilterDateRange] = useState(null);
+  const [filterDept,    setFilterDept]    = useState(null);
 
   const [requestModalOpen, setRequestModalOpen] = useState(false);
   const [editingLeave,     setEditingLeave]     = useState(null);
@@ -131,13 +181,18 @@ const LeaveManagement = () => {
 
   const [selectedLeaveKeys,   setSelectedLeaveKeys]   = useState([]);
   const [selectedBalanceKeys, setSelectedBalanceKeys] = useState([]);
+  const [bulkApprovePending,  setBulkApprovePending]  = useState(false);
 
   const [balanceSearch,     setBalanceSearch]     = useState('');
   const [balanceFilterType, setBalanceFilterType] = useState(null);
   const [balanceFilterYear, setBalanceFilterYear] = useState(null);
   const [balanceFilterLow,  setBalanceFilterLow]  = useState(false);
+  const [balanceDeptFilter, setBalanceDeptFilter] = useState(null);
 
   const [balanceCheckKey, setBalanceCheckKey] = useState({ personnel_id: null, leave_type: null });
+
+  // Calendar state
+  const [calMonth, setCalMonth] = useState(dayjs().startOf('month'));
 
   // ── Queries ──────────────────────────────────────────────────────────────────
   const { data: leaveTypesRaw } = useQuery({
@@ -167,14 +222,46 @@ const LeaveManagement = () => {
     }),
   [personnel]);
 
+  const { data: departmentsRaw } = useQuery({
+    queryKey: ['departments'],
+    queryFn: () => apiService.get('/api/v1/departments/'),
+    staleTime: 120000,
+  });
+  const departments = useMemo(() => {
+    const raw = departmentsRaw?.results || departmentsRaw || [];
+    return Array.isArray(raw) ? raw : [];
+  }, [departmentsRaw]);
+
+  const deptOptions = useMemo(() =>
+    departments.map(d => ({ value: d.id, label: d.name })),
+  [departments]);
+
+  // Unfiltered stats — always shows full-database counts regardless of UI filters
+  const { data: statsData } = useQuery({
+    queryKey: ['leave-stats'],
+    queryFn: () => apiService.get('/api/v1/personnel/leave/stats'),
+    refetchInterval: 30000,
+  });
+  const stats = useMemo(() => ({
+    total:    statsData?.total    ?? 0,
+    pending:  statsData?.pending  ?? 0,
+    approved: statsData?.approved ?? 0,
+    rejected: statsData?.rejected ?? 0,
+  }), [statsData]);
+
+  const leaveQueryParams = useMemo(() => {
+    const p = {};
+    if (filterStatus)             p.status     = filterStatus;
+    if (filterType)               p.leave_type = filterType;
+    if (filterDept)               p.department_id = filterDept;
+    if (filterDateRange?.[0])     p.start_date = filterDateRange[0].format('YYYY-MM-DD');
+    if (filterDateRange?.[1])     p.end_date   = filterDateRange[1].format('YYYY-MM-DD');
+    return p;
+  }, [filterStatus, filterType, filterDept, filterDateRange]);
+
   const { data: leavesRaw, isLoading: leavesLoading, refetch: refetchLeaves } = useQuery({
-    queryKey: ['leave-requests', filterStatus, filterType],
-    queryFn: () => {
-      const params = {};
-      if (filterStatus) params.status     = filterStatus;
-      if (filterType)   params.leave_type = filterType;
-      return apiService.get('/api/v1/personnel/leave', params);
-    },
+    queryKey: ['leave-requests', leaveQueryParams],
+    queryFn: () => apiService.get('/api/v1/personnel/leave', leaveQueryParams),
     refetchInterval: 30000,
   });
   const leaves = useMemo(() => {
@@ -183,8 +270,12 @@ const LeaveManagement = () => {
   }, [leavesRaw]);
 
   const { data: balancesRaw, isLoading: balancesLoading, refetch: refetchBalances } = useQuery({
-    queryKey: ['leave-balances'],
-    queryFn: () => apiService.get('/api/v1/personnel/leave/balance'),
+    queryKey: ['leave-balances', balanceDeptFilter],
+    queryFn: () => {
+      const params = { limit: 5000 };
+      if (balanceDeptFilter) params.department_id = balanceDeptFilter;
+      return apiService.get('/api/v1/personnel/leave/balance', params);
+    },
     enabled: activeTab === 'balances',
   });
   const balances = useMemo(() => {
@@ -193,10 +284,9 @@ const LeaveManagement = () => {
   }, [balancesRaw]);
 
   const balanceYears = useMemo(() => {
-    const raw = balancesRaw?.data || balancesRaw || [];
-    const arr = Array.isArray(raw) ? raw : [];
+    const arr = Array.isArray(balances) ? balances : [];
     return [...new Set(arr.map((b) => b.year))].sort((a, b) => b - a);
-  }, [balancesRaw]);
+  }, [balances]);
 
   const { data: blackoutsRaw, isLoading: blackoutsLoading, refetch: refetchBlackouts } = useQuery({
     queryKey: ['leave-blackouts'],
@@ -207,6 +297,23 @@ const LeaveManagement = () => {
     const raw = blackoutsRaw?.data || blackoutsRaw || [];
     return Array.isArray(raw) ? raw : [];
   }, [blackoutsRaw]);
+
+  // Calendar query — fetches a wider range (prev + cur + next month) for smooth nav
+  const calStart = calMonth.startOf('month').format('YYYY-MM-DD');
+  const calEnd   = calMonth.endOf('month').format('YYYY-MM-DD');
+  const { data: calRaw, isLoading: calLoading, refetch: refetchCal } = useQuery({
+    queryKey: ['leave-calendar', calStart, calEnd],
+    queryFn: () => apiService.get('/api/v1/personnel/leave/calendar', { start_date: calStart, end_date: calEnd }),
+    enabled: activeTab === 'calendar',
+    staleTime: 60000,
+  });
+  // New backend returns { days: {...}, spans: [...] }
+  const calData = useMemo(() => {
+    const raw = calRaw?.data || calRaw || {};
+    // Support both new shape { days, spans } and legacy shape (plain date-keyed object)
+    if (raw && typeof raw === 'object' && ('days' in raw || 'spans' in raw)) return raw;
+    return { days: raw, spans: [] };
+  }, [calRaw]);
 
   const filteredBalances = useMemo(() => {
     let result = balances;
@@ -235,14 +342,6 @@ const LeaveManagement = () => {
     staleTime: 10000,
   });
 
-  // ── Stats ────────────────────────────────────────────────────────────────────
-  const stats = useMemo(() => ({
-    total:    leaves.length,
-    pending:  leaves.filter((l) => l.status === 'pending').length,
-    approved: leaves.filter((l) => l.status === 'approved' || l.status === 'on_leave').length,
-    rejected: leaves.filter((l) => l.status === 'rejected').length,
-  }), [leaves]);
-
   // ── Mutations ────────────────────────────────────────────────────────────────
   const leaveMutation = useMutation({
     mutationFn: (data) =>
@@ -254,6 +353,7 @@ const LeaveManagement = () => {
       setRequestModalOpen(false); setEditingLeave(null); requestForm.resetFields();
       queryClient.invalidateQueries({ queryKey: ['leave-requests'] });
       queryClient.invalidateQueries({ queryKey: ['leave-balances'] });
+      queryClient.invalidateQueries({ queryKey: ['leave-stats'] });
     },
     onError: (err) => message.error(`Error: ${err.message || 'Operation failed'}`),
   });
@@ -264,6 +364,7 @@ const LeaveManagement = () => {
       message.success('Leave request approved');
       queryClient.invalidateQueries({ queryKey: ['leave-requests'] });
       queryClient.invalidateQueries({ queryKey: ['leave-balances'] });
+      queryClient.invalidateQueries({ queryKey: ['leave-stats'] });
     },
     onError: (err) => message.error(`Error: ${err.message || 'Approval failed'}`),
   });
@@ -275,6 +376,7 @@ const LeaveManagement = () => {
       message.success('Leave request rejected');
       setRejectModalOpen(false); setRejectingLeave(null); setRejectReason('');
       queryClient.invalidateQueries({ queryKey: ['leave-requests'] });
+      queryClient.invalidateQueries({ queryKey: ['leave-stats'] });
     },
     onError: (err) => message.error(`Error: ${err.message || 'Reject failed'}`),
   });
@@ -285,6 +387,7 @@ const LeaveManagement = () => {
       message.success('Leave request cancelled');
       queryClient.invalidateQueries({ queryKey: ['leave-requests'] });
       queryClient.invalidateQueries({ queryKey: ['leave-balances'] });
+      queryClient.invalidateQueries({ queryKey: ['leave-stats'] });
     },
     onError: (err) => message.error(`Error: ${err.message || 'Cancel failed'}`),
   });
@@ -294,6 +397,7 @@ const LeaveManagement = () => {
     onSuccess: () => {
       message.success('Leave request deleted');
       queryClient.invalidateQueries({ queryKey: ['leave-requests'] });
+      queryClient.invalidateQueries({ queryKey: ['leave-stats'] });
     },
     onError: (err) => message.error(`Error: ${err.message || 'Delete failed'}`),
   });
@@ -363,7 +467,29 @@ const LeaveManagement = () => {
       message.success(`${selectedLeaveKeys.length} request(s) deleted`);
       setSelectedLeaveKeys([]);
       queryClient.invalidateQueries({ queryKey: ['leave-requests'] });
+      queryClient.invalidateQueries({ queryKey: ['leave-stats'] });
     } catch (err) { message.error(`Bulk delete failed: ${err.message}`); }
+  };
+
+  const bulkApproveLeaves = async () => {
+    setBulkApprovePending(true);
+    const ids = selectedLeaveKeys.filter(id =>
+      leaves.find(l => l.id === id)?.status === 'pending'
+    );
+    try {
+      const results = await Promise.allSettled(
+        ids.map(id => apiService.put(`/api/v1/personnel/leave/${id}/approve`))
+      );
+      const ok  = results.filter(r => r.status === 'fulfilled').length;
+      const bad = results.filter(r => r.status === 'rejected').length;
+      if (ok)  message.success(`${ok} request(s) approved`);
+      if (bad) message.warning(`${bad} request(s) failed (balance may be insufficient)`);
+      setSelectedLeaveKeys([]);
+      queryClient.invalidateQueries({ queryKey: ['leave-requests'] });
+      queryClient.invalidateQueries({ queryKey: ['leave-balances'] });
+      queryClient.invalidateQueries({ queryKey: ['leave-stats'] });
+    } catch (err) { message.error(`Bulk approve failed: ${err.message}`); }
+    finally { setBulkApprovePending(false); }
   };
 
   const bulkDeleteBalances = async () => {
@@ -381,7 +507,7 @@ const LeaveManagement = () => {
     onChange: setSelectedLeaveKeys,
     getCheckboxProps: (record) => ({
       disabled: record.status !== 'pending',
-      title:    record.status !== 'pending' ? 'Only pending requests can be bulk-deleted' : '',
+      title:    record.status !== 'pending' ? 'Only pending requests can be selected' : '',
     }),
     selections: [Table.SELECTION_ALL, Table.SELECTION_INVERT, Table.SELECTION_NONE],
   };
@@ -392,16 +518,16 @@ const LeaveManagement = () => {
   };
 
   // ── Helpers ──────────────────────────────────────────────────────────────────
-  const autoCalcDays = () => {
+  const autoCalcDays = useCallback(() => {
     setTimeout(() => {
       const start = requestForm.getFieldValue('start_date');
       const end   = requestForm.getFieldValue('end_date');
-      if (start && end && dayjs.isDayjs(start) && dayjs.isDayjs(end)) {
-        const diff = end.diff(start, 'day') + 1;
-        if (diff > 0) requestForm.setFieldValue('days_count', diff);
+      if (start && end && dayjs.isDayjs(start) && dayjs.isDayjs(end) && !end.isBefore(start)) {
+        const working = countWorkingDays(start, end);
+        if (working > 0) requestForm.setFieldValue('days_count', working);
       }
     }, 0);
-  };
+  }, [requestForm]);
 
   const openRequestModal = (record = null) => {
     setEditingLeave(record);
@@ -474,6 +600,33 @@ const LeaveManagement = () => {
   const leaveTypeColor = (code) => leaveTypes.find((lt) => lt.code === code)?.color || 'default';
   const leaveTypeLabel = (code) => leaveTypes.find((lt) => lt.code === code)?.name  || code;
 
+  // ── CSV export configs ───────────────────────────────────────────────────────
+  const leaveExportColumns = [
+    { title: 'Employee',    exportValue: r => r.personnel_name || '' },
+    { title: 'Emp Code',    exportValue: r => r.personnel_emp_code || '' },
+    { title: 'Leave Type',  exportValue: r => leaveTypeLabel(r.leave_type) },
+    { title: 'Start Date',  exportValue: r => r.start_date || '' },
+    { title: 'End Date',    exportValue: r => r.end_date || '' },
+    { title: 'Days',        exportValue: r => r.days_count || '' },
+    { title: 'Status',      exportValue: r => r.status || '' },
+    { title: 'Reason',      exportValue: r => r.reason || '' },
+    { title: 'Approved By', exportValue: r => r.approved_by_name || '' },
+    { title: 'Approved At', exportValue: r => r.approved_at ? dayjs(r.approved_at).format('YYYY-MM-DD HH:mm') : '' },
+    { title: 'Rejection Reason', exportValue: r => r.rejection_reason || '' },
+    { title: 'Submitted',   exportValue: r => r.created_at ? dayjs(r.created_at).format('YYYY-MM-DD HH:mm') : '' },
+  ];
+
+  const balanceExportColumns = [
+    { title: 'Employee',       exportValue: r => r.personnel_name || '' },
+    { title: 'Emp Code',       exportValue: r => r.personnel_emp_code || '' },
+    { title: 'Leave Type',     exportValue: r => leaveTypeLabel(r.leave_type) },
+    { title: 'Year',           exportValue: r => r.year || '' },
+    { title: 'Total Days',     exportValue: r => r.total_days || '' },
+    { title: 'Used Days',      exportValue: r => r.used_days || '' },
+    { title: 'Balance Days',   exportValue: r => r.balance_days || '' },
+    { title: 'Carry Forward',  exportValue: r => r.carry_forward_days || '' },
+  ];
+
   // ── Table columns ────────────────────────────────────────────────────────────
   const leaveColumns = [
     {
@@ -518,7 +671,7 @@ const LeaveManagement = () => {
               color: '#4b5563', borderRadius: 4, padding: '0 6px',
               fontSize: 10, fontWeight: 600,
             }}>
-              {r.days_count} day{r.days_count !== 1 ? 's' : ''}
+              {r.days_count} working day{Number(r.days_count) !== 1 ? 's' : ''}
             </span>
           )}
         </div>
@@ -583,6 +736,40 @@ const LeaveManagement = () => {
     },
   ];
 
+  // ── Expandable row — shows rejection reason, approver, submitted date ─────────
+  const expandedRowRender = (r) => (
+    <div style={{ padding: '8px 16px 8px 48px', background: '#fafafa' }}>
+      <Row gutter={24}>
+        {r.rejection_reason && (
+          <Col>
+            <Text type="secondary" style={{ fontSize: 11 }}>Rejection reason: </Text>
+            <Text style={{ fontSize: 12, color: '#b91c1c' }}>{r.rejection_reason}</Text>
+          </Col>
+        )}
+        {r.approved_by_name && (
+          <Col>
+            <Text type="secondary" style={{ fontSize: 11 }}>
+              {r.status === 'rejected' ? 'Rejected by: ' : 'Approved by: '}
+            </Text>
+            <Text style={{ fontSize: 12 }}>{r.approved_by_name}</Text>
+            {r.approved_at && (
+              <Text type="secondary" style={{ fontSize: 11 }}>
+                {' '}· {dayjs(r.approved_at).format('DD MMM YYYY HH:mm')}
+              </Text>
+            )}
+          </Col>
+        )}
+        <Col>
+          <Text type="secondary" style={{ fontSize: 11 }}>Submitted: </Text>
+          <Text style={{ fontSize: 12 }}>{r.created_at ? dayjs(r.created_at).format('DD MMM YYYY HH:mm') : '—'}</Text>
+        </Col>
+      </Row>
+    </div>
+  );
+
+  const rowExpandable = (r) =>
+    !!(r.rejection_reason || r.approved_by_name || r.approved_at || r.created_at);
+
   const balanceColumns = [
     {
       title: 'Employee',
@@ -631,7 +818,7 @@ const LeaveManagement = () => {
         return (
           <div>
             <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3 }}>
-              <Text style={{ fontSize: 11, color: '#6b7280' }}>Used {used.toFixed(1)} / {total.toFixed(1)} days</Text>
+              <Text style={{ fontSize: 11, color: '#6b7280' }}>Used {used.toFixed(1)} / {total.toFixed(1)} d</Text>
               <Text style={{ fontSize: 11, fontWeight: 700, color }}>{balance.toFixed(1)} left</Text>
             </div>
             <Progress
@@ -729,7 +916,7 @@ const LeaveManagement = () => {
     },
   ];
 
-  // ── Stat cards config ────────────────────────────────────────────────────────
+  // ── Stat cards ───────────────────────────────────────────────────────────────
   const STATS = [
     { label: 'Total Requests',      value: stats.total,    icon: <FileTextOutlined />,       color: '#2563eb', bg: '#eff6ff' },
     { label: 'Pending Approval',    value: stats.pending,  icon: <CalendarOutlined />,        color: '#d97706', bg: '#fffbeb' },
@@ -737,7 +924,6 @@ const LeaveManagement = () => {
     { label: 'Rejected',            value: stats.rejected, icon: <CloseCircleOutlined />,     color: '#dc2626', bg: '#fef2f2' },
   ];
 
-  // ── Table shared style ───────────────────────────────────────────────────────
   const tableContainerStyle = {
     background: '#fff', borderRadius: 12, border: '1px solid #e2e8f0',
     boxShadow: '0 1px 3px rgba(0,0,0,0.04)', overflow: 'hidden',
@@ -748,32 +934,41 @@ const LeaveManagement = () => {
     style: { padding: '12px 16px', margin: 0 },
   };
 
+  // Calendar tab renders the standalone TeamCalendar component
+
   // ── Render ────────────────────────────────────────────────────────────────────
   return (
-    <div style={{ padding: 24, background: '#f8fafc', minHeight: '100vh' }}>
-
-      {/* ── Page header ─────────────────────────────────────────────────── */}
-      <div style={{ marginBottom: 24 }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
-          <div>
-            <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: '#0f172a', letterSpacing: '-0.3px' }}>
-              Leave Management
-            </h2>
-            <p style={{ margin: '2px 0 0', fontSize: 13, color: '#64748b' }}>
-              Manage leave requests, balances, and blackout periods
-            </p>
+    <div className="personnel-module">
+      <Card
+        title={
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', overflow: 'visible' }}>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 16 }}>Leave Management</div>
+              <div style={{ fontSize: 12, color: '#64748b', fontWeight: 400, marginTop: 2 }}>
+                Manage leave requests, balances, blackout periods and team calendar
+              </div>
+            </div>
+            <Space size="middle" style={{ overflow: 'visible' }}>
+              <Badge count={stats.pending} showZero color="#d97706">
+                <CalendarOutlined style={{ fontSize: 16 }} />
+              </Badge>
+              <Badge count={stats.approved} showZero color="#16a34a">
+                <CheckCircleOutlined style={{ fontSize: 16 }} />
+              </Badge>
+              <Button
+                type="primary" icon={<PlusOutlined />}
+                onClick={() => openRequestModal()}
+                size="small" style={{ fontWeight: 600 }}
+              >
+                New Leave Request
+              </Button>
+            </Space>
           </div>
-          <Button
-            type="primary" icon={<PlusOutlined />}
-            onClick={() => openRequestModal()}
-            style={{ borderRadius: 8, fontWeight: 600 }}
-          >
-            New Leave Request
-          </Button>
-        </div>
-      </div>
+        }
+        styles={{ header: { overflow: 'visible' } }}
+      >
 
-      {/* ── Stat cards ──────────────────────────────────────────────────── */}
+      {/* Stat cards — always from unfiltered /leave/stats */}
       <Row gutter={[12, 12]} style={{ marginBottom: 20 }}>
         {STATS.map((s) => (
           <Col xs={12} sm={6} key={s.label}>
@@ -798,7 +993,7 @@ const LeaveManagement = () => {
         ))}
       </Row>
 
-      {/* ── Tabs ─────────────────────────────────────────────────────────── */}
+      {/* Tabs */}
       <div style={{
         background: '#fff', borderRadius: 12, border: '1px solid #e2e8f0',
         boxShadow: '0 1px 3px rgba(0,0,0,0.04)',
@@ -809,7 +1004,7 @@ const LeaveManagement = () => {
           style={{ padding: '0 16px' }}
           items={[
 
-            // ── TAB 1: Requests ─────────────────────────────────────────────
+            // ── TAB 1: Requests ──────────────────────────────────────────────
             {
               key: 'requests',
               label: <span><FileTextOutlined /> Leave Requests</span>,
@@ -826,25 +1021,53 @@ const LeaveManagement = () => {
                       value={searchText}
                       onChange={(e) => setSearchText(e.target.value)}
                       allowClear
-                      style={{ flex: '1 1 200px', maxWidth: 280, borderRadius: 8 }}
+                      style={{ flex: '1 1 180px', maxWidth: 240, borderRadius: 8 }}
                     />
                     <FilterOutlined style={{ color: '#94a3b8', fontSize: 12 }} />
                     <Select
                       placeholder="Status" allowClear
-                      style={{ flex: '1 1 130px', minWidth: 130 }}
+                      style={{ flex: '1 1 120px', minWidth: 120 }}
                       value={filterStatus} onChange={setFilterStatus}
                       options={Object.entries(STATUS_PILL_CFG).map(([v, { label }]) => ({ value: v, label }))}
                     />
                     <Select
                       placeholder="Leave Type" allowClear
-                      style={{ flex: '1 1 150px', minWidth: 150 }}
+                      style={{ flex: '1 1 140px', minWidth: 140 }}
                       value={filterType} onChange={setFilterType}
                       options={leaveTypes.map((lt) => ({
                         value: lt.code,
                         label: <Tag color={lt.color} style={{ margin: 0 }}>{lt.name}</Tag>,
                       }))}
                     />
+                    <Select
+                      placeholder="Department" allowClear showSearch optionFilterProp="label"
+                      style={{ flex: '1 1 150px', minWidth: 150 }}
+                      value={filterDept} onChange={setFilterDept}
+                      options={deptOptions}
+                    />
+                    <RangePicker
+                      style={{ flex: '1 1 220px' }}
+                      value={filterDateRange}
+                      onChange={setFilterDateRange}
+                      placeholder={['From', 'To']}
+                      format="DD MMM YYYY"
+                    />
+                    {(filterStatus || filterType || filterDept || filterDateRange) && (
+                      <Button
+                        size="small" style={{ borderRadius: 6 }}
+                        onClick={() => { setFilterStatus(null); setFilterType(null); setFilterDept(null); setFilterDateRange(null); }}
+                      >
+                        Clear
+                      </Button>
+                    )}
                     <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
+                      <Tooltip title="Export to CSV">
+                        <Button
+                          icon={<DownloadOutlined />}
+                          onClick={() => exportCSV(leaveExportColumns, filteredLeaves, `leave-requests-${dayjs().format('YYYY-MM-DD')}.csv`)}
+                          style={{ borderRadius: 8 }}
+                        />
+                      </Tooltip>
                       <Button
                         icon={<ReloadOutlined />} onClick={() => { refetchLeaves(); setSelectedLeaveKeys([]); }}
                         style={{ borderRadius: 8 }}
@@ -852,12 +1075,24 @@ const LeaveManagement = () => {
                     </div>
                   </div>
 
+                  {/* Active filter pills */}
+                  {(filterStatus || filterType || filterDept || filterDateRange) && (
+                    <div style={{ marginBottom: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                      {filterStatus && <Tag closable onClose={() => setFilterStatus(null)} color="blue">{STATUS_PILL_CFG[filterStatus]?.label}</Tag>}
+                      {filterType && <Tag closable onClose={() => setFilterType(null)} color="purple">{leaveTypeLabel(filterType)}</Tag>}
+                      {filterDept && <Tag closable onClose={() => setFilterDept(null)} icon={<TeamOutlined />}>{deptOptions.find(d => d.value === filterDept)?.label}</Tag>}
+                      {filterDateRange && <Tag closable onClose={() => setFilterDateRange(null)} icon={<CalendarOutlined />}>{filterDateRange[0]?.format('DD MMM')} – {filterDateRange[1]?.format('DD MMM YYYY')}</Tag>}
+                    </div>
+                  )}
+
                   {/* Bulk bar */}
                   <BulkBar
                     count={selectedLeaveKeys.length}
                     noun="request"
                     onClear={() => setSelectedLeaveKeys([])}
                     onDelete={bulkDeleteLeaves}
+                    onApprove={bulkApproveLeaves}
+                    approvePending={bulkApprovePending}
                   />
 
                   <div style={tableContainerStyle}>
@@ -870,6 +1105,7 @@ const LeaveManagement = () => {
                       scroll={{ x: 1000 }}
                       rowSelection={leaveRowSelection}
                       pagination={paginationProps}
+                      expandable={{ expandedRowRender, rowExpandable }}
                       onRow={() => ({
                         onMouseEnter: (e) => { e.currentTarget.style.background = '#f8fafc'; },
                         onMouseLeave: (e) => { e.currentTarget.style.background = ''; },
@@ -880,7 +1116,7 @@ const LeaveManagement = () => {
               ),
             },
 
-            // ── TAB 2: Balances ─────────────────────────────────────────────
+            // ── TAB 2: Balances ──────────────────────────────────────────────
             {
               key: 'balances',
               label: <span><WalletOutlined /> Leave Balances</span>,
@@ -901,17 +1137,17 @@ const LeaveManagement = () => {
                   {/* Filter bar */}
                   <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 8 }}>
                     <Input
-                      placeholder="Search employee name or code…"
+                      placeholder="Search employee…"
                       prefix={<SearchOutlined style={{ color: '#94a3b8' }} />}
                       value={balanceSearch}
                       onChange={(e) => { setBalanceSearch(e.target.value); setSelectedBalanceKeys([]); }}
                       allowClear
-                      style={{ flex: '1 1 200px', maxWidth: 260, borderRadius: 8 }}
+                      style={{ flex: '1 1 180px', maxWidth: 240, borderRadius: 8 }}
                     />
                     <FilterOutlined style={{ color: '#94a3b8', fontSize: 12 }} />
                     <Select
                       placeholder="Leave Type" allowClear
-                      style={{ flex: '1 1 140px', minWidth: 140 }}
+                      style={{ flex: '1 1 130px', minWidth: 130 }}
                       value={balanceFilterType}
                       onChange={(v) => { setBalanceFilterType(v); setSelectedBalanceKeys([]); }}
                       options={leaveTypes.map((lt) => ({
@@ -921,10 +1157,17 @@ const LeaveManagement = () => {
                     />
                     <Select
                       placeholder="Year" allowClear
-                      style={{ flex: '1 1 90px', minWidth: 90 }}
+                      style={{ flex: '1 1 80px', minWidth: 80 }}
                       value={balanceFilterYear}
                       onChange={(v) => { setBalanceFilterYear(v); setSelectedBalanceKeys([]); }}
                       options={balanceYears.map((y) => ({ value: y, label: y }))}
+                    />
+                    <Select
+                      placeholder="Department" allowClear showSearch optionFilterProp="label"
+                      style={{ flex: '1 1 150px', minWidth: 150 }}
+                      value={balanceDeptFilter}
+                      onChange={(v) => { setBalanceDeptFilter(v); setSelectedBalanceKeys([]); }}
+                      options={deptOptions}
                     />
                     <Tooltip title="Show only exhausted balances">
                       <Button
@@ -933,14 +1176,15 @@ const LeaveManagement = () => {
                         onClick={() => { setBalanceFilterLow((v) => !v); setSelectedBalanceKeys([]); }}
                         style={{ borderRadius: 8 }}
                         size="small"
+                        icon={<ExclamationCircleOutlined />}
                       >
-                        {balanceFilterLow ? 'Exhausted ×' : 'Exhausted'}
+                        Exhausted{balanceFilterLow ? ' ×' : ''}
                       </Button>
                     </Tooltip>
-                    {(balanceSearch || balanceFilterType || balanceFilterYear || balanceFilterLow) && (
+                    {(balanceSearch || balanceFilterType || balanceFilterYear || balanceFilterLow || balanceDeptFilter) && (
                       <Button
                         size="small" style={{ borderRadius: 6 }}
-                        onClick={() => { setBalanceSearch(''); setBalanceFilterType(null); setBalanceFilterYear(null); setBalanceFilterLow(false); setSelectedBalanceKeys([]); }}
+                        onClick={() => { setBalanceSearch(''); setBalanceFilterType(null); setBalanceFilterYear(null); setBalanceFilterLow(false); setBalanceDeptFilter(null); setSelectedBalanceKeys([]); }}
                       >
                         Clear
                       </Button>
@@ -949,6 +1193,13 @@ const LeaveManagement = () => {
                       <Text style={{ fontSize: 12, color: '#94a3b8' }}>
                         {filteredBalances.length} / {balances.length} records
                       </Text>
+                      <Tooltip title="Export to CSV">
+                        <Button
+                          icon={<DownloadOutlined />}
+                          onClick={() => exportCSV(balanceExportColumns, filteredBalances, `leave-balances-${dayjs().format('YYYY-MM-DD')}.csv`)}
+                          style={{ borderRadius: 8 }}
+                        />
+                      </Tooltip>
                       <Tooltip title="Creates leave balance records for all active employees">
                         <Button
                           type="primary" icon={<ThunderboltOutlined />}
@@ -993,7 +1244,24 @@ const LeaveManagement = () => {
               ),
             },
 
-            // ── TAB 3: Blackout Periods ─────────────────────────────────────
+            // ── TAB 3: Calendar ──────────────────────────────────────────────
+            {
+              key: 'calendar',
+              label: <span><CalendarOutlined /> Team Calendar</span>,
+              children: (
+                <TeamCalendar
+                  calData={calData}
+                  calLoading={calLoading}
+                  refetchCal={refetchCal}
+                  leaveTypes={leaveTypes}
+                  calMonth={calMonth}
+                  setCalMonth={setCalMonth}
+                  departments={departments}
+                />
+              ),
+            },
+
+            // ── TAB 4: Blackout Periods ──────────────────────────────────────
             {
               key: 'blackout',
               label: <span><StopOutlined /> Blackout Periods</span>,
@@ -1027,7 +1295,7 @@ const LeaveManagement = () => {
         />
       </div>
 
-      {/* ── Leave Request Modal ──────────────────────────────────────────── */}
+      {/* ── Leave Request Modal ────────────────────────────────────────────── */}
       <Modal
         title={
           <Space>
@@ -1115,22 +1383,39 @@ const LeaveManagement = () => {
           <Row gutter={16}>
             <Col span={8}>
               <Form.Item name="start_date" label="Start Date" rules={[{ required: true, message: 'Select start date' }]}>
-                <DatePicker style={{ width: '100%' }} format="YYYY-MM-DD" onChange={autoCalcDays} />
+                <DatePicker
+                  style={{ width: '100%' }} format="YYYY-MM-DD"
+                  onChange={autoCalcDays}
+                  disabledDate={(d) => d && d.day() === 0 || d && d.day() === 6}
+                />
               </Form.Item>
             </Col>
             <Col span={8}>
-              <Form.Item name="end_date" label="End Date" rules={[{ required: true, message: 'Select end date' }]}>
-                <DatePicker style={{ width: '100%' }} format="YYYY-MM-DD" onChange={autoCalcDays} />
+              <Form.Item name="end_date" label="End Date" rules={[
+                { required: true, message: 'Select end date' },
+                ({ getFieldValue }) => ({
+                  validator(_, v) {
+                    if (!v || !getFieldValue('start_date') || !v.isBefore(getFieldValue('start_date')))
+                      return Promise.resolve();
+                    return Promise.reject('End date must be on or after start date');
+                  },
+                }),
+              ]}>
+                <DatePicker
+                  style={{ width: '100%' }} format="YYYY-MM-DD"
+                  onChange={autoCalcDays}
+                  disabledDate={(d) => d && d.day() === 0 || d && d.day() === 6}
+                />
               </Form.Item>
             </Col>
             <Col span={8}>
               <Form.Item
-                name="days_count" label="Days Count"
-                extra={balanceCheck?.has_balance ? `Max: ${balanceCheck.balance_days.toFixed(1)} days` : undefined}
+                name="days_count" label="Working Days"
+                extra={balanceCheck?.has_balance ? `Max: ${balanceCheck.balance_days.toFixed(1)} days` : 'Weekends excluded automatically'}
                 rules={[
                   { required: true, message: 'Enter days' },
                   { validator: (_, val) => (balanceCheck?.has_balance && val > balanceCheck.balance_days)
-                      ? Promise.reject(`Exceeds available balance (${balanceCheck.balance_days.toFixed(1)} days)`)
+                      ? Promise.reject(`Exceeds balance (${balanceCheck.balance_days.toFixed(1)} d)`)
                       : Promise.resolve() },
                 ]}
               >
@@ -1148,11 +1433,17 @@ const LeaveManagement = () => {
         </Form>
       </Modal>
 
-      {/* ── Reject Modal ─────────────────────────────────────────────────── */}
+      {/* ── Reject Modal ──────────────────────────────────────────────────── */}
       <Modal
         title="Reject Leave Request"
         open={rejectModalOpen}
-        onOk={() => rejectMutation.mutate({ id: rejectingLeave?.id, rejection_reason: rejectReason })}
+        onOk={() => {
+          if (!rejectReason.trim()) {
+            message.warning('Please enter a rejection reason.');
+            return;
+          }
+          rejectMutation.mutate({ id: rejectingLeave?.id, rejection_reason: rejectReason });
+        }}
         onCancel={() => { setRejectModalOpen(false); setRejectingLeave(null); setRejectReason(''); }}
         confirmLoading={rejectMutation.isPending}
         okButtonProps={{ danger: true }} okText="Reject" forceRender
@@ -1167,13 +1458,18 @@ const LeaveManagement = () => {
           </Descriptions>
         )}
         <Input.TextArea
-          rows={4} placeholder="Rejection reason (optional)"
+          rows={4} placeholder="Rejection reason (required)"
           value={rejectReason} onChange={(e) => setRejectReason(e.target.value)}
-          maxLength={500} showCount
+          maxLength={500} showCount status={!rejectReason.trim() ? 'warning' : ''}
         />
+        {!rejectReason.trim() && (
+          <Text type="warning" style={{ fontSize: 11, display: 'block', marginTop: 4 }}>
+            A rejection reason is required so the employee understands why.
+          </Text>
+        )}
       </Modal>
 
-      {/* ── Balance Modal ─────────────────────────────────────────────────── */}
+      {/* ── Balance Modal ──────────────────────────────────────────────────── */}
       <Modal
         title={editingBalance ? 'Edit Leave Balance' : 'Add Leave Balance'}
         open={balanceModalOpen}
@@ -1229,7 +1525,7 @@ const LeaveManagement = () => {
         </Form>
       </Modal>
 
-      {/* ── Blackout Modal ────────────────────────────────────────────────── */}
+      {/* ── Blackout Modal ─────────────────────────────────────────────────── */}
       <Modal
         title={editingBlackout ? 'Edit Blackout Period' : 'New Blackout Period'}
         open={blackoutModalOpen}
@@ -1257,7 +1553,26 @@ const LeaveManagement = () => {
           <Row gutter={16}>
             <Col span={12}>
               <Form.Item name="applies_to" label="Applies To" initialValue="all">
-                <Select options={[{ value: 'all', label: 'All Personnel' }]} />
+                <Select options={[
+                  { value: 'all',        label: 'All Personnel'   },
+                  { value: 'department', label: 'Specific Department' },
+                ]} onChange={(v) => {
+                  if (v !== 'department') blackoutForm.setFieldValue('department_id', undefined);
+                }} />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item
+                noStyle
+                shouldUpdate={(prev, cur) => prev.applies_to !== cur.applies_to}
+              >
+                {({ getFieldValue }) =>
+                  getFieldValue('applies_to') === 'department' ? (
+                    <Form.Item name="department_id" label="Department" rules={[{ required: true, message: 'Select a department' }]}>
+                      <Select showSearch optionFilterProp="label" placeholder="Select department" options={deptOptions} />
+                    </Form.Item>
+                  ) : null
+                }
               </Form.Item>
             </Col>
           </Row>
@@ -1267,7 +1582,7 @@ const LeaveManagement = () => {
         </Form>
       </Modal>
 
-      {/* ── Initialize Balances Modal ─────────────────────────────────────── */}
+      {/* ── Initialize Balances Modal ──────────────────────────────────────── */}
       <Modal
         title={<Space><ThunderboltOutlined style={{ color: '#2563eb' }} /> Initialize Year Balances</Space>}
         open={initModalOpen}
@@ -1345,7 +1660,9 @@ const LeaveManagement = () => {
         }
         .ant-table-tbody > tr:last-child > td { border-bottom: none !important; }
         .ant-tabs-nav { margin-bottom: 0 !important; }
+        .ant-table-expanded-row > td { padding: 0 !important; }
       `}</style>
+      </Card>
     </div>
   );
 };

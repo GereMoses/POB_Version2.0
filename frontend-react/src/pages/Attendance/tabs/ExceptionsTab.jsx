@@ -40,7 +40,7 @@ const ExceptionsTab = () => {
   const [search,       setSearch]       = useState('');
   const [dateRange,    setDateRange]    = useState([dayjs().startOf('month'), dayjs()]);
   const [detailOpen,   setDetailOpen]   = useState(false);
-  const [detailRec,    setDetailRec]    = useState(null);
+  const [detailId,     setDetailId]     = useState(null);
   const [selected,     setSelected]     = useState([]);
   const [handleOpen,   setHandleOpen]   = useState(false);
   const [handleAction, setHandleAction] = useState('approve');
@@ -72,6 +72,7 @@ const ExceptionsTab = () => {
     refetchInterval: 30000,
   });
   const rows = data?.data || [];
+  const detailRec = useMemo(() => rows.find(r => r.id === detailId) ?? null, [rows, detailId]);
 
   const handleM = useMutation({
     mutationFn: ({ ids, action, note }) =>
@@ -101,7 +102,7 @@ const ExceptionsTab = () => {
         <EmployeeCell
           name={r.emp_name || `Employee #${r.emp_id}`}
           code={r.emp_code || ''}
-          onClick={() => { setDetailRec(r); setDetailOpen(true); }}
+          onClick={() => { setDetailId(r.id); setDetailOpen(true); }}
         />
       ),
     },
@@ -125,7 +126,7 @@ const ExceptionsTab = () => {
       render: (_,r) => (
         <Space size={4}>
           <Tooltip title="View">
-            <Button size="small" icon={<EyeOutlined />} onClick={() => { setDetailRec(r); setDetailOpen(true); }} />
+            <Button size="small" icon={<EyeOutlined />} onClick={() => { setDetailId(r.id); setDetailOpen(true); }} />
           </Tooltip>
           {!r.handled_at && (
             <Tooltip title="Handle">

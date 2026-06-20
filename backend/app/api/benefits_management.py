@@ -59,7 +59,12 @@ def _enrich_enrollment(e: EmployeeBenefit, db: Session) -> EmployeeBenefit:
 
     plan = e.plan or (db.query(BenefitPlan).filter(BenefitPlan.id == e.plan_id).first() if e.plan_id else None)
     e.plan_name    = getattr(plan, "plan_name", None)
+    e.plan_code    = getattr(plan, "plan_code",  None)
     e.benefit_type = getattr(plan, "benefit_type", None)
+
+    dept = getattr(p, "department", None) if p else None
+    e.department_id   = getattr(p, "department_id", None) if p else None
+    e.department_name = getattr(dept, "name", None) if dept else None
 
     deps = e.dependents
     e.dependent_count = len(deps) if isinstance(deps, list) else 0
@@ -212,11 +217,12 @@ async def create_enrollment(
 
 @router.get("/benefits/enrollments", response_model=List[EmployeeBenefitResponse])
 async def list_enrollments(
-    personnel_id: Optional[int] = None,
-    plan_id:      Optional[int] = None,
-    status:       Optional[str] = None,
-    skip: int = Query(0, ge=0),
-    limit: int = Query(200, ge=1, le=1000),
+    personnel_id:  Optional[int] = None,
+    plan_id:       Optional[int] = None,
+    status:        Optional[str] = None,
+    department_id: Optional[int] = None,
+    skip:  int = Query(0, ge=0),
+    limit: int = Query(500, ge=1, le=1000),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -228,7 +234,10 @@ async def list_enrollments(
     if status:
         q = q.filter(EmployeeBenefit.status == status)
     records = q.order_by(EmployeeBenefit.created_at.desc()).offset(skip).limit(limit).all()
-    return [_enrich_enrollment(r, db) for r in records]
+    enriched = [_enrich_enrollment(r, db) for r in records]
+    if department_id:
+        enriched = [r for r in enriched if r.department_id == department_id]
+    return enriched
 
 
 @router.get("/benefits/enrollments/{enrollment_id}", response_model=EmployeeBenefitResponse)

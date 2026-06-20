@@ -72,7 +72,7 @@ const TemplatesTab = ({ templates, isLoading, qc }) => {
             }} />
           </Tooltip>
           <Popconfirm title="Delete this template?" okType="danger"
-            onConfirm={() => apiService.delete(`/api/mtd/induction-templates/${r.id}/`).then(() => qc.invalidateQueries(['mtd-templates']))}>
+            onConfirm={() => apiService.delete(`/api/mtd/induction-templates/${r.id}`).then(() => qc.invalidateQueries(['mtd-templates']))}>
             <Tooltip title="Delete"><Button size="small" type="text" danger icon={<DeleteOutlined />} /></Tooltip>
           </Popconfirm>
         </Space>

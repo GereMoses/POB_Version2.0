@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, lazy, Suspense } from 'react';
 import {
   Table, Button, Space, Select, Modal, Form, Card, Row, Col,
   Tag, App, Popconfirm, TimePicker, Switch, InputNumber, Tabs,
@@ -13,6 +13,8 @@ import {
 import dayjs from 'dayjs';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import apiService from '../../../services/api';
+
+const WeeklyRosterBuilder = lazy(() => import('./WeeklyRosterBuilder'));
 
 const { Text } = Typography;
 
@@ -735,6 +737,18 @@ const ShiftManagement = () => {
                     style={{ padding: '0 16px' }}
                   />
                 </div>
+              ),
+            },
+            // ═══════════════════════════════════════════════════════════════════
+            //  WEEKLY ROSTER TAB
+            // ═══════════════════════════════════════════════════════════════════
+            {
+              key:   'roster',
+              label: <span><CalendarOutlined style={{ marginRight: 6 }} />Weekly Roster</span>,
+              children: (
+                <Suspense fallback={<div style={{ padding: 32, textAlign: 'center' }}><span>Loading…</span></div>}>
+                  <WeeklyRosterBuilder />
+                </Suspense>
               ),
             },
           ]}

@@ -944,7 +944,7 @@ export default function Dashboard() {
       </Row>
 
       <div style={{ textAlign:'center', marginTop:14, color:'#bfbfbf', fontSize:11, paddingBottom:6 }}>
-        © {new Date().getFullYear()} POB System · Refreshes every 30s
+        © {new Date().getFullYear()} Apex POB · Refreshes every 30s
       </div>
     </div>
   );

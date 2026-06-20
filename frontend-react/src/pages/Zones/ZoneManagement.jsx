@@ -1,8 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
-  Card, Table, Button, Space, Tag, Modal, Form, Input, Select, Dropdown,
+  Card, Table, Button, Space, Tag, Modal, Form, Input, InputNumber, Select, Dropdown,
   Popconfirm, Row, Col, Tabs, Progress,
-  Drawer, Descriptions, Alert, Empty, Spin, App, Tooltip, Divider, Badge,
+  Drawer, Descriptions, Alert, Empty, Spin, App, Tooltip, Divider, Badge, DatePicker,
 } from 'antd';
 import {
   PlusOutlined, EditOutlined, DeleteOutlined, ReloadOutlined,
@@ -16,7 +16,7 @@ import {
   CopyOutlined, InfoCircleOutlined, SendOutlined, PoweroffOutlined,
   SyncOutlined, UnlockOutlined, SettingOutlined, LinkOutlined,
   CheckOutlined, CloseOutlined, DownOutlined, DownloadOutlined,
-  ExclamationCircleOutlined,
+  ExclamationCircleOutlined, LeftOutlined, RightOutlined,
 } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import apiService from '../../services/api';
@@ -101,7 +101,7 @@ const getHazardStyle = (h) => HAZARD_STYLE[h] || HAZARD_STYLE.LOW;
 
 /* ── ZoneCard ──────────────────────────────────────────────────────────────── */
 
-const ZoneCard = ({ zone, onView, onEdit, onAssignReader, onDelete, onStatusChange }) => {
+const ZoneCard = ({ zone, onView, onEdit, onAssignReader, onDelete, onStatusChange, onResetOccupancy }) => {
   const zs = getZoneStyle(zone.zone_type);
   const ss = getStatusStyle(zone.status);
   const hs = getHazardStyle(zone.hazard_level);
@@ -223,6 +223,34 @@ const ZoneCard = ({ zone, onView, onEdit, onAssignReader, onDelete, onStatusChan
             position: 'absolute', top: -12, right: -12, width: 60, height: 60,
             borderRadius: '50%', background: 'rgba(255,255,255,0.08)',
           }} />
+          {/* Reset occupancy button — only when count > 0 */}
+          {count > 0 && onResetOccupancy && (
+            <Tooltip title="Force-reset occupancy to 0 (clears stale check-ins)">
+              <Popconfirm
+                title="Reset zone occupancy?"
+                description={`This will force-checkout all ${count} personnel currently counted in this zone and reset the count to 0. Use this to clear stale/phantom records.`}
+                onConfirm={e => { e.stopPropagation(); onResetOccupancy(zone.id); }}
+                onCancel={e => e.stopPropagation()}
+                okText="Reset" okButtonProps={{ danger: true }} cancelText="Cancel"
+              >
+                <button
+                  onClick={e => e.stopPropagation()}
+                  style={{
+                    position: 'absolute', top: 6, right: 6, zIndex: 2,
+                    all: 'unset', cursor: 'pointer',
+                    background: 'rgba(255,255,255,0.18)', borderRadius: 6,
+                    padding: '3px 5px', display: 'flex', alignItems: 'center', gap: 4,
+                    fontSize: 10, color: 'rgba(255,255,255,0.9)', fontWeight: 600,
+                    transition: 'background 0.15s',
+                  }}
+                  onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.32)'}
+                  onMouseLeave={e => e.currentTarget.style.background = 'rgba(255,255,255,0.18)'}
+                >
+                  <SyncOutlined style={{ fontSize: 9 }} /> Reset
+                </button>
+              </Popconfirm>
+            </Tooltip>
+          )}
           <div style={{ fontSize: 44, fontWeight: 900, color: 'white', lineHeight: 1, letterSpacing: -2, position: 'relative' }}>
             {count}
           </div>
@@ -263,7 +291,7 @@ const ZoneCard = ({ zone, onView, onEdit, onAssignReader, onDelete, onStatusChan
           {zone.latitude && zone.longitude ? (
             <div style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 11.5, color: '#6B7280' }}>
               <EnvironmentOutlined style={{ color: '#EF4444', fontSize: 12 }} />
-              <span>{zone.latitude}°N, {zone.longitude}°E</span>
+              <span>{parseFloat(zone.latitude).toFixed(4)}°N, {parseFloat(zone.longitude).toFixed(4)}°E</span>
               <a
                 href={`https://www.openstreetmap.org/?mlat=${zone.latitude}&mlon=${zone.longitude}#map=14/${zone.latitude}/${zone.longitude}`}
                 target="_blank" rel="noopener noreferrer"
@@ -333,7 +361,7 @@ const ZoneCard = ({ zone, onView, onEdit, onAssignReader, onDelete, onStatusChan
 
 /* ── Zone Detail Drawer ────────────────────────────────────────────────────── */
 
-const ZoneDetailDrawer = ({ zone, open, onClose }) => {
+const ZoneDetailDrawer = ({ zone, open, onClose, onPrev, onNext, hasPrev, hasNext }) => {
   const [drawerTab, setDrawerTab] = useState('personnel');
   const [reassignReader, setReassignReader] = useState(null); // {reader_id, alias, sn}
   const [reassignZoneId, setReassignZoneId] = useState(null);
@@ -425,13 +453,43 @@ const ZoneDetailDrawer = ({ zone, open, onClose }) => {
               </div>
             </div>
           </div>
-          <div style={{
-            background: 'rgba(255,255,255,0.15)', backdropFilter: 'blur(4px)',
-            borderRadius: 12, padding: '10px 18px', textAlign: 'center',
-            border: '1px solid rgba(255,255,255,0.25)',
-          }}>
-            <div style={{ fontSize: 36, fontWeight: 900, color: 'white', lineHeight: 1 }}>{count}</div>
-            <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.8)', fontWeight: 600, letterSpacing: '0.06em', marginTop: 2 }}>ON BOARD</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <button
+              onClick={onPrev} disabled={!hasPrev}
+              style={{
+                all: 'unset', cursor: hasPrev ? 'pointer' : 'not-allowed',
+                width: 30, height: 30, borderRadius: 8,
+                background: hasPrev ? 'rgba(255,255,255,0.18)' : 'rgba(255,255,255,0.06)',
+                border: '1px solid rgba(255,255,255,0.2)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                color: hasPrev ? 'white' : 'rgba(255,255,255,0.25)', fontSize: 12,
+                transition: 'background 0.15s',
+              }}
+              title="Previous zone"
+            ><LeftOutlined /></button>
+
+            <div style={{
+              background: 'rgba(255,255,255,0.15)', backdropFilter: 'blur(4px)',
+              borderRadius: 12, padding: '10px 18px', textAlign: 'center',
+              border: '1px solid rgba(255,255,255,0.25)',
+            }}>
+              <div style={{ fontSize: 36, fontWeight: 900, color: 'white', lineHeight: 1 }}>{count}</div>
+              <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.8)', fontWeight: 600, letterSpacing: '0.06em', marginTop: 2 }}>ON BOARD</div>
+            </div>
+
+            <button
+              onClick={onNext} disabled={!hasNext}
+              style={{
+                all: 'unset', cursor: hasNext ? 'pointer' : 'not-allowed',
+                width: 30, height: 30, borderRadius: 8,
+                background: hasNext ? 'rgba(255,255,255,0.18)' : 'rgba(255,255,255,0.06)',
+                border: '1px solid rgba(255,255,255,0.2)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                color: hasNext ? 'white' : 'rgba(255,255,255,0.25)', fontSize: 12,
+                transition: 'background 0.15s',
+              }}
+              title="Next zone"
+            ><RightOutlined /></button>
           </div>
         </div>
       }
@@ -491,18 +549,22 @@ const ZoneDetailDrawer = ({ zone, open, onClose }) => {
                               width: 34, height: 34, borderRadius: 8,
                               background: 'linear-gradient(135deg, #059669, #10B981)',
                               display: 'flex', alignItems: 'center', justifyContent: 'center',
-                              color: 'white', fontSize: 13, fontWeight: 700,
+                              color: 'white', fontSize: 13, fontWeight: 700, flexShrink: 0,
                             }}>
                               {(p.full_name?.[0] || p.emp_code?.[0] || 'P').toUpperCase()}
                             </div>
                             <div>
                               <div style={{ fontWeight: 600, fontSize: 13, color: '#111827' }}>{p.full_name}</div>
                               <div style={{ fontSize: 11, color: '#9CA3AF', fontFamily: 'monospace' }}>{p.emp_code}</div>
+                              {p.department && (
+                                <div style={{ fontSize: 10, color: '#6B7280', marginTop: 1 }}>{p.department}</div>
+                              )}
                             </div>
                           </div>
                           <div style={{ textAlign: 'right', fontSize: 11 }}>
-                            <div style={{ color: '#10B981', fontWeight: 500, display: 'flex', alignItems: 'center', gap: 4 }}>
-                              <LoginOutlined />Clocked In
+                            <div style={{ color: '#10B981', fontWeight: 500, display: 'flex', alignItems: 'center', gap: 4, justifyContent: 'flex-end' }}>
+                              <LoginOutlined />
+                              {timeAgo(p.punch_time)}
                             </div>
                             <div style={{ color: '#9CA3AF', marginTop: 2 }}>{fmtTime(p.punch_time)}</div>
                           </div>
@@ -644,6 +706,49 @@ const ZoneDetailDrawer = ({ zone, open, onClose }) => {
                 </Spin>
               ),
             },
+            {
+              key: 'info',
+              label: <Space size={4}><InfoCircleOutlined />Info</Space>,
+              children: (
+                <div style={{ paddingBottom: 24, display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  {[
+                    { label: 'Description',     value: zone.description,    mono: false },
+                    { label: 'Address',          value: zone.address,        mono: false },
+                    { label: 'Safety Contact',   value: zone.contact_person, mono: false },
+                    { label: 'Contact Phone',    value: zone.contact_phone,  mono: true  },
+                    { label: 'Safety Level',     value: zone.safety_level,   mono: false },
+                    { label: 'Parent Zone ID',   value: zone.parent_zone_id ? `#${zone.parent_zone_id}` : null, mono: true },
+                    { label: 'ZKTeco Sync',      value: zone.zkteco_sync_enabled ? 'Enabled' : 'Disabled', mono: false },
+                    { label: 'Last Sync',        value: zone.last_sync_at ? fmtTime(zone.last_sync_at) : null, mono: false },
+                    { label: 'Created',          value: zone.created_at ? fmtTime(zone.created_at) : null, mono: false },
+                    { label: 'Updated',          value: zone.updated_at ? fmtTime(zone.updated_at) : null, mono: false },
+                  ].filter(row => row.value != null && row.value !== '').map(row => (
+                    <div key={row.label} style={{
+                      display: 'flex', gap: 10, alignItems: 'flex-start',
+                      padding: '8px 14px', background: '#FAFAFA',
+                      borderRadius: 8, border: '1px solid #F3F4F6',
+                    }}>
+                      <span style={{ fontSize: 11, color: '#9CA3AF', fontWeight: 600, minWidth: 110, flexShrink: 0, paddingTop: 1 }}>{row.label}</span>
+                      <span style={{
+                        fontSize: 12.5, color: '#1F2937', fontWeight: 500,
+                        fontFamily: row.mono ? 'monospace' : 'inherit',
+                        wordBreak: 'break-all',
+                      }}>{row.value}</span>
+                    </div>
+                  ))}
+                  {zone.floor_plan_url && (
+                    <div style={{ borderRadius: 10, overflow: 'hidden', border: '1px solid #E5E7EB', marginTop: 4 }}>
+                      <div style={{ padding: '6px 14px', background: '#F9FAFB', borderBottom: '1px solid #F3F4F6', fontSize: 11, color: '#9CA3AF', fontWeight: 600 }}>Location Image</div>
+                      <img
+                        src={zone.floor_plan_url} alt={zone.name}
+                        style={{ width: '100%', maxHeight: 220, objectFit: 'cover', display: 'block' }}
+                        onError={e => { e.target.style.display = 'none'; }}
+                      />
+                    </div>
+                  )}
+                </div>
+              ),
+            },
           ]}
         />
       </div>
@@ -727,8 +832,10 @@ const ReadersTab = () => {
   const [pushTzModal,     setPushTzModal]     = useState(null);  // device for push timezones
   const [pushAccModal,    setPushAccModal]    = useState(null);  // device for push access levels
   const [cmdHistModal,    setCmdHistModal]    = useState(null);  // device for command history
-  const [operlogFilter,   setOperlogFilter]   = useState(null);  // event type filter
-  const [operlogSnFilter, setOperlogSnFilter] = useState(null);  // device SN filter
+  const [operlogFilter,      setOperlogFilter]      = useState(null);  // event type filter
+  const [operlogSnFilter,    setOperlogSnFilter]    = useState(null);  // device SN filter
+  const [operlogRange,       setOperlogRange]       = useState(null);  // [dayjs, dayjs] date range
+  const [pendingZoneAssign,  setPendingZoneAssign]  = useState(null);  // {deviceId, zoneId, currentZoneId}
   const [pushUsersForm]                       = Form.useForm();
   const [pushTzForm]                          = Form.useForm();
   const [pushAccForm]                         = Form.useForm();
@@ -736,7 +843,8 @@ const ReadersTab = () => {
   const [addrInput,      setAddrInput]      = useState('');
 
   /* ── ADMS server config (editable) ── */
-  const defaultAddr = `${window.location.protocol}//${window.location.hostname}:8000`;
+  // ADMS readers push over HTTP on port 80 (nginx proxies /iclock → backend); never :8000.
+  const defaultAddr = `http://${window.location.hostname}`;
   const { data: admsConfig, refetch: refetchAdmsConfig } = useQuery({
     queryKey: ['adms-config'],
     queryFn:  () => apiService.get('/api/device/adms-config'),
@@ -778,11 +886,13 @@ const ReadersTab = () => {
   const zones = Array.isArray(zonesData) ? zonesData : Array.isArray(zonesData?.data) ? zonesData.data : [];
 
   /* ── OPERLOG events ── */
-  const operlogQP = new URLSearchParams({ limit: 200 });
+  const operlogQP = new URLSearchParams({ limit: 500 });
   if (operlogSnFilter) operlogQP.set('sn', operlogSnFilter);
   if (operlogFilter != null) operlogQP.set('event_type', operlogFilter);
+  if (operlogRange?.[0]) operlogQP.set('from_dt', operlogRange[0].startOf('day').toISOString());
+  if (operlogRange?.[1]) operlogQP.set('to_dt', operlogRange[1].endOf('day').toISOString());
   const { data: operlogData, isLoading: operlogLoading, refetch: refetchOperlog } = useQuery({
-    queryKey: ['adms-operlog', operlogSnFilter, operlogFilter],
+    queryKey: ['adms-operlog', operlogSnFilter, operlogFilter, operlogRange?.[0]?.valueOf(), operlogRange?.[1]?.valueOf()],
     queryFn:  () => apiService.get(`/iclock/operlog?${operlogQP}`),
     enabled:  activeSubTab === 'operlog',
   });
@@ -830,7 +940,7 @@ const ReadersTab = () => {
         (d.ip_address || '').includes(search))
     : all;
 
-  const online   = all.filter(d => d.status === 'Online').length;
+  const online   = all.filter(d => d.status?.toLowerCase() === 'online').length;
   const assigned = all.filter(d => d.zone_id || d.area_id).length;
   const offline  = all.length - online;
 
@@ -899,6 +1009,7 @@ const ReadersTab = () => {
         ? (res?.moved_from ? 'Reader moved to zone' : 'Reader assigned to zone')
         : 'Reader unassigned from zone'
       );
+      setPendingZoneAssign(null);
       qc.invalidateQueries({ queryKey: ['adms-terminals'] });
       qc.invalidateQueries({ queryKey: ['zones-dashboard'] });
       qc.invalidateQueries({ queryKey: ['available-devices'] });
@@ -906,7 +1017,7 @@ const ReadersTab = () => {
       if (res?.moved_from)   qc.invalidateQueries({ queryKey: ['zone-readers', res.moved_from] });
       if (vars.currentZoneId) qc.invalidateQueries({ queryKey: ['zone-readers', vars.currentZoneId] });
     },
-    onError: e => message.error(e?.message || 'Failed to assign zone'),
+    onError: (e) => { message.error(e?.message || 'Failed to assign zone'); setPendingZoneAssign(null); },
   });
 
   const pushUsersMutation = useMutation({
@@ -945,7 +1056,7 @@ const ReadersTab = () => {
     {
       title: 'Reader', key: 'reader', width: 240, fixed: 'left',
       render: (_, r) => {
-        const isOnline = r.status === 'Online';
+        const isOnline = r.status?.toLowerCase() === 'online';
         return (
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <div style={{ position: 'relative', flexShrink: 0 }}>
@@ -988,7 +1099,7 @@ const ReadersTab = () => {
     {
       title: 'Status', key: 'status', width: 105,
       render: (_, r) => {
-        const isOnline = r.status === 'Online';
+        const isOnline = r.status?.toLowerCase() === 'online';
         return (
           <div style={{
             display: 'inline-flex', alignItems: 'center', gap: 5,
@@ -1008,19 +1119,41 @@ const ReadersTab = () => {
       },
     },
     {
-      title: 'Zone', key: 'zone', width: 180,
-      render: (_, r) => (
-        <Select
-          size="small"
-          allowClear
-          placeholder="Unassigned"
-          value={r.zone_id ?? undefined}
-          loading={assignZoneMutation.isPending}
-          style={{ width: '100%', fontSize: 11 }}
-          onChange={(zoneId) => assignZoneMutation.mutate({ deviceId: r.id, zoneId: zoneId ?? null, currentZoneId: r.zone_id })}
-          options={zones.map(z => ({ value: z.id, label: z.name }))}
-        />
-      ),
+      title: 'Zone', key: 'zone', width: 200,
+      render: (_, r) => {
+        const pending = pendingZoneAssign?.deviceId === r.id;
+        if (pending) {
+          const targetZone = zones.find(z => z.id === pendingZoneAssign.zoneId);
+          return (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+              <span style={{ fontSize: 11, color: '#374151', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {targetZone ? targetZone.name : 'Unassign'}?
+              </span>
+              <Button
+                size="small" type="primary" style={{ fontSize: 10, padding: '0 7px', height: 22, minWidth: 0 }}
+                loading={assignZoneMutation.isPending}
+                onClick={() => assignZoneMutation.mutate(pendingZoneAssign)}
+              >✓</Button>
+              <Button
+                size="small" style={{ fontSize: 10, padding: '0 7px', height: 22, minWidth: 0 }}
+                disabled={assignZoneMutation.isPending}
+                onClick={() => setPendingZoneAssign(null)}
+              >✕</Button>
+            </div>
+          );
+        }
+        return (
+          <Select
+            size="small"
+            allowClear
+            placeholder="Unassigned"
+            value={r.zone_id ?? undefined}
+            style={{ width: '100%', fontSize: 11 }}
+            onChange={(zoneId) => setPendingZoneAssign({ deviceId: r.id, zoneId: zoneId ?? null, currentZoneId: r.zone_id })}
+            options={zones.map(z => ({ value: z.id, label: z.name }))}
+          />
+        );
+      },
     },
     {
       title: 'Firmware', dataIndex: 'fw_version', width: 110,
@@ -1186,7 +1319,8 @@ const ReadersTab = () => {
                   type="primary"
                   icon={<CheckOutlined />}
                   style={{ background: '#059669', borderColor: '#059669', borderRadius: 8 }}
-                  loading={approveMutation.isPending}
+                  loading={approveMutation.isPending && approveMutation.variables?.sn === d.sn && approveMutation.variables?.action === 'approve'}
+                  disabled={approveMutation.isPending && approveMutation.variables?.sn === d.sn}
                   onClick={() => approveMutation.mutate({ sn: d.sn, action: 'approve' })}>
                   Approve
                 </Button>
@@ -1194,7 +1328,8 @@ const ReadersTab = () => {
                   danger
                   icon={<CloseOutlined />}
                   style={{ borderRadius: 8 }}
-                  loading={approveMutation.isPending}
+                  loading={approveMutation.isPending && approveMutation.variables?.sn === d.sn && approveMutation.variables?.action === 'reject'}
+                  disabled={approveMutation.isPending && approveMutation.variables?.sn === d.sn}
                   onClick={() => approveMutation.mutate({ sn: d.sn, action: 'reject' })}>
                   Reject
                 </Button>
@@ -1245,9 +1380,23 @@ const ReadersTab = () => {
             <Select.Option key={k} value={Number(k)}>{m.label}</Select.Option>
           ))}
         </Select>
+        <DatePicker.RangePicker
+          size="small"
+          value={operlogRange}
+          onChange={v => setOperlogRange(v || null)}
+          allowClear
+          style={{ width: 240 }}
+          placeholder={['From date', 'To date']}
+        />
         <Button size="small" icon={<ReloadOutlined />} onClick={() => refetchOperlog()}>
           Refresh
         </Button>
+        {(operlogSnFilter || operlogFilter != null || operlogRange) && (
+          <Button size="small" type="link" style={{ color: '#EF4444', padding: '0 4px', fontSize: 12 }}
+            onClick={() => { setOperlogSnFilter(null); setOperlogFilter(null); setOperlogRange(null); }}>
+            ✕ Clear
+          </Button>
+        )}
         <span style={{ fontSize: 12, color: '#9CA3AF', marginLeft: 'auto' }}>
           {operlogRows.length} event{operlogRows.length !== 1 ? 's' : ''}
         </span>
@@ -1471,7 +1620,7 @@ const ReadersTab = () => {
             </div>
             {[
               { label: 'BioTime Cloud',      value: 'adms.zkteco.com:443' },
-              { label: 'Your Server (ADMS)', value: `${window.location.hostname}:8000` },
+              { label: 'Your Server (ADMS)', value: `${window.location.hostname}:80` },
             ].map(r => (
               <div key={r.label} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, marginBottom: 6 }}>
                 <span style={{ color: '#92400E' }}>{r.label}</span>
@@ -1925,10 +2074,471 @@ const ReadersTab = () => {
 
 /* ── Main Component ────────────────────────────────────────────────────────── */
 
+/* ── Shared filter bar (used by Zone Cards + Zone List tabs) ──────────────── */
+const ZoneFilterBar = ({ typeFilter, setTypeFilter, statusFilter, setStatusFilter, hazardFilter, setHazardFilter, onClear }) => (
+  <>
+    <Select
+      placeholder="All Types" allowClear value={typeFilter} onChange={setTypeFilter}
+      size="small" style={{ width: 148 }} popupMatchSelectWidth={false}
+    >
+      {Object.entries(ZONE_TYPE_LABELS).map(([v, l]) => {
+        const zs = getZoneStyle(v);
+        return (
+          <Select.Option key={v} value={v}>
+            <span style={{ color: zs.color, marginRight: 6 }}>{zs.icon}</span>{l}
+          </Select.Option>
+        );
+      })}
+    </Select>
+
+    <Select
+      placeholder="All Statuses" allowClear value={statusFilter} onChange={setStatusFilter}
+      size="small" style={{ width: 138 }}
+    >
+      {['ACTIVE','INACTIVE','MAINTENANCE','EMERGENCY','LOCKDOWN'].map(s => {
+        const ss = getStatusStyle(s);
+        return (
+          <Select.Option key={s} value={s}>
+            <span style={{ color: ss.color, marginRight: 5 }}>●</span>
+            {s.charAt(0) + s.slice(1).toLowerCase()}
+          </Select.Option>
+        );
+      })}
+    </Select>
+
+    <Select
+      placeholder="All Hazard Levels" allowClear value={hazardFilter} onChange={setHazardFilter}
+      size="small" style={{ width: 158 }}
+    >
+      {['LOW','MEDIUM','HIGH','CRITICAL'].map(h => {
+        const hs = getHazardStyle(h);
+        return (
+          <Select.Option key={h} value={h}>
+            <span style={{ color: hs.color, marginRight: 5, fontWeight: 700 }}>⚠</span>
+            {h.charAt(0) + h.slice(1).toLowerCase()} Hazard
+          </Select.Option>
+        );
+      })}
+    </Select>
+
+    {(typeFilter || statusFilter || hazardFilter) && (
+      <Button size="small" type="link" style={{ color: '#EF4444', padding: '0 4px', fontSize: 12 }} onClick={onClear}>
+        ✕ Clear
+      </Button>
+    )}
+  </>
+);
+
+/* ─────────────────────────────────────────────────────────────────
+   MUSTER POINTS TAB
+   Separate create/edit form and live monitoring for MUSTER_POINT zones.
+───────────────────────────────────────────────────────────────── */
+function MusterPointsTab({ musterPoints, isLoading }) {
+  const { message } = App.useApp();
+  const queryClient = useQueryClient();
+  const [modalOpen, setModalOpen] = useState(false);
+  const [editing,   setEditing]   = useState(null);
+  const [musterForm] = Form.useForm();
+
+  const { data: activeEventsRaw } = useQuery({
+    queryKey: ['muster-events-active'],
+    queryFn:  () => apiService.get('/api/mustering/events/?status=0'),
+    refetchInterval: 10000,
+  });
+  const activeEvents   = Array.isArray(activeEventsRaw) ? activeEventsRaw : [];
+  const hasActiveEvent = activeEvents.length > 0;
+
+  const { data: termRaw } = useQuery({
+    queryKey: ['adms-terminals'],
+    queryFn:  () => apiService.get('/api/device/terminals/'),
+  });
+  const terminals = Array.isArray(termRaw?.data) ? termRaw.data
+                  : Array.isArray(termRaw) ? termRaw : [];
+
+  const openCreate = () => {
+    setEditing(null);
+    musterForm.resetFields();
+    musterForm.setFieldsValue({ status: 'ACTIVE' });
+    setModalOpen(true);
+  };
+  const openEdit = (mp) => {
+    setEditing(mp);
+    musterForm.setFieldsValue({
+      name: mp.name, code: mp.code, status: mp.status,
+      reader_sn: mp.reader_sn, evac_point: mp.evac_point,
+      evac_gps: mp.evac_gps, max_capacity: mp.max_capacity,
+      state: mp.state, latitude: mp.latitude, longitude: mp.longitude,
+    });
+    setModalOpen(true);
+  };
+
+  const saveMutation = useMutation({
+    mutationFn: (values) => editing
+      ? apiService.put(`/api/v1/zones/${editing.id}/`, { ...values, zone_type: 'MUSTER_POINT' })
+      : apiService.post('/api/v1/zones/', { ...values, zone_type: 'MUSTER_POINT' }),
+    onSuccess: () => {
+      message.success(editing ? 'Muster point updated' : 'Muster point created');
+      queryClient.invalidateQueries({ queryKey: ['zones-dashboard'] });
+      setModalOpen(false);
+      setEditing(null);
+      musterForm.resetFields();
+    },
+    onError: (e) => message.error(e?.detail || e?.message || 'Save failed'),
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: ({ id }) => apiService.delete(`/api/v1/zones/${id}/`),
+    onSuccess: () => {
+      message.success('Muster point deleted');
+      queryClient.invalidateQueries({ queryKey: ['zones-dashboard'] });
+    },
+    onError: (e) => message.error(e?.detail || e?.message || 'Delete failed'),
+  });
+
+  return (
+    <div>
+      {/* Toolbar */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+        <div>
+          <span style={{ fontWeight: 700, fontSize: 15, color: '#1f2937' }}>Mustering Points</span>
+          <span style={{ fontSize: 12, color: '#9CA3AF', marginLeft: 8 }}>
+            {musterPoints.length} configured
+          </span>
+          {hasActiveEvent && (
+            <Tag color="error" style={{ marginLeft: 8 }}>
+              {activeEvents.length} Active Event{activeEvents.length > 1 ? 's' : ''}
+            </Tag>
+          )}
+        </div>
+        <Button type="primary" icon={<PlusOutlined />} size="small"
+          style={{ background: '#10B981', borderColor: '#10B981', fontWeight: 600 }}
+          onClick={openCreate}>
+          Add Muster Point
+        </Button>
+      </div>
+
+      {/* Active event alert */}
+      {hasActiveEvent && (
+        <Alert
+          type="warning" showIcon style={{ marginBottom: 16 }}
+          message="Muster Event in Progress"
+          description="Personnel are actively scanning in. Check-in counts below update every 10 seconds."
+        />
+      )}
+
+      <Spin spinning={isLoading}>
+        {musterPoints.length === 0 ? (
+          <div style={{ textAlign: 'center', padding: '60px 0' }}>
+            <SafetyOutlined style={{ fontSize: 48, color: '#D1D5DB', marginBottom: 12, display: 'block' }} />
+            <div style={{ color: '#9CA3AF', fontSize: 14, marginBottom: 16 }}>
+              No muster points configured. Add your first emergency assembly area.
+            </div>
+            <Button type="primary" icon={<PlusOutlined />}
+              style={{ background: '#10B981', borderColor: '#10B981' }}
+              onClick={openCreate}>Add First Muster Point</Button>
+          </div>
+        ) : (
+          <Row gutter={[16, 16]}>
+            {musterPoints.map(mp => {
+              const count = mp.current_personnel_count ?? 0;
+              const cap   = mp.max_capacity ?? 0;
+              const pct   = cap > 0 ? Math.min(Math.round((count / cap) * 100), 100) : null;
+              const isOver = cap > 0 && count > cap;
+              return (
+                <Col key={mp.id} xs={24} sm={12} lg={8} xl={6}>
+                  <Card
+                    size="small"
+                    style={{
+                      borderRadius: 12,
+                      border: `2px solid ${hasActiveEvent ? '#10B981' : '#e2e8f0'}`,
+                      boxShadow: hasActiveEvent ? '0 4px 16px rgba(16,185,129,0.15)' : '0 2px 8px rgba(0,0,0,0.06)',
+                    }}
+                    styles={{ body: { padding: '14px 16px' } }}
+                    actions={[
+                      <EditOutlined key="edit" title="Edit" onClick={() => openEdit(mp)} />,
+                      <Popconfirm key="del" title="Delete this muster point?" okText="Delete" okButtonProps={{ danger: true }}
+                        onConfirm={() => deleteMutation.mutate({ id: mp.id })}>
+                        <DeleteOutlined style={{ color: '#ef4444' }} />
+                      </Popconfirm>,
+                    ]}
+                  >
+                    {/* Header */}
+                    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: 10 }}>
+                      <div style={{
+                        width: 40, height: 40, borderRadius: 10, flexShrink: 0,
+                        background: 'linear-gradient(135deg,#10B981,#059669)',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        color: 'white', fontSize: 18,
+                        boxShadow: '0 2px 8px rgba(16,185,129,0.35)',
+                      }}><SafetyOutlined /></div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontWeight: 700, fontSize: 13.5, color: '#111827', lineHeight: 1.25,
+                          whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                          {mp.evac_point || mp.name}
+                        </div>
+                        <div style={{ fontSize: 11, color: '#9CA3AF', fontFamily: 'monospace', letterSpacing: '0.04em', marginTop: 2 }}>
+                          {mp.code}
+                        </div>
+                      </div>
+                      <Badge status={mp.status === 'ACTIVE' ? 'success' : 'default'} />
+                    </div>
+
+                    {/* Reader info — matched against terminal registry */}
+                    {(() => {
+                      const term = terminals.find(t => t.sn === mp.reader_sn);
+                      const isOnline = term?.status?.toLowerCase() === 'online';
+                      if (mp.reader_sn) return (
+                        <div style={{ marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6,
+                          background: term ? (isOnline ? '#f0fdf4' : '#fafafa') : '#fff7ed',
+                          border: `1px solid ${term ? (isOnline ? '#86efac' : '#d1d5db') : '#fbbf24'}`,
+                          borderRadius: 6, padding: '4px 8px' }}>
+                          <div style={{ width: 7, height: 7, borderRadius: '50%', flexShrink: 0,
+                            background: term ? (isOnline ? '#22c55e' : '#9ca3af') : '#f59e0b' }} />
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ fontSize: 11.5, fontWeight: 600, color: '#374151',
+                              whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                              {term ? (term.alias || `Terminal-${term.sn}`) : mp.reader_sn}
+                            </div>
+                            <div style={{ fontSize: 10, color: '#9ca3af', fontFamily: 'monospace' }}>
+                              {mp.reader_sn}{term && !term.alias ? '' : term ? ` · ${term.sn}` : ''}
+                            </div>
+                          </div>
+                          <span style={{ fontSize: 9.5, fontWeight: 700,
+                            color: term ? (isOnline ? '#16a34a' : '#6b7280') : '#b45309',
+                            whiteSpace: 'nowrap' }}>
+                            {term ? (isOnline ? 'ONLINE' : 'OFFLINE') : 'NOT REG.'}
+                          </span>
+                        </div>
+                      );
+                      return (
+                        <div style={{ fontSize: 11.5, color: '#EF4444', marginBottom: 8,
+                          display: 'flex', alignItems: 'center', gap: 5, fontWeight: 600 }}>
+                          <WifiOutlined style={{ fontSize: 11 }} /> No headcount reader assigned
+                        </div>
+                      );
+                    })()}
+
+                    {/* Live count — monitoring mode during active event */}
+                    {hasActiveEvent ? (
+                      <div style={{ background: '#f0fdf4', borderRadius: 8, padding: '8px 10px' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 4 }}>
+                          <span style={{ fontSize: 12, color: '#374151', fontWeight: 600 }}>Check-ins</span>
+                          <span style={{ fontSize: 16, fontWeight: 800,
+                            color: isOver ? '#EF4444' : '#10B981' }}>
+                            {count}{cap > 0 ? ` / ${cap}` : ''}
+                          </span>
+                        </div>
+                        {cap > 0 && (
+                          <Progress
+                            percent={pct} size="small" showInfo={false}
+                            strokeColor={isOver ? '#EF4444' : '#10B981'}
+                            trailColor="#d1fae5"
+                          />
+                        )}
+                      </div>
+                    ) : (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <TeamOutlined style={{ color: '#9CA3AF', fontSize: 13 }} />
+                        <span style={{ fontSize: 12, color: '#374151' }}>{count} personnel</span>
+                        {cap > 0 && <span style={{ fontSize: 11, color: '#9CA3AF' }}>/ {cap} capacity</span>}
+                      </div>
+                    )}
+
+                    {/* GPS */}
+                    {mp.evac_gps && (
+                      <div style={{ fontSize: 11, color: '#9CA3AF', marginTop: 6,
+                        display: 'flex', alignItems: 'center', gap: 4 }}>
+                        <EnvironmentOutlined style={{ fontSize: 10 }} />{mp.evac_gps}
+                      </div>
+                    )}
+                  </Card>
+                </Col>
+              );
+            })}
+          </Row>
+        )}
+      </Spin>
+
+      {/* Create / Edit Modal */}
+      <Modal
+        title={
+          <Space>
+            <span style={{ fontSize: 18 }}>🟢</span>
+            {editing ? `Edit Muster Point — ${editing.name}` : 'New Mustering Point'}
+          </Space>
+        }
+        open={modalOpen}
+        onOk={() => musterForm.validateFields().then(saveMutation.mutate).catch(() => {})}
+        onCancel={() => { setModalOpen(false); setEditing(null); musterForm.resetFields(); }}
+        okText={editing ? 'Update' : 'Create Muster Point'}
+        confirmLoading={saveMutation.isPending}
+        width={580} destroyOnHidden
+      >
+        <Alert
+          type="success" showIcon style={{ marginBottom: 16 }}
+          message="Emergency Assembly Area"
+          description="Personnel scan in here during a muster to be recorded as safe. This zone is separate from regular access/work zones."
+        />
+        <Form form={musterForm} layout="vertical" size="middle">
+          <Row gutter={16}>
+            <Col span={14}>
+              <Form.Item name="name" label="Muster Point Name" rules={[{ required: true, message: 'Required' }]}>
+                <Input placeholder="e.g. Muster Station Alpha" />
+              </Form.Item>
+            </Col>
+            <Col span={10}>
+              <Form.Item name="code" label="Code" rules={[{ required: true, message: 'Required' }]}>
+                <Input placeholder="e.g. MSP-001" disabled={!!editing} />
+              </Form.Item>
+            </Col>
+          </Row>
+
+          <Form.Item name="evac_point" label="Assembly Point Display Name"
+            tooltip="Name shown on muster dashboards and headcount screens">
+            <Input placeholder="e.g. Lifeboat Station 3 / Forward Assembly Area" />
+          </Form.Item>
+
+          <Row gutter={16}>
+            <Col span={14}>
+              <Form.Item name="reader_sn" label="Headcount Reader"
+                tooltip="ZKTeco reader — personnel scan here to be marked SAFE during a muster event">
+                <Select
+                  showSearch
+                  allowClear
+                  placeholder="Select a reader terminal..."
+                  optionFilterProp="label"
+                  notFoundContent={
+                    <div style={{ textAlign: 'center', padding: '8px 0', color: '#9ca3af', fontSize: 12 }}>
+                      No registered terminals found
+                    </div>
+                  }
+                >
+                  {terminals.map(t => {
+                    const isOnline = t.status?.toLowerCase() === 'online';
+                    const inUse = musterPoints.find(mp => mp.reader_sn === t.sn && mp.id !== editing?.id);
+                    return (
+                      <Select.Option key={t.sn} value={t.sn} label={`${t.alias || t.sn} ${t.sn}`}>
+                        <Space style={{ width: '100%', justifyContent: 'space-between' }}>
+                          <Space size={6}>
+                            <div style={{ width: 7, height: 7, borderRadius: '50%',
+                              background: isOnline ? '#22c55e' : '#9ca3af', flexShrink: 0 }} />
+                            <div>
+                              <div style={{ fontWeight: 600, fontSize: 12.5 }}>
+                                {t.alias || `Terminal-${t.sn}`}
+                              </div>
+                              <div style={{ fontSize: 10.5, color: '#9ca3af', fontFamily: 'monospace' }}>
+                                {t.sn}{t.ip_address ? ` · ${t.ip_address}` : ''}
+                              </div>
+                            </div>
+                          </Space>
+                          <Space size={4}>
+                            <Tag color={isOnline ? 'success' : 'default'} style={{ margin: 0, fontSize: 10 }}>
+                              {isOnline ? 'Online' : 'Offline'}
+                            </Tag>
+                            {inUse && (
+                              <Tag color="warning" style={{ margin: 0, fontSize: 10 }}>
+                                → {inUse.name}
+                              </Tag>
+                            )}
+                          </Space>
+                        </Space>
+                      </Select.Option>
+                    );
+                  })}
+                </Select>
+              </Form.Item>
+            </Col>
+            <Col span={10}>
+              <Form.Item name="max_capacity" label="Capacity">
+                <InputNumber style={{ width: '100%' }} min={1} placeholder="Max persons" />
+              </Form.Item>
+            </Col>
+          </Row>
+
+          <Row gutter={16}>
+            <Col span={12}>
+              <Form.Item name="evac_gps" label="Assembly GPS"
+                tooltip="Format: lat,lon — e.g. 5.5557,5.7440">
+                <Input placeholder="5.5557,5.7440" />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item name="status" label="Status" initialValue="ACTIVE">
+                <Select>
+                  {['ACTIVE','INACTIVE','MAINTENANCE'].map(s => (
+                    <Select.Option key={s} value={s}>{s.charAt(0) + s.slice(1).toLowerCase()}</Select.Option>
+                  ))}
+                </Select>
+              </Form.Item>
+            </Col>
+          </Row>
+
+          <Divider style={{ margin: '4px 0 12px' }} />
+          <Row gutter={16}>
+            <Col span={8}>
+              <Form.Item name="state" label="Area / Location">
+                <Input placeholder="e.g. Offshore, Deck 3" />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item name="latitude" label="Latitude"
+                rules={[{ type: 'number', min: -90, max: 90 }]}>
+                <InputNumber style={{ width: '100%' }} step={0.0001} precision={6} placeholder="5.5557" />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item name="longitude" label="Longitude"
+                rules={[{ type: 'number', min: -180, max: 180 }]}>
+                <InputNumber style={{ width: '100%' }} step={0.0001} precision={6} placeholder="5.7440" />
+              </Form.Item>
+            </Col>
+          </Row>
+        </Form>
+
+        {/* Reader → Emergency flow explanation */}
+        <div style={{ marginTop: 8, background: '#f8fafc', border: '1px solid #e2e8f0',
+          borderRadius: 8, padding: '10px 14px' }}>
+          <div style={{ fontSize: 11.5, fontWeight: 700, color: '#475569', marginBottom: 8,
+            display: 'flex', alignItems: 'center', gap: 6 }}>
+            <InfoCircleOutlined style={{ color: '#0284c7' }} />
+            How muster point readers work during an emergency
+          </div>
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 0 }}>
+            {[
+              { icon: '1', color: '#7c3aed', bg: '#f3e8ff', title: 'Assign reader here', desc: 'Link a ZKTeco terminal to this muster point.' },
+              { icon: '2', color: '#0284c7', bg: '#e0f2fe', title: 'Emergency declared', desc: 'All POB personnel are flagged as MISSING. Zone occupancy counts reset to 0.' },
+              { icon: '3', color: '#059669', bg: '#d1fae5', title: 'Staff scan at reader', desc: 'Each badge-scan marks that person as SAFE in the muster event log.' },
+              { icon: '4', color: '#dc2626', bg: '#fee2e2', title: 'Unscanned = rescue', desc: 'Remaining MISSING persons show their last-known zone to guide rescue teams.' },
+            ].map((step, i, arr) => (
+              <React.Fragment key={i}>
+                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center' }}>
+                  <div style={{ width: 26, height: 26, borderRadius: '50%', background: step.bg,
+                    border: `2px solid ${step.color}`, display: 'flex', alignItems: 'center',
+                    justifyContent: 'center', fontWeight: 800, fontSize: 12, color: step.color, marginBottom: 5 }}>
+                    {step.icon}
+                  </div>
+                  <div style={{ fontSize: 10.5, fontWeight: 700, color: '#1e293b', lineHeight: 1.3 }}>{step.title}</div>
+                  <div style={{ fontSize: 10, color: '#64748b', marginTop: 2, lineHeight: 1.3 }}>{step.desc}</div>
+                </div>
+                {i < arr.length - 1 && (
+                  <div style={{ alignSelf: 'flex-start', marginTop: 11, color: '#cbd5e1', fontSize: 14, flexShrink: 0 }}>›</div>
+                )}
+              </React.Fragment>
+            ))}
+          </div>
+        </div>
+      </Modal>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────────
+   MAIN COMPONENT
+───────────────────────────────────────────────────────────────── */
 const ZoneManagement = () => {
   const { message } = App.useApp();
   const [activeTab,        setActiveTab]        = useState('zones');
-  const [detailZone,       setDetailZone]       = useState(null);
+  const [detailZoneId,     setDetailZoneId]     = useState(null);
   const [editingZone,      setEditingZone]      = useState(null);
   const [isModalOpen,      setIsModalOpen]      = useState(false);
   const [readerZone,       setReaderZone]       = useState(null);
@@ -1937,7 +2547,10 @@ const ZoneManagement = () => {
   const [typeFilter,       setTypeFilter]       = useState(null);
   const [statusFilter,     setStatusFilter]     = useState(null);
   const [hazardFilter,     setHazardFilter]     = useState(null);
+  const [sortBy,           setSortBy]           = useState('pob_desc');
   const [selectedRowKeys,  setSelectedRowKeys]  = useState([]);
+  const [wsStatus,         setWsStatus]         = useState('connecting');
+  const wsRef = useRef(null);
   const [form]       = Form.useForm();
   const [readerForm] = Form.useForm();
   const queryClient  = useQueryClient();
@@ -1960,25 +2573,59 @@ const ZoneManagement = () => {
     enabled: isReaderModalOpen,
   });
 
+  const { data: modalReadersData, isLoading: modalReadersLoading } = useQuery({
+    queryKey: ['zone-readers', readerZone?.id],
+    queryFn:  () => apiService.get(`/api/v1/zones/${readerZone?.id}/readers`),
+    enabled:  isReaderModalOpen && !!readerZone?.id,
+  });
+
   const zones = Array.isArray(dashData) ? dashData : [];
   const devices = Array.isArray(devicesData) ? devicesData : [];
+  const currentModalReaders = Array.isArray(modalReadersData) ? modalReadersData : [];
 
-  const filtered = zones.filter(z => {
-    if (searchVal.trim()) {
-      const q = searchVal.toLowerCase();
-      if (!z.name.toLowerCase().includes(q) && !z.code.toLowerCase().includes(q) && !(z.state || '').toLowerCase().includes(q)) return false;
-    }
-    if (typeFilter   && z.zone_type   !== typeFilter)   return false;
-    if (statusFilter && z.status      !== statusFilter) return false;
-    if (hazardFilter && z.hazard_level !== hazardFilter) return false;
-    return true;
-  });
+  const musterPoints = useMemo(() => zones.filter(z => z.zone_type === 'MUSTER_POINT'), [zones]);
+
+  const HAZARD_ORDER = { CRITICAL: 4, HIGH: 3, MEDIUM: 2, LOW: 1 };
+
+  const filtered = useMemo(() => {
+    const result = zones.filter(z => {
+      if (z.zone_type === 'MUSTER_POINT') return false;
+      if (searchVal.trim()) {
+        const q = searchVal.toLowerCase();
+        if (!z.name.toLowerCase().includes(q) && !z.code.toLowerCase().includes(q) && !(z.state || '').toLowerCase().includes(q)) return false;
+      }
+      if (typeFilter   && z.zone_type    !== typeFilter)   return false;
+      if (statusFilter && z.status       !== statusFilter) return false;
+      if (hazardFilter && z.hazard_level !== hazardFilter) return false;
+      return true;
+    });
+
+    return [...result].sort((a, b) => {
+      switch (sortBy) {
+        case 'pob_desc':  return (b.current_personnel_count ?? 0) - (a.current_personnel_count ?? 0);
+        case 'cap_pct': {
+          const pA = a.max_capacity ? (a.current_personnel_count ?? 0) / a.max_capacity : 0;
+          const pB = b.max_capacity ? (b.current_personnel_count ?? 0) / b.max_capacity : 0;
+          return pB - pA;
+        }
+        case 'hazard':    return (HAZARD_ORDER[b.hazard_level] || 0) - (HAZARD_ORDER[a.hazard_level] || 0);
+        case 'activity':  return new Date(b.last_activity_time || 0) - new Date(a.last_activity_time || 0);
+        default:          return a.name.localeCompare(b.name);
+      }
+    });
+  }, [zones, typeFilter, statusFilter, hazardFilter, searchVal, sortBy]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const hasFilters = searchVal || typeFilter || statusFilter || hazardFilter;
 
-  const totalPOB    = zones.reduce((s, z) => s + (z.current_personnel_count || 0), 0);
-  const activeZones = zones.filter(z => z.is_active && z.status === 'ACTIVE').length;
-  const totalReaders= zones.reduce((s, z) => s + (z.device_count || z.reader_count || 0), 0);
-  const alerts      = zones.filter(z => ['EMERGENCY','LOCKDOWN'].includes(z.status)).length;
+  const { totalPOB, activeZones, totalReaders, alerts } = useMemo(() => ({
+    totalPOB:     zones.reduce((s, z) => s + (z.current_personnel_count || 0), 0),
+    activeZones:  zones.filter(z => z.is_active && z.status === 'ACTIVE').length,
+    totalReaders: zones.reduce((s, z) => s + (z.device_count || z.reader_count || 0), 0),
+    alerts:       zones.filter(z => ['EMERGENCY','LOCKDOWN'].includes(z.status)).length,
+  }), [zones]);
+
+  // Always reflects the latest polling data — no manual sync needed
+  const detailZone = useMemo(() => zones.find(z => z.id === detailZoneId) ?? null, [zones, detailZoneId]);
 
   const saveMutation = useMutation({
     mutationFn: (values) => editingZone
@@ -1997,7 +2644,7 @@ const ZoneManagement = () => {
       apiService.delete(`/api/v1/zones/${id}/${cascade ? '?cascade=true' : ''}`),
     onSuccess: (res, { id }) => {
       message.success(res?.message || 'Zone deleted');
-      if (detailZone?.id === id) setDetailZone(null);
+      if (detailZoneId === id) setDetailZoneId(null);
       queryClient.invalidateQueries({ queryKey: ['zones-dashboard'] });
     },
     onError: (err, vars) => {
@@ -2023,17 +2670,33 @@ const ZoneManagement = () => {
   });
 
   const assignReaderMutation = useMutation({
-    mutationFn: (values) => apiService.post(`/api/v1/zones/${readerZone?.id}/assign-reader`, values),
-    onSuccess: (res) => {
-      message.success(res?.moved_from ? 'Reader moved to zone' : 'Reader assigned to zone');
-      setIsReaderModalOpen(false); readerForm.resetFields();
+    mutationFn: (values) => {
+      const ids = Array.isArray(values.device_id) ? values.device_id : [values.device_id];
+      return Promise.all(ids.map(id =>
+        apiService.post(`/api/v1/zones/${readerZone?.id}/assign-reader`, { ...values, device_id: id })
+      ));
+    },
+    onSuccess: (results) => {
+      const moved = results.some(r => r?.moved_from);
+      message.success(moved ? 'Reader(s) moved to zone' : 'Reader(s) assigned to zone');
+      readerForm.resetFields();
       queryClient.invalidateQueries({ queryKey: ['zones-dashboard'] });
       queryClient.invalidateQueries({ queryKey: ['zone-readers', readerZone?.id] });
-      if (res?.moved_from) queryClient.invalidateQueries({ queryKey: ['zone-readers', res.moved_from] });
       queryClient.invalidateQueries({ queryKey: ['adms-terminals'] });
       queryClient.invalidateQueries({ queryKey: ['available-devices'] });
     },
     onError: err => message.error(err?.message || 'Assignment failed'),
+  });
+
+  const removeReaderModalMutation = useMutation({
+    mutationFn: ({ zoneId, readerId }) => apiService.delete(`/api/v1/zones/${zoneId}/readers/${readerId}`),
+    onSuccess: () => {
+      message.success('Reader removed from zone');
+      queryClient.invalidateQueries({ queryKey: ['zone-readers', readerZone?.id] });
+      queryClient.invalidateQueries({ queryKey: ['zones-dashboard'] });
+      queryClient.invalidateQueries({ queryKey: ['available-devices'] });
+    },
+    onError: err => message.error(err?.message || 'Failed to remove reader'),
   });
 
   const patchStatusM = useMutation({
@@ -2043,6 +2706,18 @@ const ZoneManagement = () => {
       queryClient.invalidateQueries({ queryKey: ['zones-dashboard'] });
     },
     onError: err => message.error(err?.message || 'Status update failed'),
+  });
+
+  const resetOccupancyM = useMutation({
+    mutationFn: (zoneId) => apiService.post(`/api/v1/zones/${zoneId}/reset-occupancy`, {}),
+    onSuccess: (data) => {
+      const n = data?.cleared_count ?? 0;
+      message.success(n > 0
+        ? `Occupancy reset. ${n} stale check-in${n !== 1 ? 's' : ''} cleared.`
+        : 'Zone occupancy reset to 0.');
+      queryClient.invalidateQueries({ queryKey: ['zones-dashboard'] });
+    },
+    onError: err => message.error(err?.message || 'Reset failed'),
   });
 
   const exportCSV = () => {
@@ -2065,96 +2740,127 @@ const ZoneManagement = () => {
     a.click(); URL.revokeObjectURL(a.href);
   };
 
-  const handleEdit = (zone) => { setEditingZone(zone); form.setFieldsValue(zone); setIsModalOpen(true); };
+  const handleEdit = (zone) => {
+    setEditingZone(zone);
+    // Only pass known flat fields — passing the full zone object can include
+    // nested relational data that triggers AntD's circular-reference warning.
+    form.setFieldsValue({
+      name: zone.name,
+      code: zone.code,
+      zone_type: zone.zone_type,
+      status: zone.status,
+      hazard_level: zone.hazard_level,
+      state: zone.state,
+      latitude: zone.latitude,
+      longitude: zone.longitude,
+      max_capacity: zone.max_capacity,
+      description: zone.description,
+      parent_zone_id: zone.parent_zone_id,
+      tile_position: zone.tile_position,
+      display_color: zone.display_color,
+      reader_sn: zone.reader_sn,
+      evac_point: zone.evac_point,
+      evac_gps: zone.evac_gps,
+    });
+    setIsModalOpen(true);
+  };
   const handleAssignReader = (zone) => { setReaderZone(zone); setIsReaderModalOpen(true); };
 
   useEffect(() => {
-    if (detailZone && zones.length) {
-      const updated = zones.find(z => z.id === detailZone.id);
-      if (updated) setDetailZone(updated);
-    }
-  }, [zones]);
+    let retryTimer = null;
+    const connect = () => {
+      const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const ws = new WebSocket(`${proto}//${window.location.host}/api/v1/zones/ws`);
+      wsRef.current = ws;
+      setWsStatus('connecting');
+      ws.onopen  = () => setWsStatus('connected');
+      ws.onclose = () => { setWsStatus('disconnected'); retryTimer = setTimeout(connect, 5000); };
+      ws.onerror = () => ws.close();
+    };
+    connect();
+    return () => {
+      clearTimeout(retryTimer);
+      wsRef.current?.close();
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
-    <div style={{ background: '#F3F4F8', minHeight: '100vh' }}>
-
-      {/* ── Header ── */}
-      <div style={{
-        background: 'linear-gradient(135deg, #0a1628 0%, #0d2140 50%, #071428 100%)',
-        padding: '22px 28px 20px',
-        boxShadow: '0 4px 24px rgba(0,0,0,0.35)',
-      }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
-            <div style={{
-              width: 52, height: 52, borderRadius: 14,
-              background: 'linear-gradient(135deg, #0EA5E9, #0284C7)',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              boxShadow: '0 4px 16px rgba(14,165,233,0.4)', fontSize: 24, color: 'white',
-            }}>
-              <GlobalOutlined />
-            </div>
+    <div className="zone-module">
+      <Card
+        title={
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', overflow: 'visible' }}>
             <div>
-              <div style={{ color: 'white', fontSize: 20, fontWeight: 700, lineHeight: 1.2 }}>Zone Management</div>
-              <div style={{ color: 'rgba(255,255,255,0.5)', fontSize: 13, marginTop: 3 }}>
+              <div style={{ fontWeight: 700, fontSize: 16 }}>Zone Management</div>
+              <div style={{ fontSize: 12, color: '#64748b', fontWeight: 400, marginTop: 2 }}>
                 Real-time personnel tracking via ZKTeco ADMS readers over 4G
               </div>
             </div>
+            <Space size="middle" style={{ overflow: 'visible' }}>
+              {/* WebSocket live status */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
+                <div style={{
+                  width: 7, height: 7, borderRadius: '50%', flexShrink: 0,
+                  background: wsStatus === 'connected' ? '#10B981' : wsStatus === 'connecting' ? '#F59E0B' : '#6B7280',
+                  animation: wsStatus === 'connected' ? 'zoneDotPulse 2s infinite' : 'none',
+                }} />
+                <span style={{
+                  fontSize: 10.5, fontWeight: 700, letterSpacing: '0.06em',
+                  color: wsStatus === 'connected' ? '#10B981' : wsStatus === 'connecting' ? '#F59E0B' : '#6B7280',
+                }}>
+                  {wsStatus === 'connected' ? 'LIVE' : wsStatus === 'connecting' ? 'CONNECTING' : 'OFFLINE'}
+                </span>
+              </div>
+              <Badge count={totalPOB} showZero color="#0078D4">
+                <TeamOutlined style={{ fontSize: 16 }} />
+              </Badge>
+              <Badge count={activeZones} showZero color="#059669">
+                <CheckCircleOutlined style={{ fontSize: 16 }} />
+              </Badge>
+              {alerts > 0 && (
+                <Badge count={alerts} color="#DC2626">
+                  <AlertOutlined style={{ fontSize: 16 }} />
+                </Badge>
+              )}
+              <Button icon={<ReloadOutlined />} onClick={() => refetch()} loading={dashLoading} size="small">
+                Refresh
+              </Button>
+              <Button type="primary" icon={<PlusOutlined />} size="small" style={{ fontWeight: 600 }}
+                onClick={() => { setEditingZone(null); form.resetFields(); setIsModalOpen(true); }}>
+                New Zone
+              </Button>
+            </Space>
           </div>
-          <Space size={10} align="center">
-            {dataUpdatedAt > 0 && (
-              <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.38)', whiteSpace: 'nowrap' }}>
-                {dashLoading ? 'Refreshing…' : `Updated ${timeAgo(new Date(dataUpdatedAt).toISOString())}`}
-              </span>
-            )}
-            <Button
-              icon={<ReloadOutlined />}
-              onClick={() => refetch()}
-              loading={dashLoading}
-              style={{ background: 'rgba(255,255,255,0.1)', border: '1px solid rgba(255,255,255,0.2)', color: 'white', borderRadius: 8 }}
-            >Refresh</Button>
-            <Button
-              type="primary" icon={<PlusOutlined />}
-              onClick={() => { setEditingZone(null); form.resetFields(); setIsModalOpen(true); }}
-              style={{ borderRadius: 8, fontWeight: 600 }}
-            >New Zone</Button>
-          </Space>
-        </div>
-
-        {/* KPI strip inside header */}
-        <Row gutter={12} style={{ marginTop: 20 }}>
+        }
+        styles={{ header: { overflow: 'visible' } }}
+      >
+        {/* ── KPI strip ── */}
+        <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
           {[
-            { label: 'Total Personnel On Board', value: totalPOB,     from: '#0078D4', to: '#005A9E', icon: <TeamOutlined />, big: true },
-            { label: 'Active Zones',              value: activeZones,  from: '#059669', to: '#10B981', icon: <CheckCircleOutlined /> },
-            { label: 'Total Zones',               value: zones.length, from: '#374151', to: '#1F2937', icon: <RadarChartOutlined /> },
-            { label: 'ADMS Readers',              value: totalReaders, from: '#6D28D9', to: '#7C3AED', icon: <ApiOutlined /> },
-            { label: 'Alerts',                    value: alerts,       from: '#B91C1C', to: '#DC2626', icon: <AlertOutlined /> },
+            { label: 'Total Personnel On Board', value: totalPOB,     color: '#0078D4', icon: <TeamOutlined /> },
+            { label: 'Active Zones',              value: activeZones,  color: '#059669', icon: <CheckCircleOutlined /> },
+            { label: 'Total Zones',               value: zones.length, color: '#374151', icon: <RadarChartOutlined /> },
+            { label: 'ADMS Readers',              value: totalReaders, color: '#6D28D9', icon: <ApiOutlined /> },
+            { label: 'Alerts',                    value: alerts,       color: alerts > 0 ? '#DC2626' : '#94a3b8', icon: <AlertOutlined /> },
           ].map(s => (
-            <Col key={s.label} xs={12} sm={s.big ? 6 : 4} lg={s.big ? 6 : 4}>
+            <Col key={s.label} xs={12} sm={s.label === 'Total Personnel On Board' ? 6 : 4}>
               <div style={{
-                background: `linear-gradient(135deg, ${s.from} 0%, ${s.to} 100%)`,
-                borderRadius: 12, padding: s.big ? '16px 20px' : '12px 16px',
-                boxShadow: `0 4px 14px ${s.from}55`,
+                background: '#fff', borderRadius: 10, padding: '14px 18px',
+                border: `1px solid ${s.label === 'Alerts' && alerts > 0 ? '#fecaca' : '#f0f0f0'}`,
+                borderTop: `3px solid ${s.color}`,
+                boxShadow: '0 1px 4px rgba(0,0,0,0.04)',
                 display: 'flex', alignItems: 'center', gap: 12,
               }}>
-                <div style={{
-                  width: s.big ? 44 : 36, height: s.big ? 44 : 36, borderRadius: 10,
-                  background: 'rgba(255,255,255,0.15)',
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  fontSize: s.big ? 20 : 16, color: 'white', flexShrink: 0,
-                }}>{s.icon}</div>
+                <div style={{ width: 36, height: 36, borderRadius: 9, background: `${s.color}18`, display: 'flex', alignItems: 'center', justifyContent: 'center', color: s.color, fontSize: 16, flexShrink: 0 }}>
+                  {s.icon}
+                </div>
                 <div>
-                  <div style={{ fontSize: s.big ? 32 : 24, fontWeight: 800, color: 'white', lineHeight: 1 }}>{s.value ?? 0}</div>
-                  <div style={{ fontSize: 10.5, color: 'rgba(255,255,255,0.7)', marginTop: 2, lineHeight: 1.2 }}>{s.label}</div>
+                  <div style={{ fontSize: 11, color: '#8c8c8c', textTransform: 'uppercase', fontWeight: 600, letterSpacing: '0.5px' }}>{s.label}</div>
+                  <div style={{ fontSize: 24, fontWeight: 700, color: s.color, lineHeight: 1.2, marginTop: 2 }}>{s.value ?? 0}</div>
                 </div>
               </div>
             </Col>
           ))}
         </Row>
-      </div>
-
-      {/* ── Tabs content ── */}
-      <div style={{ padding: '20px 28px' }}>
 
         {/* Emergency / lockdown banner */}
         {zones.some(z => ['EMERGENCY','LOCKDOWN'].includes(z.status)) && (
@@ -2217,70 +2923,40 @@ const ZoneManagement = () => {
                 <Spin spinning={dashLoading}>
                   {/* Filter toolbar */}
                   <div style={{ marginBottom: 14, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                    <Select
-                      placeholder="All Types"
-                      allowClear
-                      value={typeFilter}
-                      onChange={setTypeFilter}
-                      size="small"
-                      style={{ width: 148 }}
-                      popupMatchSelectWidth={false}
-                    >
-                      {Object.entries(ZONE_TYPE_LABELS).map(([v, l]) => {
-                        const zs = getZoneStyle(v);
-                        return (
-                          <Select.Option key={v} value={v}>
-                            <span style={{ color: zs.color, marginRight: 6 }}>{zs.icon}</span>{l}
-                          </Select.Option>
-                        );
-                      })}
-                    </Select>
-                    <Select
-                      placeholder="All Statuses"
-                      allowClear
-                      value={statusFilter}
-                      onChange={setStatusFilter}
-                      size="small"
-                      style={{ width: 138 }}
-                    >
-                      {['ACTIVE','INACTIVE','MAINTENANCE','EMERGENCY','LOCKDOWN'].map(s => {
-                        const ss = getStatusStyle(s);
-                        return (
-                          <Select.Option key={s} value={s}>
-                            <span style={{ color: ss.color, marginRight: 5 }}>●</span>
-                            {s.charAt(0) + s.slice(1).toLowerCase()}
-                          </Select.Option>
-                        );
-                      })}
-                    </Select>
-                    <Select
-                      placeholder="All Hazard Levels"
-                      allowClear
-                      value={hazardFilter}
-                      onChange={setHazardFilter}
-                      size="small"
-                      style={{ width: 158 }}
-                    >
-                      {['LOW','MEDIUM','HIGH','CRITICAL'].map(h => {
-                        const hs = getHazardStyle(h);
-                        return (
-                          <Select.Option key={h} value={h}>
-                            <span style={{ color: hs.color, marginRight: 5, fontWeight: 700 }}>⚠</span>
-                            {h.charAt(0) + h.slice(1).toLowerCase()} Hazard
-                          </Select.Option>
-                        );
-                      })}
-                    </Select>
-                    {hasFilters && (
-                      <Button
-                        size="small" type="link"
-                        style={{ color: '#EF4444', padding: '0 4px', fontSize: 12 }}
-                        onClick={() => { setSearchVal(''); setTypeFilter(null); setStatusFilter(null); setHazardFilter(null); }}
-                      >✕ Clear</Button>
-                    )}
-                    <span style={{ marginLeft: 'auto', fontSize: 12, color: '#9CA3AF' }}>
-                      {hasFilters ? `${filtered.length} of ${zones.length}` : zones.length} zone{zones.length !== 1 ? 's' : ''}
-                    </span>
+                    <ZoneFilterBar
+                      typeFilter={typeFilter} setTypeFilter={setTypeFilter}
+                      statusFilter={statusFilter} setStatusFilter={setStatusFilter}
+                      hazardFilter={hazardFilter} setHazardFilter={setHazardFilter}
+                      onClear={() => { setSearchVal(''); setTypeFilter(null); setStatusFilter(null); setHazardFilter(null); }}
+                    />
+
+                    <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <span style={{ fontSize: 11, color: '#9CA3AF', whiteSpace: 'nowrap' }}>Sort:</span>
+                      {[
+                        { key: 'pob_desc', label: 'POB ↓' },
+                        { key: 'name',     label: 'Name'   },
+                        { key: 'cap_pct',  label: 'Cap %'  },
+                        { key: 'hazard',   label: 'Hazard' },
+                        { key: 'activity', label: 'Recent' },
+                      ].map(s => (
+                        <button
+                          key={s.key}
+                          onClick={() => setSortBy(s.key)}
+                          style={{
+                            all: 'unset', cursor: 'pointer',
+                            padding: '3px 10px', borderRadius: 20, fontSize: 11.5,
+                            fontWeight: sortBy === s.key ? 700 : 500,
+                            background: sortBy === s.key ? '#1D4ED8' : '#F3F4F6',
+                            color: sortBy === s.key ? 'white' : '#374151',
+                            border: `1px solid ${sortBy === s.key ? '#1D4ED8' : '#E5E7EB'}`,
+                            transition: 'all 0.15s', whiteSpace: 'nowrap',
+                          }}
+                        >{s.label}</button>
+                      ))}
+                      <span style={{ fontSize: 12, color: '#9CA3AF', whiteSpace: 'nowrap', marginLeft: 6 }}>
+                        {hasFilters ? `${filtered.length} of ${zones.length}` : zones.length} zone{zones.length !== 1 ? 's' : ''}
+                      </span>
+                    </div>
                   </div>
 
                   {filtered.length === 0 ? (
@@ -2302,11 +2978,12 @@ const ZoneManagement = () => {
                         <Col key={zone.id} xs={24} sm={12} lg={8} xl={6}>
                           <ZoneCard
                             zone={zone}
-                            onView={setDetailZone}
+                            onView={z => setDetailZoneId(z.id)}
                             onEdit={handleEdit}
                             onAssignReader={handleAssignReader}
                             onDelete={id => deleteMutation.mutate({ id })}
                             onStatusChange={(id, s) => patchStatusM.mutate({ id, status: s })}
+                            onResetOccupancy={id => resetOccupancyM.mutate(id)}
                           />
                         </Col>
                       ))}
@@ -2328,73 +3005,12 @@ const ZoneManagement = () => {
                     background: '#FAFAFA',
                   }}>
                     {/* Filter chips */}
-                    <Select
-                      placeholder="All Types"
-                      allowClear
-                      value={typeFilter}
-                      onChange={setTypeFilter}
-                      size="small"
-                      style={{ width: 148 }}
-                      popupMatchSelectWidth={false}
-                    >
-                      {Object.entries(ZONE_TYPE_LABELS).map(([v, l]) => {
-                        const zs = getZoneStyle(v);
-                        return (
-                          <Select.Option key={v} value={v}>
-                            <span style={{ color: zs.color, marginRight: 6 }}>{zs.icon}</span>{l}
-                          </Select.Option>
-                        );
-                      })}
-                    </Select>
-
-                    <Select
-                      placeholder="All Statuses"
-                      allowClear
-                      value={statusFilter}
-                      onChange={setStatusFilter}
-                      size="small"
-                      style={{ width: 138 }}
-                    >
-                      {['ACTIVE','INACTIVE','MAINTENANCE','EMERGENCY','LOCKDOWN'].map(s => {
-                        const ss = getStatusStyle(s);
-                        return (
-                          <Select.Option key={s} value={s}>
-                            <span style={{ color: ss.color, marginRight: 5 }}>●</span>
-                            {s.charAt(0) + s.slice(1).toLowerCase()}
-                          </Select.Option>
-                        );
-                      })}
-                    </Select>
-
-                    <Select
-                      placeholder="All Hazard Levels"
-                      allowClear
-                      value={hazardFilter}
-                      onChange={setHazardFilter}
-                      size="small"
-                      style={{ width: 158 }}
-                    >
-                      {['LOW','MEDIUM','HIGH','CRITICAL'].map(h => {
-                        const hs = getHazardStyle(h);
-                        return (
-                          <Select.Option key={h} value={h}>
-                            <span style={{ color: hs.color, marginRight: 5, fontWeight: 700 }}>⚠</span>
-                            {h.charAt(0) + h.slice(1).toLowerCase()} Hazard
-                          </Select.Option>
-                        );
-                      })}
-                    </Select>
-
-                    {hasFilters && (
-                      <Button
-                        size="small"
-                        type="link"
-                        style={{ color: '#EF4444', padding: '0 4px', fontSize: 12 }}
-                        onClick={() => { setSearchVal(''); setTypeFilter(null); setStatusFilter(null); setHazardFilter(null); }}
-                      >
-                        ✕ Clear filters
-                      </Button>
-                    )}
+                    <ZoneFilterBar
+                      typeFilter={typeFilter} setTypeFilter={setTypeFilter}
+                      statusFilter={statusFilter} setStatusFilter={setStatusFilter}
+                      hazardFilter={hazardFilter} setHazardFilter={setHazardFilter}
+                      onClear={() => { setSearchVal(''); setTypeFilter(null); setStatusFilter(null); setHazardFilter(null); }}
+                    />
 
                     <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 12 }}>
                       {hasFilters && (
@@ -2438,7 +3054,7 @@ const ZoneManagement = () => {
                         style={{ borderColor: '#93C5FD', color: '#1D4ED8', background: 'white', borderRadius: 6 }}
                         onClick={() => {
                           const zone = filtered.find(z => z.id === selectedRowKeys[0]);
-                          if (zone) setDetailZone(zone);
+                          if (zone) setDetailZoneId(zone.id);
                         }}
                         disabled={selectedRowKeys.length !== 1}
                       >View Detail</Button>
@@ -2746,7 +3362,7 @@ const ZoneManagement = () => {
                             <Tooltip title="View Detail">
                               <Button
                                 size="small" type="text" icon={<EyeOutlined />}
-                                onClick={() => setDetailZone(record)}
+                                onClick={() => setDetailZoneId(record.id)}
                                 style={{ color: '#0078D4', width: 28, height: 28 }}
                               />
                             </Tooltip>
@@ -2785,19 +3401,54 @@ const ZoneManagement = () => {
             {
               key: 'map',
               label: <Space size={5}><CompassOutlined />GPS Map</Space>,
-              children: activeTab === 'map' ? <ZoneMapView zones={zones} /> : <div />,
+              forceRender: true,
+              children: <ZoneMapView zones={zones} />,
             },
             {
               key: 'readers',
               label: <Space size={5}><ApiOutlined />ADMS Readers</Space>,
               children: <ReadersTab />,
             },
+            {
+              key: 'muster-points',
+              label: (
+                <Space size={5}>
+                  <SafetyOutlined style={{ color: '#10B981' }} />
+                  <span>Muster Points</span>
+                  {musterPoints.length > 0 && (
+                    <span style={{ background: '#10B981', color: 'white', borderRadius: 10,
+                      padding: '0 6px', fontSize: 10.5, fontWeight: 700, lineHeight: '16px' }}>
+                      {musterPoints.length}
+                    </span>
+                  )}
+                </Space>
+              ),
+              children: (
+                <MusterPointsTab
+                  musterPoints={musterPoints}
+                  isLoading={dashLoading}
+                />
+              ),
+            },
           ]}
         />
-      </div>
 
       {/* ── Detail Drawer ── */}
-      <ZoneDetailDrawer zone={detailZone} open={!!detailZone} onClose={() => setDetailZone(null)} />
+      {(() => {
+        const navList = filtered.length > 0 ? filtered : zones;
+        const idx = detailZone ? navList.findIndex(z => z.id === detailZone.id) : -1;
+        return (
+          <ZoneDetailDrawer
+            zone={detailZone}
+            open={!!detailZone}
+            onClose={() => setDetailZoneId(null)}
+            hasPrev={idx > 0}
+            hasNext={idx >= 0 && idx < navList.length - 1}
+            onPrev={() => idx > 0 && setDetailZoneId(navList[idx - 1].id)}
+            onNext={() => idx >= 0 && idx < navList.length - 1 && setDetailZoneId(navList[idx + 1].id)}
+          />
+        );
+      })()}
 
       {/* ── Create / Edit Modal ── */}
       <Modal
@@ -2808,7 +3459,7 @@ const ZoneManagement = () => {
           </Space>
         }
         open={isModalOpen}
-        onOk={() => form.validateFields().then(saveMutation.mutate)}
+        onOk={() => form.validateFields().then(saveMutation.mutate).catch(() => {})}
         onCancel={() => { setIsModalOpen(false); setEditingZone(null); form.resetFields(); }}
         okText={editingZone ? 'Update Zone' : 'Create Zone'}
         confirmLoading={saveMutation.isPending}
@@ -2841,7 +3492,9 @@ const ZoneManagement = () => {
             <Col span={8}>
               <Form.Item name="zone_type" label="Zone Type" initialValue="LOCATION" rules={[{ required: true }]}>
                 <Select showSearch optionFilterProp="children">
-                  {Object.entries(ZONE_TYPE_LABELS).map(([v, l]) => <Select.Option key={v} value={v}>{l}</Select.Option>)}
+                  {Object.entries(ZONE_TYPE_LABELS)
+                    .filter(([v]) => v !== 'MUSTER_POINT')
+                    .map(([v, l]) => <Select.Option key={v} value={v}>{l}</Select.Option>)}
                 </Select>
               </Form.Item>
             </Col>
@@ -2869,20 +3522,22 @@ const ZoneManagement = () => {
               </Form.Item>
             </Col>
             <Col span={8}>
-              <Form.Item name="latitude" label="Latitude (GPS)" tooltip="e.g. 5.5557">
-                <Input placeholder="e.g. 5.5557" />
+              <Form.Item name="latitude" label="Latitude (GPS)" tooltip="Decimal degrees, e.g. 5.5557 (−90 to 90)"
+                rules={[{ type: 'number', min: -90, max: 90, message: 'Must be −90 to 90' }]}>
+                <InputNumber style={{ width: '100%' }} placeholder="e.g. 5.5557" step={0.0001} precision={6} />
               </Form.Item>
             </Col>
             <Col span={8}>
-              <Form.Item name="longitude" label="Longitude (GPS)" tooltip="e.g. 5.7440">
-                <Input placeholder="e.g. 5.7440" />
+              <Form.Item name="longitude" label="Longitude (GPS)" tooltip="Decimal degrees, e.g. 5.7440 (−180 to 180)"
+                rules={[{ type: 'number', min: -180, max: 180, message: 'Must be −180 to 180' }]}>
+                <InputNumber style={{ width: '100%' }} placeholder="e.g. 5.7440" step={0.0001} precision={6} />
               </Form.Item>
             </Col>
           </Row>
           <Row gutter={16}>
             <Col span={8}>
               <Form.Item name="max_capacity" label="Max Capacity">
-                <Input type="number" min={0} placeholder="Max persons" />
+                <InputNumber style={{ width: '100%' }} min={0} placeholder="Max persons" />
               </Form.Item>
             </Col>
             <Col span={8}>
@@ -2898,12 +3553,26 @@ const ZoneManagement = () => {
               </Form.Item>
             </Col>
           </Row>
+          <Row gutter={16}>
+            <Col span={12}>
+              <Form.Item name="contact_phone" label="Contact Phone">
+                <Input placeholder="e.g. +234 800 000 0000" />
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item name="floor_plan_url" label="Location Image URL"
+                tooltip="Used as the zone background image on the POB Dashboard. Must be a publicly accessible image URL.">
+                <Input placeholder="https://…/image.png" />
+              </Form.Item>
+            </Col>
+          </Row>
           <Form.Item name="address" label="Physical Address">
             <Input placeholder="Full address or location description" />
           </Form.Item>
           <Form.Item name="description" label="Description">
             <Input.TextArea rows={2} placeholder="Zone description and operational notes" />
           </Form.Item>
+
           <Divider style={{ margin: '8px 0' }} />
           <Row gutter={16}>
             <Col span={8}>
@@ -2942,99 +3611,109 @@ const ZoneManagement = () => {
 
       {/* ── Assign Reader Modal ── */}
       <Modal
-        title={<Space><ApiOutlined style={{ color: '#7C3AED' }} />Assign ADMS Reader — {readerZone?.name}</Space>}
+        title={<Space><ApiOutlined style={{ color: '#7C3AED' }} />Readers — {readerZone?.name}</Space>}
         open={isReaderModalOpen}
         onOk={() => readerForm.validateFields().then(assignReaderMutation.mutate).catch(() => {})}
         onCancel={() => { setIsReaderModalOpen(false); readerForm.resetFields(); }}
-        okText="Assign Reader" confirmLoading={assignReaderMutation.isPending}
-        width={560} destroyOnHidden
+        okText="Assign Selected" confirmLoading={assignReaderMutation.isPending}
+        width={620} destroyOnHidden
       >
+        {/* ── Currently assigned readers ── */}
+        <div style={{ marginBottom: 20 }}>
+          <div style={{ fontWeight: 600, fontSize: 13, color: '#374151', marginBottom: 10, display: 'flex', alignItems: 'center', gap: 6 }}>
+            <ApiOutlined style={{ color: '#7C3AED' }} />
+            Assigned Readers
+            <Tag color="purple" style={{ marginLeft: 4, fontSize: 11 }}>{currentModalReaders.length}</Tag>
+          </div>
+          {modalReadersLoading ? (
+            <div style={{ textAlign: 'center', padding: '16px 0', color: '#9CA3AF', fontSize: 12 }}>Loading…</div>
+          ) : currentModalReaders.length === 0 ? (
+            <div style={{ background: '#F9FAFB', border: '1px dashed #D1D5DB', borderRadius: 8, padding: '14px 16px', textAlign: 'center', color: '#9CA3AF', fontSize: 12 }}>
+              No readers assigned to this zone yet
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {currentModalReaders.map(r => {
+                const purposeColors = { ACCESS_ENTRY: '#10B981', ACCESS_EXIT: '#EF4444', MUSTERING: '#F59E0B', ATTENDANCE: '#6B7280', POB: '#3B82F6', EMERGENCY: '#DC2626' };
+                const purposeLabels = { ACCESS_ENTRY: 'Entry', ACCESS_EXIT: 'Exit', MUSTERING: 'Muster', ATTENDANCE: 'T&A', POB: 'POB', EMERGENCY: 'Emergency' };
+                const color = purposeColors[r.reader_purpose] || '#6B7280';
+                return (
+                  <div key={r.reader_id} style={{ display: 'flex', alignItems: 'center', gap: 10, background: '#F9FAFB', border: '1px solid #E5E7EB', borderRadius: 8, padding: '8px 12px' }}>
+                    <div style={{ width: 8, height: 8, borderRadius: '50%', background: r.status === 'online' ? '#10B981' : '#D1D5DB', flexShrink: 0 }} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <span style={{ fontWeight: 600, fontSize: 13 }}>{r.alias}</span>
+                      <code style={{ fontSize: 11, color: '#9CA3AF', marginLeft: 8 }}>{r.sn}</code>
+                    </div>
+                    <Tag color={color} style={{ fontSize: 11, flexShrink: 0 }}>{purposeLabels[r.reader_purpose] || r.reader_purpose}</Tag>
+                    <Popconfirm
+                      title="Remove this reader from the zone?"
+                      onConfirm={() => removeReaderModalMutation.mutate({ zoneId: readerZone.id, readerId: r.reader_id })}
+                      okText="Remove" cancelText="Cancel" okButtonProps={{ danger: true }}
+                    >
+                      <Button type="text" danger size="small" icon={<DeleteOutlined />} loading={removeReaderModalMutation.isPending} />
+                    </Popconfirm>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        <Divider style={{ margin: '0 0 16px' }} />
+
+        {/* ── Assign new readers ── */}
+        <div style={{ fontWeight: 600, fontSize: 13, color: '#374151', marginBottom: 12, display: 'flex', alignItems: 'center', gap: 6 }}>
+          <PlusOutlined style={{ color: '#7C3AED' }} />
+          Add Readers to Zone
+        </div>
         <div style={{
           background: 'linear-gradient(135deg,#F5F3FF,#EDE9FE)',
           border: '1px solid #C4B5FD', borderRadius: 8,
-          padding: '10px 14px', marginBottom: 16,
-          display: 'flex', alignItems: 'center', gap: 10, fontSize: 12.5, color: '#6D28D9',
+          padding: '8px 12px', marginBottom: 14,
+          display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#6D28D9',
         }}>
-          <WifiOutlined style={{ fontSize: 15 }} />
-          Once assigned, every attendance punch from this reader automatically updates this zone's POB count
-          in real time via ADMS over 4G — from anywhere in Nigeria.
+          <WifiOutlined />
+          Assigned readers automatically update this zone's POB count in real time via ADMS.
         </div>
         <Form form={readerForm} layout="vertical">
-          <Form.Item name="device_id" label="Select ZKTeco Reader / Device" rules={[{ required: true, message: 'Please select a device' }]}>
-            <Select placeholder="Choose a device" showSearch optionFilterProp="label" size="large">
-              {devices.map(d => (
-                <Select.Option key={d.id} value={d.id} label={`${d.alias} ${d.sn}`}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                    <div style={{
-                      width: 28, height: 28, borderRadius: 6, flexShrink: 0,
-                      background: d.state === 1
-                        ? 'linear-gradient(135deg,#059669,#10B981)'
-                        : 'linear-gradient(135deg,#6B7280,#9CA3AF)',
-                      display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      color: 'white', fontSize: 12,
-                    }}><ApiOutlined /></div>
-                    <div>
+          <Form.Item name="device_id" label="Select Readers (one or more)" rules={[{ required: true, message: 'Please select at least one device' }]}>
+            <Select
+              mode="multiple" placeholder="Choose devices to assign" showSearch
+              optionFilterProp="label" size="large" maxTagCount={4}
+            >
+              {devices
+                .filter(d => !currentModalReaders.some(r => r.reader_id === d.id))
+                .map(d => (
+                  <Select.Option key={d.id} value={d.id} label={`${d.alias} ${d.sn}`}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <div style={{
+                        width: 24, height: 24, borderRadius: 5, flexShrink: 0,
+                        background: d.state === 1 ? 'linear-gradient(135deg,#059669,#10B981)' : 'linear-gradient(135deg,#6B7280,#9CA3AF)',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'white', fontSize: 11,
+                      }}><ApiOutlined /></div>
                       <span style={{ fontWeight: 500 }}>{d.alias}</span>
-                      <code style={{ fontSize: 11, color: '#9CA3AF', marginLeft: 6 }}>{d.sn}</code>
+                      <code style={{ fontSize: 11, color: '#9CA3AF' }}>{d.sn}</code>
+                      {d.already_assigned && (
+                        <Tag color="orange" style={{ marginLeft: 'auto', fontSize: 10 }}>In another zone</Tag>
+                      )}
                     </div>
-                    {d.already_assigned && (
-                      <span style={{ marginLeft: 'auto', fontSize: 11, color: '#F59E0B', fontWeight: 600 }}>
-                        Move here
-                      </span>
-                    )}
-                  </div>
-                </Select.Option>
-              ))}
+                  </Select.Option>
+                ))}
             </Select>
           </Form.Item>
-          {/* Reader Purpose — the critical field for zone tracking */}
           <Form.Item
-            name="reader_purpose"
-            label="Reader Role"
-            initialValue="ACCESS_ENTRY"
+            name="reader_purpose" label="Reader Role" initialValue="ACCESS_ENTRY"
             rules={[{ required: true, message: 'Select reader role' }]}
-            tooltip="Determines how this reader's punches are processed. Entry and Exit readers track who is physically in the zone."
+            tooltip="Applied to all selected readers"
           >
             <Select size="large">
-              <Select.Option value="ACCESS_ENTRY">
-                <span style={{ color: '#10B981', fontWeight: 600 }}>▶ Entry Reader</span>
-                <span style={{ color: '#6B7280', fontSize: 11, marginLeft: 8 }}>Person entering zone</span>
-              </Select.Option>
-              <Select.Option value="ACCESS_EXIT">
-                <span style={{ color: '#EF4444', fontWeight: 600 }}>◀ Exit Reader</span>
-                <span style={{ color: '#6B7280', fontSize: 11, marginLeft: 8 }}>Person leaving zone</span>
-              </Select.Option>
-              <Select.Option value="ATTENDANCE">
-                <span style={{ color: '#6B7280', fontWeight: 600 }}>⏱ T&amp;A Reader</span>
-                <span style={{ color: '#6B7280', fontSize: 11, marginLeft: 8 }}>Time &amp; Attendance only</span>
-              </Select.Option>
-              <Select.Option value="MUSTERING">
-                <span style={{ color: '#F59E0B', fontWeight: 600 }}>🔔 Muster Reader</span>
-                <span style={{ color: '#6B7280', fontSize: 11, marginLeft: 8 }}>Emergency mustering</span>
-              </Select.Option>
+              <Select.Option value="ACCESS_ENTRY"><span style={{ color: '#10B981', fontWeight: 600 }}>▶ Entry Reader</span><span style={{ color: '#6B7280', fontSize: 11, marginLeft: 8 }}>Person entering zone</span></Select.Option>
+              <Select.Option value="ACCESS_EXIT"><span style={{ color: '#EF4444', fontWeight: 600 }}>◀ Exit Reader</span><span style={{ color: '#6B7280', fontSize: 11, marginLeft: 8 }}>Person leaving zone</span></Select.Option>
+              <Select.Option value="ATTENDANCE"><span style={{ color: '#6B7280', fontWeight: 600 }}>⏱ T&amp;A Reader</span><span style={{ color: '#6B7280', fontSize: 11, marginLeft: 8 }}>Time &amp; Attendance only</span></Select.Option>
+              <Select.Option value="MUSTERING"><span style={{ color: '#F59E0B', fontWeight: 600 }}>🔔 Muster Reader</span><span style={{ color: '#6B7280', fontSize: 11, marginLeft: 8 }}>Emergency mustering</span></Select.Option>
+              <Select.Option value="POB"><span style={{ color: '#3B82F6', fontWeight: 600 }}>⚓ POB Reader</span><span style={{ color: '#6B7280', fontSize: 11, marginLeft: 8 }}>Personnel on board tracking</span></Select.Option>
+              <Select.Option value="EMERGENCY"><span style={{ color: '#DC2626', fontWeight: 600 }}>🚨 Emergency Reader</span><span style={{ color: '#6B7280', fontSize: 11, marginLeft: 8 }}>Emergency response only</span></Select.Option>
             </Select>
-          </Form.Item>
-          <Row gutter={16}>
-            <Col span={12}>
-              <Form.Item name="assignment_type" label="Assignment Type" initialValue="PERMANENT">
-                <Select>
-                  <Select.Option value="PERMANENT">Permanent</Select.Option>
-                  <Select.Option value="TEMPORARY">Temporary</Select.Option>
-                  <Select.Option value="EMERGENCY">Emergency</Select.Option>
-                </Select>
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item name="is_primary" label="Primary Reader" initialValue={false}>
-                <Select>
-                  <Select.Option value={false}>No</Select.Option>
-                  <Select.Option value={true}>Yes — Primary</Select.Option>
-                </Select>
-              </Form.Item>
-            </Col>
-          </Row>
-          <Form.Item name="notes" label="Notes">
-            <Input.TextArea rows={2} placeholder="e.g. Main gate reader, Entry only" />
           </Form.Item>
         </Form>
       </Modal>
@@ -3061,6 +3740,7 @@ const ZoneManagement = () => {
         .ant-table-column-sorter { color: #D1D5DB !important; }
         .ant-table-filter-trigger { color: #D1D5DB !important; }
       `}</style>
+      </Card>
     </div>
   );
 };

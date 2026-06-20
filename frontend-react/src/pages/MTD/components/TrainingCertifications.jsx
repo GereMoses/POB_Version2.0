@@ -127,7 +127,7 @@ const TrainingCertifications = () => {
   });
 
   const deleteCert = useMutation({
-    mutationFn: id => apiService.delete(`/api/mtd/certifications/${id}/`),
+    mutationFn: id => apiService.delete(`/api/mtd/certifications/${id}`),
     onSuccess: () => { qc.invalidateQueries(['mtd-certs']); },
   });
 
@@ -433,7 +433,7 @@ const TrainingCertifications = () => {
                     setSelected(ct); setTypeModal('edit');
                     typeForm.setFieldsValue({ cert_name: ct.cert_name, validity_days: ct.validity_days, is_critical: ct.is_critical, description: ct.description });
                   }} />
-                  <Popconfirm title="Delete this cert type?" onConfirm={() => apiService.delete(`/api/mtd/cert-types/${ct.id}/`).then(() => qc.invalidateQueries(['mtd-cert-types']))} okType="danger">
+                  <Popconfirm title="Delete this cert type?" onConfirm={() => apiService.delete(`/api/mtd/cert-types/${ct.id}`).then(() => qc.invalidateQueries(['mtd-cert-types']))} okType="danger">
                     <Button size="small" type="text" danger icon={<DeleteOutlined />} />
                   </Popconfirm>
                 </Space>

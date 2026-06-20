@@ -49,7 +49,7 @@ class EmailSMSService:
                 "use_tls": self._get_param("email.smtp_use_tls", "true") == "true",
                 "use_ssl": self._get_param("email.smtp_use_ssl", "false") == "true",
                 "from_address": self._get_param("email.from_address", "noreply@pob.com"),
-                "from_name": self._get_param("email.from_name", "POB System")
+                "from_name": self._get_param("email.from_name", "Apex POB")
             }
             
             # Load SMS configuration

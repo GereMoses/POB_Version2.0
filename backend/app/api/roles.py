@@ -14,6 +14,33 @@ from ..core.database import get_db
 from ..core.dependencies import get_current_user
 from ..models.roles import DEFAULT_PERMISSIONS
 
+
+def _invalidate_user_cache(user_id: int) -> None:
+    """Remove the RBAC permission cache entry for a specific user immediately."""
+    try:
+        from ..core.redis_client import get_redis_client
+        r = get_redis_client()
+        r.delete(f"user_permissions:{user_id}")
+    except Exception:
+        pass
+
+
+def _invalidate_role_cache(role_id: int, db) -> None:
+    """Remove permission cache entries for all users who hold a given role."""
+    try:
+        rows = db.execute(text(
+            "SELECT user_id FROM auth_user_role WHERE role_id = :rid"
+        ), {"rid": role_id}).fetchall()
+        if not rows:
+            return
+        from ..core.redis_client import get_redis_client
+        r = get_redis_client()
+        keys = [f"user_permissions:{row[0]}" for row in rows]
+        if keys:
+            r.delete(*keys)
+    except Exception:
+        pass
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["roles"])
@@ -221,6 +248,10 @@ async def set_role_permissions(
             "INSERT INTO auth_role_permission (role_id, permission_id) VALUES (:rid, :pid) ON CONFLICT DO NOTHING"
         ), {"rid": role_id, "pid": pid})
     db.commit()
+
+    # Invalidate cached permissions for every user that has this role
+    _invalidate_role_cache(role_id, db)
+
     return {"success": True, "message": f"Permissions updated ({len(perm_ids)} assigned)"}
 
 
@@ -291,6 +322,7 @@ async def assign_user_role(
         "INSERT INTO auth_user_role (user_id, role_id) VALUES (:uid, :rid)"
     ), {"uid": user_id, "rid": role_id})
     db.commit()
+    _invalidate_user_cache(user_id)
     return {"success": True, "message": "Role assigned"}
 
 
@@ -305,8 +337,12 @@ async def remove_user_role(
     row = db.execute(text("SELECT id FROM auth_user_role WHERE id = :id"), {"id": assignment_id}).fetchone()
     if not row:
         raise HTTPException(404, "Assignment not found")
+    row2 = db.execute(text("SELECT user_id FROM auth_user_role WHERE id = :id"), {"id": assignment_id}).fetchone()
+    affected_user = row2[0] if row2 else None
     db.execute(text("DELETE FROM auth_user_role WHERE id = :id"), {"id": assignment_id})
     db.commit()
+    if affected_user:
+        _invalidate_user_cache(affected_user)
     return {"success": True, "message": "Assignment removed"}
 
 

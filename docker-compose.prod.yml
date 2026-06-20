@@ -14,6 +14,15 @@ version: '3.8'
 # ZKTeco ADMS device configuration:
 #   Server address: http://<HQ_SERVER_IP>   (port 80, HTTP — many readers don't support HTTPS)
 #   The nginx config passes /iclock/ on port 80 directly to the backend
+#
+# IMPORTANT — direct-IP (ZKLib/port 4370) readers and auto-discovery of new readers:
+#   The `backend` container runs on the `pob_internal` Docker bridge network, so its
+#   own network interfaces are NOT the reader LAN. You MUST set DEVICE_SCAN_SUBNETS
+#   in .env.prod to the actual reader subnet (e.g. 192.168.1.0/24) or new readers
+#   will never be auto-discovered. After deploy, verify with:
+#     GET /api/device/network-diagnostics
+#   Also confirm the Docker host itself can route to the reader LAN (same network,
+#   VPN, or routed VLAN) — outbound TCP/4370 and inbound TCP/80 must both work.
 # ──────────────────────────────────────────────────────────────────────────────
 
 services:
@@ -104,7 +113,6 @@ services:
     env_file: .env.prod
     environment:
       - DATABASE_URL=postgresql://${DATABASE_USER}:${DATABASE_PASSWORD}@postgres:5432/${DATABASE_NAME}
-      - REDIS_URL=redis://redis:6379/0
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - ENVIRONMENT=production
@@ -141,7 +149,6 @@ services:
     env_file: .env.prod
     environment:
       - DATABASE_URL=postgresql://${DATABASE_USER}:${DATABASE_PASSWORD}@postgres:5432/${DATABASE_NAME}
-      - REDIS_URL=redis://redis:6379/0
       - REDIS_HOST=redis
       - REDIS_PORT=6379
     volumes:
@@ -167,7 +174,6 @@ services:
     env_file: .env.prod
     environment:
       - DATABASE_URL=postgresql://${DATABASE_USER}:${DATABASE_PASSWORD}@postgres:5432/${DATABASE_NAME}
-      - REDIS_URL=redis://redis:6379/0
     command: ["celery", "-A", "celery_worker.app", "beat", "--loglevel=info", "--schedule=/app/celerybeat-schedule"]
     volumes:
       - celerybeat_data:/app
@@ -299,6 +305,29 @@ services:
       - pob_internal
     restart: unless-stopped
 
+  # ── Alertmanager (routes Prometheus alerts to email/Slack/PagerDuty) ─────────
+  alertmanager:
+    image: prom/alertmanager:latest
+    container_name: pob_alertmanager
+    command:
+      - '--config.file=/etc/alertmanager/alertmanager.yml'
+      - '--storage.path=/alertmanager'
+    environment:
+      - ALERTMANAGER_SMTP_HOST=${ALERTMANAGER_SMTP_HOST:-smtp.example.com}
+      - ALERTMANAGER_SMTP_PORT=${ALERTMANAGER_SMTP_PORT:-587}
+      - ALERTMANAGER_EMAIL_FROM=${ALERTMANAGER_EMAIL_FROM:-alerts@example.com}
+      - ALERTMANAGER_EMAIL_TO=${ALERTMANAGER_EMAIL_TO:-oncall@example.com}
+      - ALERTMANAGER_SMTP_USER=${ALERTMANAGER_SMTP_USER:-}
+      - ALERTMANAGER_SMTP_PASSWORD=${ALERTMANAGER_SMTP_PASSWORD:-}
+    volumes:
+      - ./monitoring/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager_data:/alertmanager
+    depends_on:
+      - prometheus
+    networks:
+      - pob_internal
+    restart: unless-stopped
+
   # ── PostgreSQL Exporter ─────────────────────────────────────────────────────
   postgres-exporter:
     image: prometheuscommunity/postgres-exporter:latest
@@ -334,6 +363,8 @@ volumes:
   media_data:
     driver: local
   logs_data:
+    driver: local
+  alertmanager_data:
     driver: local
   celerybeat_data:
     driver: local

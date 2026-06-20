@@ -75,6 +75,8 @@ class DisciplinaryCaseResponse(BaseModel):
     personnel_company: Optional[str] = None
     reporter_name:    Optional[str]  = None
     assignee_name:    Optional[str]  = None
+    department_id:    Optional[int]  = None
+    department_name:  Optional[str]  = None
     # cross-module context
     open_cases_count: Optional[int]  = None   # total open cases for this person
     has_active_training_gap: Optional[bool] = None  # any mandatory cert expired?

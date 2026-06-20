@@ -97,6 +97,8 @@ class PerformanceAppraisalResponse(BaseModel):
     cycle_name:            Optional[str] = None
     cycle_code:            Optional[str] = None
     reviewer_name:         Optional[str] = None
+    department_id:         Optional[int] = None
+    department_name:       Optional[str] = None
     # training compliance snapshot pulled at appraisal time
     training_compliance:   Optional[int] = None  # % of mandatory courses certified
     expired_certs:         Optional[int] = None  # count of expired mandatory certs

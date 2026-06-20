@@ -197,7 +197,7 @@ const CertificateTemplate = ({ enrollment }) => {
 
             {/* Bottom strip */}
             <div style={styles.bottomStrip}>
-              <span>Marconi POB Management System</span>
+              <span>Apex POB — Marconi.ng EPC Limited</span>
               <span style={{ margin: '0 12px' }}>•</span>
               <span>Oil &amp; Gas Personnel Training Record</span>
               <span style={{ margin: '0 12px' }}>•</span>

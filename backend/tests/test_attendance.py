@@ -10,10 +10,10 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 from unittest.mock import Mock, patch
 
-from ..app.main import app
-from ..app.core.database import get_db
-from ..app.services.attendance_validation_service import attendance_validation_service
-from ..app.services.attendance_calculation_service import attendance_calculation_service
+from app.main import app
+from app.core.database import get_db
+from app.services.attendance_validation_service import attendance_validation_service
+from app.services.attendance_calculation_service import attendance_calculation_service
 
 class TestAttendanceValidation:
     """Test attendance validation service"""

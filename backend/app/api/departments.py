@@ -56,7 +56,6 @@ class DepartmentUpdate(BaseModel):
     parent_id:       Optional[int]  = None
     zone_id:         Optional[int]  = None
     manager_id:      Optional[int]  = None
-    zone_id:         Optional[int]  = None
     contact_person:  Optional[str]  = Field(None, max_length=100)
     contact_email:   Optional[str]  = Field(None, max_length=100)
     contact_phone:   Optional[str]  = Field(None, max_length=20)
@@ -553,3 +552,154 @@ async def update_zkteco_sync(
     db.commit()
     db.refresh(dept)
     return _to_dict(dept, db)
+
+
+# ── Reactivate ─────────────────────────────────────────────────────────────────
+
+@router.patch("/{department_id}/reactivate")
+async def reactivate_department(
+    department_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    dept = db.query(Department).filter(Department.id == department_id).first()
+    if not dept:
+        raise HTTPException(status_code=404, detail="Department not found")
+    dept.is_active = True
+    dept.status = "active"
+    dept.updated_by = current_user.id
+    db.commit()
+    db.refresh(dept)
+    return _to_dict(dept, db)
+
+
+# ── Clone ──────────────────────────────────────────────────────────────────────
+
+class DepartmentClonePayload(BaseModel):
+    name: Optional[str] = None
+    code: str = Field(..., min_length=1, max_length=20)
+
+
+@router.post("/{department_id}/clone", status_code=201)
+async def clone_department(
+    department_id: int,
+    data: DepartmentClonePayload,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    src = db.query(Department).filter(Department.id == department_id).first()
+    if not src:
+        raise HTTPException(status_code=404, detail="Source department not found")
+    if db.query(Department).filter(Department.code == data.code).first():
+        raise HTTPException(status_code=400, detail=f"Code '{data.code}' already exists")
+    new_dept = Department(
+        name=data.name or f"{src.name} (Copy)",
+        code=data.code,
+        description=src.description,
+        department_type=src.department_type,
+        parent_id=src.parent_id,
+        level=src.level,
+        sort_order=src.sort_order,
+        zone_id=src.zone_id,
+        manager_id=src.manager_id,
+        contact_person=src.contact_person,
+        contact_email=src.contact_email,
+        contact_phone=src.contact_phone,
+        max_personnel=src.max_personnel,
+        budget_allocated=src.budget_allocated,
+        safety_critical=src.safety_critical,
+        security_clearance_required=src.security_clearance_required,
+        required_certifications=src.required_certifications,
+        safety_protocols=src.safety_protocols,
+        access_levels=src.access_levels,
+        zkteco_sync_enabled=False,
+        default_shift_id=src.default_shift_id,
+        status="active",
+        is_active=True,
+        created_by=current_user.id,
+        updated_by=current_user.id,
+    )
+    db.add(new_dept)
+    db.commit()
+    db.refresh(new_dept)
+    return _to_dict(new_dept, db)
+
+
+# ── Budget spend ───────────────────────────────────────────────────────────────
+
+class BudgetSpendPayload(BaseModel):
+    amount: float = Field(..., gt=0)
+    description: Optional[str] = None
+
+
+@router.post("/{department_id}/log-budget-spend")
+async def log_budget_spend(
+    department_id: int,
+    data: BudgetSpendPayload,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    dept = db.query(Department).filter(Department.id == department_id, Department.is_active == True).first()
+    if not dept:
+        raise HTTPException(status_code=404, detail="Department not found")
+    if not dept.budget_allocated:
+        raise HTTPException(status_code=400, detail="No budget allocated for this department")
+    dept.budget_used = float(dept.budget_used or 0) + data.amount
+    dept.updated_by = current_user.id
+    db.commit()
+    db.refresh(dept)
+    return _to_dict(dept, db)
+
+
+# ── Transfer personnel ─────────────────────────────────────────────────────────
+
+class PersonnelTransferPayload(BaseModel):
+    personnel_id: int
+    target_department_id: int
+    role: str = Field(..., max_length=100)
+    position: Optional[str] = Field(None, max_length=100)
+    is_primary: Optional[bool] = False
+    is_manager: Optional[bool] = False
+
+
+@router.post("/{department_id}/transfer-personnel")
+async def transfer_personnel_endpoint(
+    department_id: int,
+    data: PersonnelTransferPayload,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if department_id == data.target_department_id:
+        raise HTTPException(status_code=400, detail="Source and target departments must be different")
+    target = db.query(Department).filter(Department.id == data.target_department_id, Department.is_active == True).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="Target department not found")
+    assignment = db.query(DepartmentPersonnel).filter(
+        DepartmentPersonnel.department_id == department_id,
+        DepartmentPersonnel.personnel_id == data.personnel_id,
+        DepartmentPersonnel.status == "active",
+    ).first()
+    if not assignment:
+        raise HTTPException(status_code=404, detail="Active assignment not found in source department")
+    assignment.status = "transferred"
+    assignment.unassigned_at = datetime.utcnow()
+    existing = db.query(DepartmentPersonnel).filter(
+        DepartmentPersonnel.department_id == data.target_department_id,
+        DepartmentPersonnel.personnel_id == data.personnel_id,
+        DepartmentPersonnel.status == "active",
+    ).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Personnel already assigned to target department")
+    db.add(DepartmentPersonnel(
+        department_id=data.target_department_id,
+        personnel_id=data.personnel_id,
+        role=data.role,
+        position=data.position,
+        is_primary=data.is_primary or False,
+        is_manager=data.is_manager or False,
+        approved_by=current_user.id,
+        approved_at=datetime.utcnow(),
+        status="active",
+    ))
+    db.commit()
+    return {"message": "Personnel transferred successfully", "target_department_id": data.target_department_id}

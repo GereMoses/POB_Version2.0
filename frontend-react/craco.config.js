@@ -184,23 +184,5 @@ module.exports = override(
     };
 
     return config;
-  },
-
-  // Add support for environment-specific configurations
-  (config) => {
-    // Define environment variables
-    if (!config.plugins) {
-      config.plugins = [];
-    }
-    config.plugins.push(
-      new config.webpack.DefinePlugin({
-        'process.env.NODE_ENV': JSON.stringify(process.env.NODE_ENV),
-        'process.env.REACT_APP_API_URL': JSON.stringify(process.env.REACT_APP_API_URL),
-        'process.env.REACT_APP_ENVIRONMENT': JSON.stringify(process.env.REACT_APP_ENVIRONMENT),
-        'process.env.PUBLIC_URL': JSON.stringify(process.env.PUBLIC_URL),
-      })
-    );
-
-    return config;
   }
 );

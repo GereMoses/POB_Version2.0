@@ -15,11 +15,11 @@ import os
 from app.core.database import engine
 from app.services.mustering_service import MusteringService
 from app.models.biotime_models import (
-    MusteringDrillSchedule, MusteringEvent,
-    MusteringLog, MusteringEscalationRecord,
+    MusteringDrillSchedule, MusteringEvent, MusteringEventTemplate,
+    MusteringLog, MusteringEscalationRecord, EmergencyDevice, IClockDevcmd,
 )
 from app.models.zone import Zone
-from sqlalchemy import and_
+from sqlalchemy import and_, text
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -31,8 +31,14 @@ celery_app = Celery(
     'mustering_tasks',
     broker=_redis_url,
     backend=_redis_url,
-    include=['app.services.mustering_celery_tasks']
+    include=[
+        'app.services.mustering_celery_tasks',
+        'app.tasks.compliance_email_celery',
+    ]
 )
+
+# ── Celery Beat schedules (single definition — do not add another below) ─────
+from celery.schedules import crontab
 
 # Database session
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -51,10 +57,11 @@ def check_scheduled_drills(self):
         # Get current time
         now = datetime.utcnow()
         
-        # Find drills scheduled to start now or in the past minute
+        # Only pick up unprocessed drills — prevents double-trigger on Celery retry
         scheduled_drills = db.query(MusteringDrillSchedule).filter(
             MusteringDrillSchedule.scheduled_time <= now,
-            MusteringDrillSchedule.auto_start == True
+            MusteringDrillSchedule.auto_start == True,
+            MusteringDrillSchedule.processed == False,
         ).all()
         
         started_drills = []
@@ -71,26 +78,39 @@ def check_scheduled_drills(self):
                     logger.warning(f"Zone {drill.zone_id} already has active event, skipping scheduled drill")
                     continue
                 
-                # Start the drill
+                # Load template for notification flags and display name (#12)
+                template = None
+                if drill.template_id:
+                    template = db.query(MusteringEventTemplate).filter(
+                        MusteringEventTemplate.id == drill.template_id
+                    ).first()
+                drill_name = template.template_name if template else "Scheduled drill"
+
+                # Fix #3: zone_ids expects List[int]; no initiated_type param
                 mustering_service = MusteringService(db)
                 event_result = mustering_service.start_mustering_event(
-                    zone_id=drill.zone_id,
+                    zone_ids=[drill.zone_id],
                     event_type=drill.event_type,
-                    initiated_by=drill.created_by,
-                    initiated_type=1,  # Scheduled
-                    notify_sms=False,  # Will be handled by notification task
+                    initiated_by=drill.created_by or 0,
+                    notify_sms=False,   # notifications handled by send_drill_notifications task
                     notify_email=False,
                     notify_whatsapp=False,
                     notify_siren=False,
-                    notes=f"Automated drill: {drill.template.template_name if drill.template else 'Scheduled drill'}"
+                    notes=f"Automated drill: {drill_name}",
                 )
-                
+
+                # Fix #12: populate notify flags from template so send_drill_notifications
+                # actually dispatches SMS/email instead of silently skipping them
                 started_drills.append({
                     'drill_id': drill.id,
                     'event_id': event_result['event_id'],
                     'zone_id': drill.zone_id,
                     'scheduled_time': drill.scheduled_time,
-                    'started_time': now
+                    'started_time': now,
+                    'notify_sms': template.notify_sms if template else False,
+                    'notify_email': template.notify_email if template else False,
+                    'notify_whatsapp': False,
+                    'notify_siren': False,
                 })
                 
                 # Update drill schedule to mark as processed
@@ -291,192 +311,254 @@ Event Duration: {event_data.get('duration', 'N/A')} minutes
 
 @celery_app.task(bind=True, max_retries=3)
 def send_sms_notification(self, message, recipients):
-    """
-    Send SMS notification
-    recipients: List of phone numbers
-    """
+    """Send SMS via generic HTTP provider (SMS_API_KEY + SMS_API_URL env vars)."""
     try:
-        logger.info(f"Sending SMS to {len(recipients)} recipients: {message}")
-        
-        # Check if SMS service is configured
         sms_api_key = os.getenv('SMS_API_KEY')
-        if not sms_api_key:
-            logger.warning("SMS_API_KEY not configured, skipping SMS notification")
+        sms_api_url = os.getenv('SMS_API_URL')
+        if not sms_api_key or not sms_api_url:
+            logger.warning("SMS not configured — set SMS_API_KEY and SMS_API_URL to enable")
             return
-        
-        # Mock SMS implementation - replace with actual SMS service
+        logger.info(f"Sending SMS to {len(recipients)} recipients")
         for recipient in recipients:
-            logger.info(f"📱 SMS sent to {recipient}: {message}")
-            # In real implementation:
-            # response = requests.post(
-            #     'https://sms-provider.com/api/send',
-            #     json={
-            #         'api_key': sms_api_key,
-            #         'to': recipient,
-            #         'message': message
-            #     }
-            # )
-        
+            try:
+                resp = requests.post(
+                    sms_api_url,
+                    json={'api_key': sms_api_key, 'to': recipient, 'message': message},
+                    timeout=10,
+                )
+                resp.raise_for_status()
+                logger.info(f"SMS sent to {recipient}")
+            except Exception as exc:
+                logger.error(f"SMS to {recipient} failed: {exc}")
     except Exception as e:
-        logger.error(f"❌ Error sending SMS notification: {e}")
+        logger.error(f"❌ send_sms_notification error: {e}")
+        raise self.retry(exc=e, countdown=60)
+
 
 @celery_app.task(bind=True, max_retries=3)
 def send_email_notification(self, subject, message, recipients):
-    """
-    Send email notification
-    recipients: List of email addresses
-    """
+    """Send email via SMTP (SMTP_HOST / SMTP_PORT / SMTP_USER / SMTP_PASSWORD env vars)."""
     try:
-        logger.info(f"Sending email to {len(recipients)} recipients: {subject}")
-        
-        # Check if email service is configured
-        email_api_key = os.getenv('EMAIL_API_KEY')
-        if not email_api_key:
-            logger.warning("EMAIL_API_KEY not configured, skipping email notification")
+        import smtplib
+        from email.mime.text import MIMEText
+        from email.mime.multipart import MIMEMultipart
+
+        smtp_host = os.getenv('SMTP_HOST')
+        smtp_port = int(os.getenv('SMTP_PORT', '587'))
+        smtp_user = os.getenv('SMTP_USER')
+        smtp_pass = os.getenv('SMTP_PASSWORD')
+        email_from = os.getenv('EMAIL_FROM', smtp_user)
+        if not smtp_host or not smtp_user:
+            logger.warning("Email not configured — set SMTP_HOST, SMTP_USER, SMTP_PASSWORD to enable")
             return
-        
-        # Mock email implementation - replace with actual email service
+        logger.info(f"Sending email '{subject}' to {len(recipients)} recipients")
         for recipient in recipients:
-            logger.info(f"📧 Email sent to {recipient}: {subject}")
-            # In real implementation:
-            # response = requests.post(
-            #     'https://email-provider.com/api/send',
-            #     json={
-            #         'api_key': email_api_key,
-            #         'to': recipient,
-            #         'subject': subject,
-            #         'message': message
-            #     }
-            # )
-        
+            try:
+                msg = MIMEMultipart('alternative')
+                msg['Subject'] = subject
+                msg['From'] = email_from
+                msg['To'] = recipient
+                msg.attach(MIMEText(message, 'plain'))
+                with smtplib.SMTP(smtp_host, smtp_port, timeout=10) as server:
+                    server.ehlo()
+                    server.starttls()
+                    server.login(smtp_user, smtp_pass)
+                    server.sendmail(email_from, [recipient], msg.as_string())
+                logger.info(f"Email sent to {recipient}")
+            except Exception as exc:
+                logger.error(f"Email to {recipient} failed: {exc}")
     except Exception as e:
-        logger.error(f"❌ Error sending email notification: {e}")
+        logger.error(f"❌ send_email_notification error: {e}")
+        raise self.retry(exc=e, countdown=60)
+
 
 @celery_app.task(bind=True, max_retries=3)
 def send_whatsapp_notification(self, message, recipients):
-    """
-    Send WhatsApp notification
-    recipients: List of WhatsApp numbers
-    """
+    """Send WhatsApp via generic HTTP provider (WHATSAPP_API_KEY + WHATSAPP_API_URL env vars)."""
     try:
-        logger.info(f"Sending WhatsApp to {len(recipients)} recipients: {message}")
-        
-        # Check if WhatsApp service is configured
         whatsapp_api_key = os.getenv('WHATSAPP_API_KEY')
-        if not whatsapp_api_key:
-            logger.warning("WHATSAPP_API_KEY not configured, skipping WhatsApp notification")
+        whatsapp_api_url = os.getenv('WHATSAPP_API_URL')
+        if not whatsapp_api_key or not whatsapp_api_url:
+            logger.warning("WhatsApp not configured — set WHATSAPP_API_KEY and WHATSAPP_API_URL to enable")
             return
-        
-        # Mock WhatsApp implementation - replace with actual WhatsApp service
+        logger.info(f"Sending WhatsApp to {len(recipients)} recipients")
         for recipient in recipients:
-            logger.info(f"💬 WhatsApp sent to {recipient}: {message}")
-            # In real implementation:
-            # response = requests.post(
-            #     'https://whatsapp-provider.com/api/send',
-            #     json={
-            #         'api_key': whatsapp_api_key,
-            #         'to': recipient,
-            #         'message': message
-            #     }
-            # )
-        
+            try:
+                resp = requests.post(
+                    whatsapp_api_url,
+                    json={'api_key': whatsapp_api_key, 'to': recipient, 'message': message},
+                    timeout=10,
+                )
+                resp.raise_for_status()
+                logger.info(f"WhatsApp sent to {recipient}")
+            except Exception as exc:
+                logger.error(f"WhatsApp to {recipient} failed: {exc}")
     except Exception as e:
-        logger.error(f"❌ Error sending WhatsApp notification: {e}")
+        logger.error(f"❌ send_whatsapp_notification error: {e}")
+        raise self.retry(exc=e, countdown=60)
+
 
 @celery_app.task(bind=True, max_retries=3)
 def trigger_sirens(self, zone_id):
     """
-    Trigger emergency sirens in a zone
-    zone_id: ID of the mustering zone
+    Trigger emergency sirens and strobes in a zone by writing EMERGENCY_ON commands
+    directly to the iclock_devcmd queue table, which ZKTeco devices poll via ADMS.
+    zone_id: ID of the mustering zone (None = all zones)
     """
     try:
         logger.info(f"Triggering sirens for zone {zone_id}")
-        
         db = SessionLocal()
         try:
-            # Get emergency devices in the zone
-            # This would query emergency_device table
-            # For now, we'll mock the implementation
-            
-            # Get zone info
             zone = db.query(Zone).filter(Zone.id == zone_id).first()
             if not zone:
                 logger.error(f"Zone {zone_id} not found for siren activation")
                 return
-            
-            logger.info(f"🚨 Sirens triggered for Zone {zone.name}")
-            
-            # In real implementation, this would:
-            # 1. Query emergency_device table for devices in this zone
-            # 2. Send EMERGENCY_ON commands to siren devices
-            # 3. Log device responses
-            
-            # Mock implementation
-            emergency_devices = [
-                {'id': 1, 'device_type': 'siren', 'location': zone.name},
-                {'id': 2, 'device_type': 'strobe', 'location': zone.name}
-            ]
-            
-            for device in emergency_devices:
-                logger.info(f"   Siren {device['id']} activated in {device['location']}")
-                # Send actual command to device via ADMS protocol
-            
+
+            # Query real siren/strobe devices (device_type 1=siren, 2=strobe), skip faulted
+            query = db.query(EmergencyDevice).filter(
+                EmergencyDevice.device_type.in_([1, 2]),
+                EmergencyDevice.status != 2,  # not fault
+            )
+            if zone_id:
+                query = query.filter(EmergencyDevice.zone_id == zone_id)
+            devices = query.all()
+
+            if not devices:
+                logger.warning(f"No active siren/strobe devices found for zone {zone_id}")
+                return
+
+            activated = 0
+            for device in devices:
+                if not device.terminal_sn:
+                    continue
+                try:
+                    cmd = IClockDevcmd(
+                        sn=device.terminal_sn,
+                        cmd_content="EMERGENCY_ON",
+                        status=0,  # pending — ADMS polling loop will deliver it
+                    )
+                    db.add(cmd)
+                    device.status = 1  # mark active
+                    activated += 1
+                except Exception as dev_err:
+                    logger.error(f"Failed to queue EMERGENCY_ON for device {device.id}: {dev_err}")
+
+            db.commit()
+            logger.info(f"Sirens activated for zone {zone.name}: {activated} device commands queued")
+
         except Exception as e:
+            db.rollback()
             logger.error(f"❌ Error triggering sirens: {e}")
+            raise self.retry(exc=e, countdown=30)
         finally:
             db.close()
-            
+
     except Exception as e:
         logger.error(f"❌ Critical error in trigger_sirens: {e}")
 
-@celery_app.task(bind=True, max_retries=3)
-def cleanup_old_schedules(db):
+
+@celery_app.task(max_retries=3)
+def cleanup_old_schedules():
     """
-    Clean up old processed drill schedules
+    Clean up old processed drill schedules (runs nightly via Celery beat).
     """
+    db = SessionLocal()
     try:
-        # Delete schedules older than 7 days that have been processed
         cutoff_date = datetime.utcnow() - timedelta(days=7)
-        
         old_schedules = db.query(MusteringDrillSchedule).filter(
             MusteringDrillSchedule.processed == True,
             MusteringDrillSchedule.processed_time < cutoff_date
         ).all()
-        
+
         for schedule in old_schedules:
             db.delete(schedule)
-        
+
         if old_schedules:
             db.commit()
             logger.info(f"✅ Cleaned up {len(old_schedules)} old drill schedules")
-        
+
     except Exception as e:
+        db.rollback()
         logger.error(f"❌ Error cleaning up old schedules: {e}")
+    finally:
+        db.close()
         db.rollback()
 
-# Helper functions
 def get_drill_recipients(zone_id, notification_type):
-    """Get recipients for drill notifications"""
-    # This would query notification preferences for the zone
-    # For now, return mock recipients
-    if notification_type == 'sms':
-        return ['+234801234567', '+234801234568']
-    elif notification_type == 'email':
-        return ['safety.manager@company.com', 'hse.officer@company.com']
-    elif notification_type == 'whatsapp':
-        return ['+234801234567']
+    """
+    Query personnel with emergency_contact or safety role for the given zone.
+    Falls back to an empty list so drills are never blocked by a missing contact.
+    """
+    db = SessionLocal()
+    try:
+        if notification_type == 'email':
+            rows = db.execute(text("""
+                SELECT DISTINCT au.email
+                FROM auth_user au
+                JOIN auth_user_role ur ON ur.user_id = au.id
+                JOIN auth_role r ON r.id = ur.role_id
+                WHERE au.is_active = TRUE
+                  AND au.email IS NOT NULL AND au.email != ''
+                  AND (r.name ILIKE '%safety%' OR r.name ILIKE '%hse%'
+                       OR r.name ILIKE '%emergency%' OR r.name ILIKE '%muster%')
+            """)).fetchall()
+            return [r[0] for r in rows]
+        elif notification_type in ('sms', 'whatsapp'):
+            rows = db.execute(text("""
+                SELECT DISTINCT p.phone
+                FROM personnel p
+                JOIN auth_user au ON au.id = p.user_id
+                JOIN auth_user_role ur ON ur.user_id = au.id
+                JOIN auth_role r ON r.id = ur.role_id
+                WHERE au.is_active = TRUE
+                  AND p.phone IS NOT NULL AND p.phone != ''
+                  AND (r.name ILIKE '%safety%' OR r.name ILIKE '%hse%'
+                       OR r.name ILIKE '%emergency%')
+            """)).fetchall()
+            return [r[0] for r in rows]
+    except Exception as exc:
+        logger.error("get_drill_recipients(%s, %s) error: %s", zone_id, notification_type, exc)
+    finally:
+        db.close()
     return []
 
+
 def get_emergency_recipients(zone_id, notification_type):
-    """Get recipients for emergency notifications"""
-    # This would query emergency contact lists for the zone
-    # For now, return mock recipients
-    if notification_type == 'sms':
-        return ['+234801234567', '+234801234568', '+234801234569']
-    elif notification_type == 'email':
-        return ['safety.manager@company.com', 'hse.officer@company.com', 'emergency.team@company.com']
-    elif notification_type == 'whatsapp':
-        return ['+234801234567', '+234801234568']
+    """
+    Like get_drill_recipients but also includes on-call / emergency-team roles.
+    """
+    db = SessionLocal()
+    try:
+        if notification_type == 'email':
+            rows = db.execute(text("""
+                SELECT DISTINCT au.email
+                FROM auth_user au
+                JOIN auth_user_role ur ON ur.user_id = au.id
+                JOIN auth_role r ON r.id = ur.role_id
+                WHERE au.is_active = TRUE
+                  AND au.email IS NOT NULL AND au.email != ''
+                  AND (r.name ILIKE '%safety%' OR r.name ILIKE '%hse%'
+                       OR r.name ILIKE '%emergency%' OR r.name ILIKE '%oncall%'
+                       OR au.is_superuser = TRUE)
+            """)).fetchall()
+            return [r[0] for r in rows]
+        elif notification_type in ('sms', 'whatsapp'):
+            rows = db.execute(text("""
+                SELECT DISTINCT p.phone
+                FROM personnel p
+                JOIN auth_user au ON au.id = p.user_id
+                JOIN auth_user_role ur ON ur.user_id = au.id
+                JOIN auth_role r ON r.id = ur.role_id
+                WHERE au.is_active = TRUE
+                  AND p.phone IS NOT NULL AND p.phone != ''
+                  AND (r.name ILIKE '%safety%' OR r.name ILIKE '%hse%'
+                       OR r.name ILIKE '%emergency%' OR r.name ILIKE '%oncall%')
+            """)).fetchall()
+            return [r[0] for r in rows]
+    except Exception as exc:
+        logger.error("get_emergency_recipients(%s, %s) error: %s", zone_id, notification_type, exc)
+    finally:
+        db.close()
     return []
 
 @celery_app.task(bind=True, max_retries=3)
@@ -509,9 +591,15 @@ def check_missing_escalations(self):
 
             for log in missing_logs:
                 thresholds = [
-                    (10, 1, 'ALERT',          f"⚠️  {log.emp_name or log.emp_code} has been MISSING for 10 minutes in {zone_name}."),
-                    (20, 2, 'SEARCH_ORDERED', f"🔴  {log.emp_name or log.emp_code} MISSING 20 minutes — search team should be deployed in {zone_name}."),
-                    (30, 3, 'CRITICAL',       f"🚨  CRITICAL: {log.emp_name or log.emp_code} MISSING 30+ minutes in {zone_name}. Escalate immediately."),
+                    (10, 1, 'ALERT',
+                        f"⚠️  {log.emp_name or log.emp_code} has been MISSING for 10 minutes in {zone_name}."),
+                    (20, 2, 'SEARCH_ORDERED',
+                        f"🔴  {log.emp_name or log.emp_code} MISSING 20 minutes — search team should be deployed in {zone_name}."),
+                    (30, 3, 'CRITICAL',
+                        f"🚨  CRITICAL: {log.emp_name or log.emp_code} MISSING 30+ minutes in {zone_name}. Escalate immediately."),
+                    (60, 4, 'MAYDAY',
+                        f"🆘  MAYDAY: {log.emp_name or log.emp_code} MISSING 60+ minutes in {zone_name}. "
+                        f"Initiate Search and Rescue / notify coast guard per facility emergency plan."),
                 ]
 
                 for threshold_min, level, notif_type, msg in thresholds:
@@ -529,11 +617,45 @@ def check_missing_escalations(self):
                     if already_sent:
                         continue
 
-                    # Log the escalation (integrate with notification service here)
                     logger.warning(f"MUSTER ESCALATION [{notif_type}] event={event.id}: {msg}")
 
-                    # TODO: call real notification service, e.g.:
-                    # send_emergency_notification(event.id, log.emp_code, notif_type, msg)
+                    # Persist to sys_notifications and push via SSE
+                    dedup_key = f"muster_esc_{event.id}_{log.emp_code}_{level}"
+                    db.execute(text("""
+                        INSERT INTO sys_notifications
+                            (dedup_key, notification_type, title, message, priority, expires_at)
+                        VALUES (:dk, :nt, :title, :msg, :pri, NOW() + INTERVAL '48 hours')
+                        ON CONFLICT (dedup_key) DO NOTHING
+                    """), {
+                        "dk": dedup_key,
+                        "nt": "muster_escalation",
+                        "title": f"Muster Escalation [{notif_type}]",
+                        "msg": msg,
+                        "pri": "critical" if level >= 2 else "high",
+                    })
+                    from app.api.notifications import notify_sync
+                    notify_sync({
+                        "type": "muster_escalation",
+                        "priority": "critical" if level >= 2 else "high",
+                        "title": f"Muster Escalation [{notif_type}]",
+                        "message": msg,
+                        "dedup_key": dedup_key,
+                        "event_id": event.id,
+                        "emp_code": log.emp_code,
+                        "level": level,
+                    })
+                    # For level 2+ (SEARCH_ORDERED and above) dispatch external alerts
+                    if level >= 2:
+                        recipients_sms = get_emergency_recipients(event.zone_id, 'sms')
+                        if recipients_sms:
+                            send_sms_notification.delay(message=msg, recipients=recipients_sms)
+                        recipients_email = get_emergency_recipients(event.zone_id, 'email')
+                        if recipients_email:
+                            send_email_notification.delay(
+                                subject=f"Muster Escalation [{notif_type}] — Event {event.id}",
+                                message=msg,
+                                recipients=recipients_email,
+                            )
 
                     record = MusteringEscalationRecord(
                         event_id=event.id,
@@ -555,9 +677,6 @@ def check_missing_escalations(self):
         db.close()
 
 
-# Schedule periodic tasks
-from celery.schedules import crontab
-
 celery_app.conf.beat_schedule = {
     'check-scheduled-drills': {
         'task': 'app.services.mustering_celery_tasks.check_scheduled_drills',
@@ -565,7 +684,12 @@ celery_app.conf.beat_schedule = {
     },
     'check-missing-escalations': {
         'task': 'app.services.mustering_celery_tasks.check_missing_escalations',
-        'schedule': crontab(minute='*/5'),  # Every 5 minutes
+        'schedule': crontab(minute='*/5'),
+    },
+    'compliance-digest-daily': {
+        'task': 'app.tasks.compliance_email_celery.send_compliance_digest_task',
+        'schedule': crontab(hour=6, minute=0),  # 06:00 UTC daily
+        'args': (),
     },
 }
 

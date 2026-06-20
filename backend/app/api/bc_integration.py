@@ -24,7 +24,7 @@ from ..core.database import get_db
 from ..core.dependencies import get_current_user
 from ..services.business_central_service import (
     get_bc_config, push_attendance, test_connection,
-    fetch_companies, _build_time_entries,
+    fetch_companies, _build_time_entries, _ensure_bc_tables,
 )
 
 logger = logging.getLogger(__name__)
@@ -42,7 +42,7 @@ def _require_admin(current_user=Depends(get_current_user)):
 class BCConfigIn(BaseModel):
     tenant_id:     str
     client_id:     str
-    client_secret: str
+    client_secret: Optional[str] = None   # None / empty / masked = keep existing
     environment:   Optional[str] = "Production"
     company_id:    Optional[str] = None
     company_name:  Optional[str] = None
@@ -62,6 +62,7 @@ async def get_config(
     current_user=Depends(_require_admin),
 ):
 
+    _ensure_bc_tables(db)
     try:
         row = db.execute(text("""
             SELECT tenant_id, client_id, client_secret, environment,
@@ -80,7 +81,7 @@ async def get_config(
         }
 
     secret = row[2] or ""
-    masked = ("*" * max(0, len(secret) - 6)) + secret[-6:] if len(secret) > 6 else "***"
+    masked = (secret[:4] + "****") if len(secret) > 4 else "****"
 
     return {
         "configured":        bool(row[0] and row[1] and row[2]),
@@ -103,13 +104,26 @@ async def save_config(
 ):
 
 
-    # Preserve existing secret if masked value is passed back
-    client_secret = body.client_secret
-    if set(client_secret) == {"*"}:
+    _ensure_bc_tables(db)
+
+    # Determine the real client secret to store.
+    # Keep existing if: secret is absent (None), empty, or looks masked (starts with "*").
+    raw_secret = (body.client_secret or "").strip()
+    keep_existing = (not raw_secret) or raw_secret.startswith("*")
+
+    from ..core.crypto import encrypt_secret
+
+    if keep_existing:
+        # Existing secret is stored encrypted (or legacy plaintext) — preserve verbatim.
         row = db.execute(text("SELECT client_secret FROM bc_integration_config LIMIT 1")).fetchone()
         client_secret = row[0] if row else None
         if not client_secret:
-            raise HTTPException(status_code=400, detail="Client secret required")
+            raise HTTPException(status_code=400, detail="Client secret is required for the initial setup")
+    else:
+        client_secret = raw_secret
+
+    # Encrypt at rest (idempotent for already-encrypted values; upgrades legacy plaintext).
+    client_secret = encrypt_secret(client_secret)
 
     db.execute(text("DELETE FROM bc_integration_config"))
     db.execute(text("""
@@ -289,3 +303,52 @@ async def preview_sync(
         for e in entries
     ]
     return {"sync_date": sync_date, "total": len(clean), "entries": clean[:100], "truncated": len(clean) > 100}
+
+
+# ── Real-time trigger ─────────────────────────────────────────────────────────
+
+# In-process debounce: remember the last time we ran a real-time sync
+# so a burst of punches doesn't hammer the BC API.
+_last_rt_sync: dict = {}  # emp_code → last sync datetime
+_RT_COOLDOWN_SECS = 300   # max one RT sync per employee per 5 minutes
+
+
+@router.post("/sync/realtime/{emp_code}")
+async def realtime_sync_employee(
+    emp_code: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """
+    Trigger an immediate BC sync for one employee.
+    Called automatically after each attendance punch (from the ADMS processor).
+    Debounced: at most one sync per employee per 5 minutes.
+    """
+    cfg = get_bc_config(db)
+    if not cfg or not cfg.get("is_enabled"):
+        return {"skipped": True, "reason": "BC integration not configured/enabled"}
+
+    now = datetime.now(timezone.utc)
+    last = _last_rt_sync.get(emp_code)
+    if last and (now - last).total_seconds() < _RT_COOLDOWN_SECS:
+        return {"skipped": True, "reason": "cooldown", "next_allowed_in_secs": int(_RT_COOLDOWN_SECS - (now - last).total_seconds())}
+
+    _last_rt_sync[emp_code] = now
+
+    # Sync today's attendance for this employee
+    today = date.today()
+    result = await push_attendance(db, sync_date=today, triggered_by=f"realtime:{emp_code}")
+    return {"realtime": True, "emp_code": emp_code, "result": result}
+
+
+@router.post("/sync/trigger-today")
+async def trigger_today_sync(
+    db: Session = Depends(get_db),
+    current_user=Depends(_require_admin),
+):
+    """Immediately sync today's attendance to BC (admin shortcut)."""
+    cfg = get_bc_config(db)
+    if not cfg or not cfg.get("is_enabled"):
+        raise HTTPException(status_code=400, detail="BC integration not configured or disabled")
+    result = await push_attendance(db, sync_date=date.today(), triggered_by=current_user.email)
+    return result

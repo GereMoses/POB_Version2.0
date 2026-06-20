@@ -3,12 +3,9 @@ import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ConfigProvider, App as AntdApp, Result, Button } from 'antd';
 // import { ReactQueryDevtools } from '@tanstack/react-query-devtools';
-
-// Import Ant Design CSS
+import { ThemeProvider, useTheme } from './contexts/ThemeContext';
 import 'antd/dist/reset.css';
 import './App.css';
-
-// Import Layout and Pages
 import Layout from './components/Layout/Layout';
 import Dashboard from './pages/Dashboard/Dashboard';
 import Personnel from './pages/Personnel';
@@ -16,7 +13,19 @@ import AttendanceManagement from './pages/Attendance/AttendanceManagement';
 import DeviceManagement from './pages/Devices/Device';
 import AccessControl from './pages/AccessControl/AccessControl';
 import MusteringManagement from './pages/Mustering/MusteringManagement';
+import MusteringLiveMap from './pages/Mustering/MusteringLiveMap';
+import MusteringMobile from './pages/Mustering/MusteringMobile';
+import Mustering from './pages/Mustering/Mustering';
 import EmergencyManagement from './pages/Emergency/EmergencyManagement';
+import EmergencyMain from './pages/Emergency/EmergencyMain';
+import EmergencyDashboard from './pages/Emergency/EmergencyDashboard';
+import EmergencyLockdown from './pages/Emergency/EmergencyLockdown';
+import EmergencyFireMode from './pages/Emergency/EmergencyFireMode';
+import EmergencyDevices from './pages/Emergency/EmergencyDevices';
+import EmergencyPlans from './pages/Emergency/EmergencyPlans';
+import EmergencyNotifications from './pages/Emergency/EmergencyNotifications';
+import EmergencyTriggers from './pages/Emergency/EmergencyTriggers';
+import EmergencyAudit from './pages/Emergency/EmergencyAudit';
 import EmergencyResponse from './pages/EmergencyResponse/EmergencyResponse';
 import Reports from './pages/Reports/Reports';
 import Settings from './pages/Settings/Settings';
@@ -31,6 +40,12 @@ import TransportManifest from './pages/Transport/TransportManifest';
 import SubscriptionDashboard from './pages/Subscription/SubscriptionDashboard';
 import LicenseExpiredScreen from './components/LicenseExpiredScreen';
 import NotificationsPage from './pages/Notifications/NotificationsPage';
+import Kiosk from './pages/Visitor/components/Kiosk';
+
+const ThemedShell = ({ children }) => {
+  const { antdConfig } = useTheme();
+  return <ConfigProvider theme={antdConfig} warning={{ strict: false }}>{children}</ConfigProvider>;
+};
 
 // Create React Query client
 const queryClient = new QueryClient({
@@ -56,17 +71,17 @@ function App() {
       return;
     }
 
-    // First try the stored full user object (includes roles + permissions)
+    // Always validate the token with the server — never trust user_info alone
+    // because the token may have expired between sessions.
+    // Use cached user_info to render optimistically while the check runs.
     const stored = localStorage.getItem('user_info');
     if (stored) {
       try {
         setUser(JSON.parse(stored));
         setIsAuthenticated(true);
-        return;
-      } catch (_) { /* fall through to /me */ }
+      } catch (_) { /* continue to server check */ }
     }
 
-    // Fallback: fetch /me to get fresh user data with permissions
     fetch('/api/v1/auth/me', { headers: { Authorization: `Bearer ${token}` } })
       .then(r => r.ok ? r.json() : Promise.reject(r.status))
       .then(u => {
@@ -75,9 +90,8 @@ function App() {
         setIsAuthenticated(true);
       })
       .catch(() => {
-        localStorage.removeItem('authToken');
-        localStorage.removeItem('access_token');
-        localStorage.removeItem('user_info');
+        // Token is expired or invalid — force re-login
+        ['token', 'authToken', 'access_token', 'user_info'].forEach(k => localStorage.removeItem(k));
         setIsAuthenticated(false);
         setUser(null);
       });
@@ -107,7 +121,19 @@ function App() {
     localStorage.removeItem('access_token');
   };
 
-  const handleLogout = React.useCallback(() => {
+  const handleLogout = React.useCallback(async () => {
+    // Revoke the token server-side before clearing local state
+    try {
+      const token = localStorage.getItem('token');
+      if (token) {
+        await fetch('/api/v1/auth/logout', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}` },
+        });
+      }
+    } catch (_) {
+      // best-effort — always clear local state even if API call fails
+    }
     setIsAuthenticated(false);
     setUser(null);
     ['token', 'authToken', 'access_token', 'user_info'].forEach(k => localStorage.removeItem(k));
@@ -139,18 +165,6 @@ function App() {
     };
   }, []);
 
-  // Ant Design theme configuration
-  const theme = {
-    token: {
-      colorPrimary: '#1890ff', // Blue primary color
-      colorSuccess: '#52c41a',
-      colorWarning: '#faad14',
-      colorError: '#ff4d4f',
-      colorInfo: '#1890ff',
-      borderRadius: 6,
-    },
-  };
-
   // Show lock screen when license is expired/missing, UNLESS the logged-in user is Global Admin
   const licenseBlocked = isAuthenticated
     && ['expired', 'no_license'].includes(licenseStatus)
@@ -158,10 +172,18 @@ function App() {
 
   return (
     <QueryClientProvider client={queryClient}>
-      <ConfigProvider theme={theme}>
+      <ThemeProvider>
+        <ThemedShell>
         <AntdApp>
         {!isAuthenticated ? (
-          <Login onLogin={handleLogin} />
+          <Router future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+            <Routes>
+              {/* Public kiosk — accessible without login */}
+              <Route path="/visitor/kiosk" element={<Kiosk />} />
+              {/* Anything else → login */}
+              <Route path="/*" element={<Login onLogin={handleLogin} />} />
+            </Routes>
+          </Router>
         ) : licenseBlocked ? (
           <LicenseExpiredScreen
             status={licenseStatus}
@@ -172,6 +194,9 @@ function App() {
         <Router future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
           <Layout user={user} onLogout={handleLogout}>
             <Routes>
+              {/* Public kiosk — also accessible when logged in */}
+              <Route path="/visitor/kiosk" element={<Kiosk />} />
+
               {/* Dashboard — no permission required */}
               <Route path="/" element={<Dashboard />} />
               <Route path="/dashboard" element={<Dashboard />} />
@@ -204,17 +229,30 @@ function App() {
               <Route path="/access-control/doors" element={<ProtectedRoute permission="access_control.view"><AccessControl /></ProtectedRoute>} />
               <Route path="/access-control/events" element={<ProtectedRoute permission="access_control.view"><AccessControl /></ProtectedRoute>} />
 
-              {/* Emergency & Mustering */}
+              {/* Emergency */}
+              <Route path="/emergency" element={<ProtectedRoute permission="emergency.view"><EmergencyMain /></ProtectedRoute>} />
+              <Route path="/emergency/dashboard" element={<ProtectedRoute permission="emergency.view"><EmergencyDashboard /></ProtectedRoute>} />
+              <Route path="/emergency/management" element={<ProtectedRoute permission="emergency.view"><EmergencyManagement /></ProtectedRoute>} />
+              <Route path="/emergency/lockdown" element={<ProtectedRoute permission="emergency.view"><EmergencyLockdown /></ProtectedRoute>} />
+              <Route path="/emergency/fire-mode" element={<ProtectedRoute permission="emergency.view"><EmergencyFireMode /></ProtectedRoute>} />
+              <Route path="/emergency/devices" element={<ProtectedRoute permission="emergency.view"><EmergencyDevices /></ProtectedRoute>} />
+              <Route path="/emergency/plans" element={<ProtectedRoute permission="emergency.view"><EmergencyPlans /></ProtectedRoute>} />
+              <Route path="/emergency/notifications" element={<ProtectedRoute permission="emergency.view"><EmergencyNotifications /></ProtectedRoute>} />
+              <Route path="/emergency/triggers" element={<ProtectedRoute permission="emergency.view"><EmergencyTriggers /></ProtectedRoute>} />
+              <Route path="/emergency/audit" element={<ProtectedRoute permission="emergency.view"><EmergencyAudit /></ProtectedRoute>} />
+              <Route path="/emergency/status" element={<ProtectedRoute permission="emergency.view"><EmergencyDashboard /></ProtectedRoute>} />
+              {/* Emergency Response (combined response centre) */}
               <Route path="/emergency-response" element={<ProtectedRoute permission="emergency.view"><EmergencyResponse /></ProtectedRoute>} />
               <Route path="/emergency-response/emergency" element={<ProtectedRoute permission="emergency.view"><EmergencyResponse /></ProtectedRoute>} />
               <Route path="/emergency-response/mustering" element={<ProtectedRoute permission="emergency.view"><EmergencyResponse /></ProtectedRoute>} />
-              <Route path="/mustering" element={<ProtectedRoute permission="mustering.view"><EmergencyResponse /></ProtectedRoute>} />
-              <Route path="/mustering/events" element={<ProtectedRoute permission="mustering.view"><EmergencyResponse /></ProtectedRoute>} />
-              <Route path="/mustering/zones" element={<ProtectedRoute permission="mustering.view"><EmergencyResponse /></ProtectedRoute>} />
-              <Route path="/mustering/logs" element={<ProtectedRoute permission="mustering.view"><EmergencyResponse /></ProtectedRoute>} />
-              <Route path="/emergency" element={<ProtectedRoute permission="emergency.view"><EmergencyResponse /></ProtectedRoute>} />
-              <Route path="/emergency/lockdown" element={<ProtectedRoute permission="emergency.view"><EmergencyResponse /></ProtectedRoute>} />
-              <Route path="/emergency/status" element={<ProtectedRoute permission="emergency.view"><EmergencyResponse /></ProtectedRoute>} />
+              {/* Mustering */}
+              <Route path="/mustering" element={<ProtectedRoute permission="mustering.view"><Mustering /></ProtectedRoute>} />
+              <Route path="/mustering/management" element={<ProtectedRoute permission="mustering.view"><MusteringManagement /></ProtectedRoute>} />
+              <Route path="/mustering/events" element={<ProtectedRoute permission="mustering.view"><MusteringManagement /></ProtectedRoute>} />
+              <Route path="/mustering/live-map" element={<ProtectedRoute permission="mustering.view"><MusteringLiveMap /></ProtectedRoute>} />
+              <Route path="/mustering/zones" element={<ProtectedRoute permission="mustering.view"><MusteringLiveMap /></ProtectedRoute>} />
+              <Route path="/mustering/logs" element={<ProtectedRoute permission="mustering.view"><MusteringManagement /></ProtectedRoute>} />
+              <Route path="/mustering/mobile" element={<ProtectedRoute permission="mustering.view"><MusteringMobile /></ProtectedRoute>} />
 
               {/* Visitor Management */}
               <Route path="/visitor" element={<ProtectedRoute permission="visitors.view"><Visitor /></ProtectedRoute>} />
@@ -226,7 +264,6 @@ function App() {
               <Route path="/visitor/host-approval" element={<ProtectedRoute permission="visitors.view"><Visitor /></ProtectedRoute>} />
               <Route path="/visitor/types" element={<ProtectedRoute permission="visitors.view"><Visitor /></ProtectedRoute>} />
               <Route path="/visitor/ports" element={<ProtectedRoute permission="visitors.view"><Visitor /></ProtectedRoute>} />
-              <Route path="/visitor/kiosk" element={<ProtectedRoute permission="visitors.view"><Visitor /></ProtectedRoute>} />
 
               {/* Meeting Management — no specific permission yet */}
               <Route path="/meeting" element={<Meeting />} />
@@ -276,7 +313,9 @@ function App() {
         </Router>
         )}
         </AntdApp>
-      </ConfigProvider>
+        </ThemedShell>
+      </ThemeProvider>
+
       {/* {process.env.NODE_ENV === 'development' && <ReactQueryDevtools initialIsOpen={false} />} */}
     </QueryClientProvider>
   );

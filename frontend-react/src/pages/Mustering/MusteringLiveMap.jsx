@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { MapContainer, TileLayer, Marker, Popup, useMap, ZoomControl } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
@@ -30,33 +30,31 @@ const TILE_LAYERS = {
 };
 
 /* ── Muster status colours ─────────────────────────────────────────────────── */
-const musterColor = (zone, activeZoneId, safeCount, missingCount, injuredCount) => {
-  if (zone.id === activeZoneId) {
+const musterColor = (inEvent, safeCount, missingCount, injuredCount) => {
+  if (inEvent) {
     if (missingCount > 0) return '#ef4444';   // red — personnel unaccounted
     if (injuredCount > 0) return '#f97316';   // orange — all accounted, some injured
-    return '#22c55e';                          // green — all safe
+    if (safeCount > 0)    return '#22c55e';   // green — all safe
+    return '#6b7280';                         // grey — no data yet
   }
-  // Non-active zones: show occupancy vs capacity
-  const pct = zone.capacity ? zone.current_occupancy / zone.capacity : 0;
-  if (pct >= 0.9) return '#ef4444';
-  if (pct >= 0.6) return '#f59e0b';
-  return '#3b82f6';
+  return '#3b82f6';                           // blue — not part of this event
 };
 
 /* ── Marker icon ───────────────────────────────────────────────────────────── */
-const markerIcon = (zone, isActive, isSelected, tileKey, safeCount, missingCount, injuredCount) => {
-  const color  = musterColor(zone, isActive ? zone.id : -1, safeCount, missingCount, injuredCount);
-  const size   = isSelected ? 52 : isActive ? 48 : 40;
+const markerIcon = (zone, inEvent, isSelected, tileKey, safeCount, missingCount, injuredCount, liveCount = 0) => {
+  const color  = musterColor(inEvent, safeCount, missingCount, injuredCount);
+  const size   = isSelected ? 52 : inEvent ? 48 : 40;
   const isDark = tileKey === 'dark' || tileKey === 'satellite';
   const ring   = isSelected
     ? `0 0 0 3px ${color}88, 0 4px 20px rgba(0,0,0,0.55)`
     : `0 2px 10px rgba(0,0,0,0.4)`;
 
-  const displayCount = isActive ? safeCount : (zone.current_occupancy ?? 0);
-  const fs = displayCount >= 100 ? 11 : 15;
+  const total = safeCount + missingCount + injuredCount;
+  const displayLabel = inEvent ? String(total) : (liveCount > 0 ? String(liveCount) : '–');
+  const fs = (inEvent ? total : liveCount) >= 100 ? 11 : 15;
   const label = zone.name.length > 22 ? zone.name.slice(0, 20) + '…' : zone.name;
 
-  const pulseHtml = isActive ? `
+  const pulseHtml = inEvent ? `
     <div style="
       position:absolute; top:50%; left:50%;
       width:${size + 16}px; height:${size + 16}px;
@@ -83,7 +81,7 @@ const markerIcon = (zone, isActive, isSelected, tileKey, safeCount, missingCount
         ">
           <span style="color:#fff;font-weight:900;font-size:${fs}px;line-height:1;
             font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
-            text-shadow:0 1px 3px rgba(0,0,0,0.4);">${displayCount}</span>
+            text-shadow:0 1px 3px rgba(0,0,0,0.4);">${displayLabel}</span>
         </div>
         <div style="
           background:${isDark ? 'rgba(15,20,35,0.9)' : 'rgba(15,20,35,0.82)'};
@@ -128,9 +126,9 @@ const MapController = ({ focusZone, allZones }) => {
 };
 
 /* ── Zone popup ────────────────────────────────────────────────────────────── */
-const ZonePopup = ({ zone, isActive, safeCount, missingCount, injuredCount, logs }) => {
-  const color = musterColor(zone, isActive ? zone.id : -1, safeCount, missingCount, injuredCount);
-  const total = isActive ? (safeCount + missingCount + injuredCount) : (zone.current_occupancy ?? 0);
+const ZonePopup = ({ zone, inEvent, safeCount, missingCount, injuredCount, logs, liveCount = 0 }) => {
+  const color = musterColor(inEvent, safeCount, missingCount, injuredCount);
+  const total = safeCount + missingCount + injuredCount;
 
   return (
     <div style={{ width: 220, fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" }}>
@@ -140,7 +138,7 @@ const ZonePopup = ({ zone, isActive, safeCount, missingCount, injuredCount, logs
         borderRadius: '8px 8px 0 0',
       }}>
         <div style={{ fontWeight: 800, color: '#fff', fontSize: 14 }}>{zone.name}</div>
-        {isActive && (
+        {inEvent && (
           <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.8)', marginTop: 3, display: 'flex', alignItems: 'center', gap: 6 }}>
             <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#fff', display: 'inline-block', opacity: 0.9, animation: 'musterMapPulse 1s infinite' }} />
             ACTIVE MUSTER EVENT
@@ -148,7 +146,7 @@ const ZonePopup = ({ zone, isActive, safeCount, missingCount, injuredCount, logs
         )}
       </div>
 
-      {isActive ? (
+      {inEvent ? (
         <>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6, marginBottom: 10 }}>
             {[
@@ -187,7 +185,7 @@ const ZonePopup = ({ zone, isActive, safeCount, missingCount, injuredCount, logs
         </>
       ) : (
         <div style={{ textAlign: 'center' }}>
-          <div style={{ fontSize: 40, fontWeight: 900, color, lineHeight: 1, letterSpacing: -1 }}>{total}</div>
+          <div style={{ fontSize: 40, fontWeight: 900, color: liveCount > 0 ? '#1890ff' : '#6b7280', lineHeight: 1, letterSpacing: -1 }}>{liveCount}</div>
           <div style={{ fontSize: 10, color: '#6b7280', fontWeight: 600, letterSpacing: '0.08em', marginTop: 2, marginBottom: 8 }}>
             OCCUPANCY{zone.capacity ? ` / ${zone.capacity}` : ''}
           </div>
@@ -211,9 +209,10 @@ const ZonePopup = ({ zone, isActive, safeCount, missingCount, injuredCount, logs
 };
 
 /* ── Sidebar zone card ─────────────────────────────────────────────────────── */
-const ZoneCard = ({ zone, isActive, isSelected, onClick, safeCount, missingCount, injuredCount }) => {
-  const color = musterColor(zone, isActive ? zone.id : -1, safeCount, missingCount, injuredCount);
-  const count = isActive ? safeCount : (zone.current_occupancy ?? 0);
+const ZoneCard = ({ zone, inEvent, isSelected, onClick, safeCount, missingCount, injuredCount, liveCount = 0 }) => {
+  const color = musterColor(inEvent, safeCount, missingCount, injuredCount);
+  const total = safeCount + missingCount + injuredCount;
+  const count = inEvent ? total : liveCount;
 
   return (
     <div
@@ -243,16 +242,16 @@ const ZoneCard = ({ zone, isActive, isSelected, onClick, safeCount, missingCount
           color: isSelected ? '#fff' : '#E2E8F0',
           whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
         }}>{zone.name}</div>
-        {isActive && (
+        {inEvent && (
           <div style={{ fontSize: 10, color: '#64748B', marginTop: 2, display: 'flex', gap: 6 }}>
-            <span style={{ color: '#22c55e', fontWeight: 700 }}>{safeCount} safe</span>
+            {safeCount > 0    && <span style={{ color: '#22c55e', fontWeight: 700 }}>{safeCount} safe</span>}
             {missingCount > 0 && <span style={{ color: '#ef4444', fontWeight: 700 }}>{missingCount} miss</span>}
             {injuredCount > 0 && <span style={{ color: '#f97316', fontWeight: 700 }}>{injuredCount} inj</span>}
           </div>
         )}
       </div>
 
-      {isActive && (
+      {inEvent && (
         <div style={{ width: 8, height: 8, borderRadius: '50%', background: color, flexShrink: 0, animation: 'musterMapPulse 1.2s infinite' }} />
       )}
     </div>
@@ -260,7 +259,7 @@ const ZoneCard = ({ zone, isActive, isSelected, onClick, safeCount, missingCount
 };
 
 /* ── Main MusteringLiveMap ─────────────────────────────────────────────────── */
-const MusteringLiveMap = ({ zones, activeZoneId, allLogs }) => {
+const MusteringLiveMap = ({ zones, activeZoneId, allLogs, isEventActive, zoneLiveCounts = {} }) => {
   const [selectedId,    setSelectedId]    = useState(null);
   const [search,        setSearch]        = useState('');
   const [tileKey,       setTileKey]       = useState('light');
@@ -283,9 +282,26 @@ const MusteringLiveMap = ({ zones, activeZoneId, allLogs }) => {
     else document.exitFullscreen();
   };
 
+  // Global totals for the event summary chips
   const safeCount    = allLogs.filter(l => l.status === 1).length;
   const missingCount = allLogs.filter(l => l.status === 0).length;
   const injuredCount = allLogs.filter(l => l.status === 2).length;
+
+  // Per-zone breakdown — match log's last_punch_area (zone name) to zone.name
+  const zoneStats = useMemo(() => {
+    const m = {};
+    for (const z of zones) m[z.id] = { safe: 0, missing: 0, injured: 0, logs: [] };
+    for (const l of allLogs) {
+      const z = zones.find(z => z.name && l.last_punch_area && z.name === l.last_punch_area);
+      if (z) {
+        if (l.status === 1)      m[z.id].safe++;
+        else if (l.status === 0) m[z.id].missing++;
+        else                     m[z.id].injured++;
+        m[z.id].logs.push(l);
+      }
+    }
+    return m;
+  }, [zones, allLogs]);
 
   const geoZones   = zones.filter(z => z.latitude != null && z.longitude != null);
   const noGeoCount = zones.length - geoZones.length;
@@ -378,7 +394,7 @@ const MusteringLiveMap = ({ zones, activeZoneId, allLogs }) => {
         </div>
 
         {/* Stats chips */}
-        {activeZoneId && (
+        {isEventActive && allLogs.length > 0 && (
           <div style={{ padding: '0 10px 8px', display: 'flex', gap: 4, flexWrap: 'wrap' }}>
             <div style={{ fontSize: 10, fontWeight: 700, color: '#22c55e', background: 'rgba(34,197,94,0.12)', borderRadius: 4, padding: '2px 7px' }}>
               {safeCount} SAFE
@@ -398,18 +414,24 @@ const MusteringLiveMap = ({ zones, activeZoneId, allLogs }) => {
 
         {/* Zone list */}
         <div style={{ flex: 1, overflowY: 'auto', padding: '0 6px' }}>
-          {filtered.map(zone => (
-            <ZoneCard
-              key={zone.id}
-              zone={zone}
-              isActive={zone.id === activeZoneId}
-              isSelected={zone.id === selectedId}
-              safeCount={zone.id === activeZoneId ? safeCount : 0}
-              missingCount={zone.id === activeZoneId ? missingCount : 0}
-              injuredCount={zone.id === activeZoneId ? injuredCount : 0}
-              onClick={() => setSelectedId(prev => prev === zone.id ? null : zone.id)}
-            />
-          ))}
+          {filtered.map(zone => {
+            const zs = zoneStats[zone.id] ?? { safe: 0, missing: 0, injured: 0 };
+            const inEvent = isEventActive && allLogs.length > 0 && (zs.safe + zs.missing + zs.injured > 0);
+            const liveCount = zoneLiveCounts[zone.id] ?? zone.adms_occupancy ?? 0;
+            return (
+              <ZoneCard
+                key={zone.id}
+                zone={zone}
+                inEvent={inEvent}
+                isSelected={zone.id === selectedId}
+                safeCount={zs.safe}
+                missingCount={zs.missing}
+                injuredCount={zs.injured}
+                liveCount={liveCount}
+                onClick={() => setSelectedId(prev => prev === zone.id ? null : zone.id)}
+              />
+            );
+          })}
         </div>
 
         {/* Tile switcher */}
@@ -445,27 +467,27 @@ const MusteringLiveMap = ({ zones, activeZoneId, allLogs }) => {
           <MapController focusZone={focusZone} allZones={geoZones} />
 
           {geoZones.map(zone => {
-            const isActive = zone.id === activeZoneId;
             const isSelected = zone.id === selectedId;
-            const zSafe    = isActive ? safeCount    : 0;
-            const zMissing = isActive ? missingCount : 0;
-            const zInjured = isActive ? injuredCount : 0;
+            const zs = zoneStats[zone.id] ?? { safe: 0, missing: 0, injured: 0, logs: [] };
+            const inEvent = isEventActive && allLogs.length > 0 && (zs.safe + zs.missing + zs.injured > 0);
+            const liveCount = zoneLiveCounts[zone.id] ?? zone.adms_occupancy ?? 0;
             return (
               <Marker
                 key={zone.id}
                 position={[zone.latitude, zone.longitude]}
-                icon={markerIcon(zone, isActive, isSelected, tileKey, zSafe, zMissing, zInjured)}
+                icon={markerIcon(zone, inEvent, isSelected, tileKey, zs.safe, zs.missing, zs.injured, liveCount)}
                 eventHandlers={{ click: () => setSelectedId(prev => prev === zone.id ? null : zone.id) }}
-                zIndexOffset={isActive ? 1000 : isSelected ? 500 : 0}
+                zIndexOffset={inEvent ? 1000 : isSelected ? 500 : 0}
               >
                 <Popup>
                   <ZonePopup
                     zone={zone}
-                    isActive={isActive}
-                    safeCount={zSafe}
-                    missingCount={zMissing}
-                    injuredCount={zInjured}
-                    logs={isActive ? allLogs : []}
+                    inEvent={inEvent}
+                    safeCount={zs.safe}
+                    missingCount={zs.missing}
+                    injuredCount={zs.injured}
+                    liveCount={liveCount}
+                    logs={zs.logs}
                   />
                 </Popup>
               </Marker>
@@ -489,7 +511,7 @@ const MusteringLiveMap = ({ zones, activeZoneId, allLogs }) => {
         </Tooltip>
 
         {/* Active event badge */}
-        {activeZoneId && (
+        {isEventActive && allLogs.length > 0 && (
           <div style={{
             position: 'absolute', top: 10, left: 10, zIndex: 1000,
             background: 'rgba(239,68,68,0.9)', color: 'white',

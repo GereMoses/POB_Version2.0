@@ -40,7 +40,7 @@ const LeavesTab = () => {
   const [hiddenCols,  setHiddenCols]  = useState(new Set());
   const [colPopOpen,  setColPopOpen]  = useState(false);
   const [detailOpen,  setDetailOpen]  = useState(false);
-  const [detailRec,   setDetailRec]   = useState(null);
+  const [detailId,    setDetailId]    = useState(null);
   const [submitOpen,  setSubmitOpen]  = useState(false);
   const [rejectOpen,  setRejectOpen]  = useState(false);
   const [rejectRec,   setRejectRec]   = useState(null);
@@ -159,6 +159,8 @@ const LeavesTab = () => {
     })
   ).catch(() => {});
 
+  const detailRec = useMemo(() => rows.find(r => r.id === detailId) ?? null, [rows, detailId]);
+
   const pending  = rawRows.filter(r => r.status === 'pending').length;
   const approved = rawRows.filter(r => r.status === 'approved' || r.status === 'on_leave').length;
   const rejected = rawRows.filter(r => r.status === 'rejected').length;
@@ -171,7 +173,7 @@ const LeavesTab = () => {
         <EmployeeCell
           name={r.personnel_name || `Employee #${r.personnel_id}`}
           code={r.personnel_emp_code || ''}
-          onClick={() => { setDetailRec(r); setDetailOpen(true); }}
+          onClick={() => { setDetailId(r.id); setDetailOpen(true); }}
         />
       ),
     },
@@ -209,13 +211,14 @@ const LeavesTab = () => {
       render: (_, r) => (
         <Space size={4} wrap>
           <Tooltip title="View">
-            <Button size="small" icon={<EyeOutlined />} onClick={() => { setDetailRec(r); setDetailOpen(true); }} />
+            <Button size="small" icon={<EyeOutlined />} onClick={() => { setDetailId(r.id); setDetailOpen(true); }} />
           </Tooltip>
           {r.status === 'pending' && (
             <>
               <Popconfirm title="Approve this leave?" onConfirm={() => approveM.mutate(r.id)} okText="Approve">
                 <Tooltip title="Approve">
-                  <Button size="small" type="primary" icon={<CheckOutlined />} />
+                  <Button size="small" type="primary" icon={<CheckOutlined />}
+                    loading={approveM.isPending && approveM.variables === r.id} />
                 </Tooltip>
               </Popconfirm>
               <Tooltip title="Reject">
@@ -232,7 +235,7 @@ const LeavesTab = () => {
         </Space>
       ),
     }];
-  }, [hiddenCols, approveM.isPending]);
+  }, [hiddenCols, approveM.variables]);
 
   const pendingSelected = selected.filter(id => rows.find(r => r.id === id)?.status === 'pending');
 

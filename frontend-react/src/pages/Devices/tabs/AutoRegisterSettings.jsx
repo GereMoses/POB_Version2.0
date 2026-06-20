@@ -67,9 +67,9 @@ const AutoRegisterSettings = () => {
 
   const stats = {
     total:   allTerminals.length,
-    online:  allTerminals.filter(d => d.status === 'Online').length,
+    online:  allTerminals.filter(d => d.status?.toLowerCase() === 'online').length,
     pending: pendingDevices.length,
-    offline: allTerminals.filter(d => d.status === 'Offline').length,
+    offline: allTerminals.filter(d => d.status?.toLowerCase() === 'offline').length,
   };
 
   const pendingColumns = [
@@ -141,7 +141,7 @@ const AutoRegisterSettings = () => {
       dataIndex: 'status',
       key: 'status',
       render: v => (
-        <Tag color={v === 'Online' ? 'green' : v === 'Offline' ? 'red' : 'orange'}>
+        <Tag color={v?.toLowerCase() === 'online' ? 'green' : v?.toLowerCase() === 'offline' ? 'red' : 'orange'}>
           {v || 'Unknown'}
         </Tag>
       ),

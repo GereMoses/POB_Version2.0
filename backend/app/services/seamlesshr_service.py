@@ -34,6 +34,26 @@ import httpx
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
+# ── Shared httpx client (singleton) ──────────────────────────────────────────
+_shr_client: Optional[httpx.AsyncClient] = None
+_shr_client_lock = asyncio.Lock()
+
+
+async def _get_shr_client() -> httpx.AsyncClient:
+    global _shr_client
+    if _shr_client is None or _shr_client.is_closed:
+        async with _shr_client_lock:
+            if _shr_client is None or _shr_client.is_closed:
+                _shr_client = httpx.AsyncClient(timeout=30)
+    return _shr_client
+
+
+async def close_shr_client() -> None:
+    global _shr_client
+    if _shr_client and not _shr_client.is_closed:
+        await _shr_client.aclose()
+        _shr_client = None
+
 logger = logging.getLogger(__name__)
 
 # ── Config helpers ────────────────────────────────────────────────────────────
@@ -43,22 +63,24 @@ def get_config(db: Session) -> Optional[Dict[str, Any]]:
     try:
         row = db.execute(text(
             "SELECT api_base_url, api_key, org_id, auth_header_name, "
-            "       attendance_endpoint, employee_endpoint, is_enabled "
+            "       attendance_endpoint, employee_endpoint, is_enabled, sync_time "
             "FROM hr_integration_config LIMIT 1"
         )).fetchone()
         if not row or not row[0] or not row[1]:
             return None
+        from ..core.crypto import decrypt_secret
         return {
             "api_base_url":        row[0].rstrip("/"),
-            "api_key":             row[1],
+            "api_key":             decrypt_secret(row[1]),  # transparently handles legacy plaintext
             "org_id":              row[2],
             "auth_header_name":    row[3] or "Authorization",
             "attendance_endpoint": row[4] or "/v1/attendance/clock-records",
             "employee_endpoint":   row[5] or "/v1/employees",
             "is_enabled":          bool(row[6]),
+            "sync_time":           row[7] or "00:00",  # Bug 2 fix: was missing
         }
     except Exception as e:
-        logger.debug(f"hr_integration_config not found: {e}")
+        logger.warning(f"hr_integration_config read error: {e}")  # Bug 4 fix: WARNING not DEBUG
         return None
 
 
@@ -72,50 +94,38 @@ def _auth_header(cfg: Dict) -> Dict[str, str]:
 
 # ── Core sync logic ───────────────────────────────────────────────────────────
 
+
 def _build_attendance_records(db: Session, sync_date: date) -> List[Dict]:
     """
-    Pull all iclock_transaction rows for sync_date, pair check-ins with
-    check-outs, and return one record per employee ready to send.
+    Build one SeamlessHR clock-record per employee for sync_date.
+
+    Source of truth is the COMPUTED attendance in att_report (via the shared
+    attendance_export.build_daily_attendance), NOT raw iclock_transaction. This is
+    what fixes the historical defects:
+      • access-control door swipes no longer inflate work hours (att_report respects
+        reader_purpose, shifts and breaks);
+      • cross-midnight / night shifts are attributed to the correct business day;
+      • the day boundary is the shift-resolved att_date, not UTC midnight.
+
+    Each record carries an idempotency_key so a re-run/retry cannot double-post.
+    Times are emitted as tz-aware ISO 8601 (with offset) to remove the previous
+    naive-wall-clock ambiguity; total_minutes is the authoritative computed figure.
     """
-    rows = db.execute(text("""
-        SELECT
-          t.emp_code,
-          t.punch_time,
-          t.punch_state
-        FROM iclock_transaction t
-        WHERE t.punch_time::date = :d
-        ORDER BY t.emp_code, t.punch_time
-    """), {"d": sync_date}).fetchall()
+    from .attendance_export import build_daily_attendance
 
-    # Group by emp_code
-    by_emp: Dict[str, List[Tuple]] = {}
-    for r in rows:
-        by_emp.setdefault(r[0], []).append((r[1], r[2]))
-
+    canonical = build_daily_attendance(db, sync_date)
     records = []
-    for emp_code, punches in by_emp.items():
-        check_ins  = [p[0] for p in punches if p[1] == 0]
-        check_outs = [p[0] for p in punches if p[1] == 1]
-
-        if not check_ins:
-            continue
-
-        clock_in  = min(check_ins)
-        clock_out = max(check_outs) if check_outs else None
-
-        total_minutes = None
-        if clock_out:
-            total_minutes = int((clock_out - clock_in).total_seconds() / 60)
-
+    for c in canonical:
         records.append({
-            "employee_id":   emp_code,
-            "date":          str(sync_date),
-            "clock_in":      clock_in.strftime("%H:%M:%S"),
-            "clock_out":     clock_out.strftime("%H:%M:%S") if clock_out else None,
-            "total_minutes": total_minutes,
-            "source":        "POB_BIOMETRIC",
+            "employee_id":      c["emp_code"],
+            "date":             str(c["att_date"]),
+            "clock_in":         c["check_in"].isoformat() if c["check_in"] else None,
+            "clock_out":        c["check_out"].isoformat() if c["check_out"] else None,
+            "total_minutes":    c["work_minutes"],
+            "overtime_minutes": c["overtime_minutes"],
+            "source":           "POB_BIOMETRIC",
+            "idempotency_key":  c["idempotency_key"],
         })
-
     return records
 
 
@@ -174,23 +184,24 @@ async def push_attendance(
     sent   = 0
 
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            # Send in batches of 50 to avoid large payloads
-            batch_size = 50
-            for i in range(0, len(records), batch_size):
-                batch = records[i : i + batch_size]
-                try:
-                    resp = await client.post(url, json={"records": batch}, headers=headers)
-                    if resp.status_code in (200, 201, 204):
-                        sent += len(batch)
-                    else:
-                        logger.warning(
-                            f"SeamlessHR batch {i//batch_size+1} returned {resp.status_code}: {resp.text[:200]}"
-                        )
-                        failed += len(batch)
-                except httpx.RequestError as e:
-                    logger.error(f"SeamlessHR request error (batch {i//batch_size+1}): {e}")
+        client = await _get_shr_client()
+        # Send in batches of 50 to avoid large payloads
+        batch_size = 50
+        for i in range(0, len(records), batch_size):
+            batch = records[i : i + batch_size]
+            try:
+                resp = await client.post(url, json={"records": batch}, headers=headers)
+                if resp.status_code in (200, 201, 204):
+                    sent += len(batch)
+                else:
+                    logger.warning(
+                        "SeamlessHR batch %d returned %s: %s",
+                        i // batch_size + 1, resp.status_code, resp.text[:200],
+                    )
                     failed += len(batch)
+            except httpx.RequestError as e:
+                logger.error("SeamlessHR request error (batch %d): %s", i // batch_size + 1, e)
+                failed += len(batch)
 
         result["records_sent"]   = sent
         result["records_failed"] = failed

@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from ..core.database import get_db
 from ..core.dependencies import get_current_user
+from ..models.biotime_models import MusteringEvent, MusteringLog
 from ..models.emergency import (
     ManifestEntry,
     Transport,
@@ -347,6 +348,36 @@ async def update_manifest_entry(
     if new_status == "CONFIRMED":
         entry.confirmed_at = datetime.utcnow()
         entry.confirmed_by_id = getattr(current_user, "id", None)
+
+        # Fixes #1 + #14: OUTBOUND departure clears zone/POB state and marks
+        # the person safe/departed in any active mustering event so they don't
+        # appear as MISSING after leaving the platform.
+        if entry.direction == "OUTBOUND" and entry.personnel_id:
+            db.query(Personnel).filter(Personnel.id == entry.personnel_id).update(
+                {"current_zone_id": None, "is_onboard": False, "pob_location": None},
+                synchronize_session=False,
+            )
+            if entry.emp_code:
+                active_event = (
+                    db.query(MusteringEvent).filter(MusteringEvent.status == 0).first()
+                )
+                if active_event:
+                    active_log = (
+                        db.query(MusteringLog)
+                        .filter(
+                            MusteringLog.event_id == active_event.id,
+                            MusteringLog.emp_code == entry.emp_code,
+                        )
+                        .first()
+                    )
+                    if active_log and active_log.status != 1:
+                        from ..services.mustering_service import MusteringService
+                        MusteringService(db).mark_person_status(
+                            active_event.id,
+                            entry.emp_code,
+                            status=1,
+                            marked_by=getattr(current_user, "id", 0),
+                        )
     elif new_status in ("NO_SHOW", "OFFLOADED"):
         entry.confirmed_at = None
         entry.confirmed_by_id = None
@@ -473,3 +504,89 @@ async def search_personnel(
         }
         for p in results
     ]
+
+
+# ─── Mustering reconciliation ──────────────────────────────────────────────────
+
+@router.get("/flights/{flight_id}/reconcile")
+async def reconcile_manifest_with_mustering(
+    flight_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+) -> Dict[str, Any]:
+    """
+    Cross-check the flight manifest against the current live mustering headcount.
+
+    Returns three lists:
+    - verified:        manifest passengers confirmed accounted for in mustering
+    - missing_in_muster: on manifest but NOT yet checked in to any muster zone
+    - extra_on_platform: in live muster but NOT on this manifest (unexpected personnel)
+
+    A departure should only be authorised when missing_in_muster is empty.
+    """
+    schedule = db.query(TransportSchedule).filter(TransportSchedule.id == flight_id).first()
+    if not schedule:
+        raise HTTPException(status_code=404, detail="Flight schedule not found")
+
+    # Manifest emp_codes for this flight
+    manifest_emp_codes: set = {
+        e.emp_code for e in (schedule.manifest_entries or [])
+        if e.emp_code and e.status not in ("CANCELLED", "NO_SHOW", "OFFLOADED")
+    }
+
+    # Active mustering personnel — anyone with an open muster log entry (status=0=missing or 1=safe)
+    muster_rows = db.execute(text("""
+        SELECT DISTINCT ml.emp_code
+        FROM mustering_log ml
+        JOIN mustering_event me ON me.id = ml.event_id
+        WHERE me.status = 0   -- active event only
+    """)).fetchall()
+    muster_emp_codes: set = {r[0] for r in muster_rows}
+
+    # If no active muster, fall back to current POB (last seen on platform)
+    if not muster_emp_codes:
+        pob_rows = db.execute(text("""
+            SELECT DISTINCT p.emp_code
+            FROM personnel p
+            WHERE p.status = 'ACTIVE'
+              AND EXISTS (
+                  SELECT 1 FROM iclock_transaction t
+                  WHERE t.emp_code = p.emp_code
+                    AND t.punch_time >= NOW() - INTERVAL '24 hours'
+              )
+        """)).fetchall()
+        muster_emp_codes = {r[0] for r in pob_rows}
+        headcount_source = "pob_24h"
+    else:
+        headcount_source = "active_muster"
+
+    verified             = sorted(manifest_emp_codes & muster_emp_codes)
+    missing_in_muster    = sorted(manifest_emp_codes - muster_emp_codes)
+    extra_on_platform    = sorted(muster_emp_codes   - manifest_emp_codes)
+
+    # Enrich missing list with names for the safety officer
+    def _name(emp_code: str) -> str:
+        row = db.execute(text(
+            "SELECT first_name || ' ' || COALESCE(last_name,'') FROM personnel WHERE emp_code=:c LIMIT 1"
+        ), {"c": emp_code}).fetchone()
+        return row[0].strip() if row else emp_code
+
+    return {
+        "flight_id":        flight_id,
+        "headcount_source": headcount_source,
+        "reconciled":       len(missing_in_muster) == 0,
+        "summary": {
+            "manifest_total":   len(manifest_emp_codes),
+            "verified":         len(verified),
+            "missing_in_muster": len(missing_in_muster),
+            "extra_on_platform": len(extra_on_platform),
+        },
+        "missing_in_muster": [
+            {"emp_code": c, "name": _name(c)} for c in missing_in_muster
+        ],
+        "extra_on_platform": [
+            {"emp_code": c, "name": _name(c)} for c in extra_on_platform
+        ],
+        "verified_emp_codes": verified,
+        "generated_at": datetime.now().isoformat(),
+    }

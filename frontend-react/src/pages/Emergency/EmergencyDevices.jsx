@@ -4,10 +4,10 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import { 
+import {
   Bell, Wifi, WifiOff, Power, Activity, TestTube, Settings,
   MapPin, AlertTriangle, CheckCircle, XCircle, Clock, RefreshCw,
-  ToggleLeft, ToggleRight, Search, Filter
+  ToggleLeft, ToggleRight, Search, Filter, Lock
 } from 'lucide-react';
 import { api } from '../../services/api';
 

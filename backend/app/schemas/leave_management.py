@@ -60,9 +60,10 @@ class LeaveManagementResponse(BaseModel):
     rejection_reason: Optional[str] = None
     created_at: datetime
     updated_at: datetime
-    # Enriched at query time from the personnel relationship
+    # Enriched at query time
     personnel_name: Optional[str] = None
     personnel_emp_code: Optional[str] = None
+    approved_by_name: Optional[str] = None
 
     class Config:
         from_attributes = True

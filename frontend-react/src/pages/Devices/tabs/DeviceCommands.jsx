@@ -117,6 +117,7 @@ const DeviceCommands = () => {
   const [driftData,    setDriftData]    = useState([]);
   const [driftLoading, setDriftLoading] = useState(false);
   const [syncAllBusy,  setSyncAllBusy]  = useState(false);
+  const [flushBusy,    setFlushBusy]    = useState(false);
 
   // modal states
   const [syncEmpModal,   setSyncEmpModal]   = useState(false);
@@ -154,7 +155,7 @@ const DeviceCommands = () => {
   const fetchDevices = useCallback(async () => {
     try {
       const res = await deviceAPI.getTerminals({ limit: 1000 });
-      setDevices(res || []);
+      setDevices(Array.isArray(res) ? res : (res?.data || []));
     } catch { /* silent */ }
   }, []);
 
@@ -193,6 +194,25 @@ const DeviceCommands = () => {
   };
 
   // ── Actions ────────────────────────────────────────────────────────────────
+
+  // — Flush pending commands via ZKLib —
+  const handleFlushPending = async (sn) => {
+    if (!sn) { message.warning('Select a device first'); return; }
+    setFlushBusy(true);
+    try {
+      const res = await apiService.post(`/api/device/devcmd/flush-pending-zklib/?sn=${sn}`);
+      if (res?.synced > 0) {
+        message.success(`Pushed ${res.synced} employees and cleared ${res.flushed} pending commands`);
+      } else if (res?.flushed > 0) {
+        message.success(`Cleared ${res.flushed} pending commands`);
+      } else {
+        message.info(res?.message || 'No pending commands to flush');
+      }
+      fetchCommands();
+    } catch (err) {
+      message.error(err?.message || 'Flush failed — device may be offline');
+    } finally { setFlushBusy(false); }
+  };
 
   // — Employee sync —
   const doSyncAll = () =>
@@ -860,6 +880,21 @@ const DeviceCommands = () => {
         </Badge>
 
         {stats.pending > 0 && (
+          <Tooltip title="Push pending commands directly via ZKLib (for direct/dual-mode devices)">
+            <Button
+              icon={<ThunderboltOutlined />}
+              type="primary"
+              size="small"
+              loading={flushBusy}
+              style={{ borderRadius: 7, background: '#16a34a', borderColor: '#16a34a' }}
+              onClick={() => handleFlushPending(actionDevice)}
+            >
+              Push Now via ZKLib ({stats.pending})
+            </Button>
+          </Tooltip>
+        )}
+
+        {stats.pending > 0 && (
           <Popconfirm
             title={`Clear all ${stats.pending} pending commands?`}
             onConfirm={handleClearPending} okText="Clear All" okButtonProps={{ danger: true }}
@@ -1002,7 +1037,7 @@ const DeviceCommands = () => {
       <Drawer
         title={detailCmd ? `Command: ${detailCmd.cmd_content.split(' ')[0]}` : ''}
         placement="right" width={520}
-        open={!!detailCmd} onClose={() => setDetailCmd(null)} destroyOnClose
+        open={!!detailCmd} onClose={() => setDetailCmd(null)} destroyOnHidden
       >
         {detailCmd && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>

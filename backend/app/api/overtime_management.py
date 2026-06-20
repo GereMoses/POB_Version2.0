@@ -22,16 +22,22 @@ router = APIRouter()
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 def _enrich_overtime(rec: OvertimeManagement) -> OvertimeManagement:
-    if rec.personnel:
-        rec.personnel_name = (
-            f"{rec.personnel.first_name} {rec.personnel.last_name}".strip()
-            if hasattr(rec.personnel, "first_name")
-            else str(rec.personnel_id)
-        )
-        rec.personnel_emp_code = getattr(rec.personnel, "emp_code", None)
+    p = rec.personnel
+    if p:
+        rec.personnel_name = f"{p.first_name or ''} {p.last_name or ''}".strip() or str(p.id)
+        rec.personnel_emp_code = getattr(p, "emp_code", None)
+        rec.personnel_type    = getattr(p, "personnel_type", None)
+        rec.personnel_company = getattr(p, "company", None)
+        dept = getattr(p, "department", None)
+        rec.department_id   = getattr(p, "department_id", None)
+        rec.department_name = getattr(dept, "name", None) if dept else None
     else:
         rec.personnel_name = None
         rec.personnel_emp_code = None
+        rec.personnel_type    = None
+        rec.personnel_company = None
+        rec.department_id   = None
+        rec.department_name = None
     return rec
 
 
@@ -63,24 +69,70 @@ async def get_overtime_summary(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    q = db.query(OvertimeManagement)
-    if year:
-        q = q.filter(extract("year", OvertimeManagement.date) == year)
-    if month:
-        q = q.filter(extract("month", OvertimeManagement.date) == month)
+    from datetime import timedelta
 
-    total = q.count()
-    pending = q.filter(OvertimeManagement.status == "pending").count()
-    approved = q.filter(OvertimeManagement.status == "approved").count()
-    rejected = q.filter(OvertimeManagement.status == "rejected").count()
+    all_records = db.query(OvertimeManagement).all()
+
+    by_status: dict = {}
+    by_type: dict = {}
+    by_comp: dict = {}
+    by_dept: dict = {}
+    month_counts: dict = {}
+    approved_hours = 0.0
+
+    for r in all_records:
+        by_status[r.status] = by_status.get(r.status, 0) + 1
+        if r.overtime_type:
+            by_type[r.overtime_type] = by_type.get(r.overtime_type, 0) + 1
+        ct = r.compensation_type or "unspecified"
+        by_comp[ct] = by_comp.get(ct, 0) + 1
+        if r.status == "approved" and r.overtime_hours:
+            approved_hours += float(r.overtime_hours)
+        if r.date:
+            mk = r.date.strftime("%Y-%m")
+            month_counts[mk] = month_counts.get(mk, 0) + 1
+        p = db.query(Personnel).filter(Personnel.id == r.personnel_id).first()
+        dept = getattr(p, "department", None) if p else None
+        dept_name = getattr(dept, "name", "No Department") if dept else "No Department"
+        if dept_name not in by_dept:
+            by_dept[dept_name] = {"total": 0, "approved_hours": 0.0}
+        by_dept[dept_name]["total"] += 1
+        if r.status == "approved" and r.overtime_hours:
+            by_dept[dept_name]["approved_hours"] += float(r.overtime_hours)
+
+    today = date.today()
+    monthly_trend = []
+    for i in range(11, -1, -1):
+        yr = today.year - (i // 12)
+        mo = today.month - (i % 12)
+        if mo <= 0:
+            mo += 12
+            yr -= 1
+        mk = f"{yr:04d}-{mo:02d}"
+        monthly_trend.append({"month": mk, "count": month_counts.get(mk, 0)})
+
+    dept_summary = [
+        {"department": k, **v}
+        for k, v in sorted(by_dept.items(), key=lambda x: -x[1]["total"])
+    ]
+
+    total = len(all_records)
     total_ot_hours = db.query(func.sum(OvertimeManagement.overtime_hours)).scalar() or 0
 
     return {
-        "total": total,
-        "pending": pending,
-        "approved": approved,
-        "rejected": rejected,
-        "total_overtime_hours": float(total_ot_hours),
+        "total":                 total,
+        "pending":               by_status.get("pending", 0),
+        "approved":              by_status.get("approved", 0),
+        "rejected":              by_status.get("rejected", 0),
+        "cancelled":             by_status.get("cancelled", 0),
+        "processed":             by_status.get("processed", 0),
+        "total_overtime_hours":  float(total_ot_hours),
+        "approved_hours":        approved_hours,
+        "by_status":             by_status,
+        "by_type":               by_type,
+        "by_compensation":       by_comp,
+        "by_dept":               dept_summary,
+        "monthly_trend":         monthly_trend,
     }
 
 
@@ -183,10 +235,11 @@ async def create_overtime_request(
 @router.get("/overtime", response_model=List[OvertimeManagementResponse])
 async def get_overtime_requests(
     skip: int = Query(0, ge=0),
-    limit: int = Query(100, ge=1, le=1000),
+    limit: int = Query(500, ge=1, le=1000),
     personnel_id: Optional[int] = None,
     status: Optional[str] = None,
     overtime_type: Optional[str] = None,
+    department_id: Optional[int] = None,
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
     db: Session = Depends(get_db),
@@ -204,7 +257,10 @@ async def get_overtime_requests(
     if end_date:
         q = q.filter(OvertimeManagement.date <= end_date)
     records = q.order_by(OvertimeManagement.created_at.desc()).offset(skip).limit(limit).all()
-    return [_enrich_overtime(r) for r in records]
+    enriched = [_enrich_overtime(r) for r in records]
+    if department_id:
+        enriched = [r for r in enriched if r.department_id == department_id]
+    return enriched
 
 
 @router.get("/overtime/{overtime_id}", response_model=OvertimeManagementResponse)

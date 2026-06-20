@@ -1,20 +1,17 @@
 import React, { useState, useEffect } from 'react';
-import { 
-  Card, Button, List, Avatar, Badge, Progress, Tag, Space, Typography, Alert, 
+import {
+  Card, Button, List, Avatar, Badge, Progress, Tag, Space, Typography, Alert,
   Modal, Form, Input, Select, message, Statistic, Row, Col, Divider, Tooltip,
-  Drawer, Tabs, Timeline, Steps, Upload, CameraOutlined, EnvironmentOutlined,
-  PhoneOutlined, MailOutlined, WhatsAppOutlined, LocationOutlined, UserOutlined,
-  SafetyOutlined, ClockCircleOutlined, CheckCircleOutlined, WarningOutlined,
-  ReloadOutlined, QrcodeOutlined, ShareAltOutlined
+  Drawer, Tabs, Timeline, Steps, Upload,
 } from 'antd';
-import { 
-  TeamOutlined, 
-  ExclamationCircleOutlined, 
+import {
+  TeamOutlined,
+  ExclamationCircleOutlined,
   PlayCircleOutlined,
   StopOutlined,
   BellOutlined,
   CameraOutlined,
-  MapPinOutlined,
+  PushpinOutlined,
   PhoneOutlined,
   MessageOutlined,
   MailOutlined,
@@ -30,7 +27,8 @@ import {
   FireOutlined,
   AlertOutlined,
   HeartOutlined,
-  FirstAidOutlined
+  MedicineBoxOutlined,
+  EyeOutlined,
 } from '@ant-design/icons';
 import { API_BASE_URL } from '../../services/api';
 
@@ -72,7 +70,7 @@ const MusteringMobile = () => {
   const statusOptions = [
     { value: 1, label: 'Safe', color: 'green', icon: <CheckCircleOutlined /> },
     { value: 0, label: 'Missing', color: 'red', icon: <WarningOutlined /> },
-    { value: 2, label: 'Injured', color: 'orange', icon: <FirstAidOutlined /> }
+    { value: 2, label: 'Injured', color: 'orange', icon: <MedicineBoxOutlined /> }
   ];
 
   // Get current user info (mock for demo)

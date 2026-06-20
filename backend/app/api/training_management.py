@@ -81,10 +81,15 @@ def _enrich_enrollment(rec: TrainingEnrollment) -> TrainingEnrollment:
         # Sync personnel_type from personnel record
         if not rec.personnel_type:
             rec.personnel_type = getattr(rec.personnel, "personnel_type", None)
+        dept = getattr(rec.personnel, "department", None)
+        rec.department_id   = getattr(rec.personnel, "department_id", None)
+        rec.department_name = getattr(dept, "name", None) if dept else None
     else:
         rec.personnel_name = None
         rec.personnel_emp_code = None
         rec.personnel_company = None
+        rec.department_id = None
+        rec.department_name = None
 
     if rec.course:
         rec.course_name = rec.course.course_name
@@ -275,12 +280,15 @@ async def get_compliance_gaps(
                     # enrolled or in_progress — not yet a gap, skip
                     continue
 
+            dept = getattr(person, "department", None)
             gaps.append(ComplianceRecord(
                 personnel_id=person.id,
                 personnel_name=f"{person.first_name} {person.last_name}".strip(),
                 personnel_emp_code=person.emp_code,
                 personnel_type=person.personnel_type or "STAFF",
                 personnel_company=person.company,
+                department_id=getattr(person, "department_id", None),
+                department_name=getattr(dept, "name", None) if dept else None,
                 course_id=course.id,
                 course_name=course.course_name,
                 course_code=course.course_code,
@@ -415,12 +423,13 @@ async def enroll_in_training(
 @router.get("/training/enrollments", response_model=List[TrainingEnrollmentResponse])
 async def get_training_enrollments(
     skip: int = Query(0, ge=0),
-    limit: int = Query(200, ge=1, le=1000),
+    limit: int = Query(500, ge=1, le=1000),
     personnel_id: Optional[int] = None,
     course_id: Optional[int] = None,
     status: Optional[str] = None,
     personnel_type: Optional[str] = None,
     category: Optional[str] = None,
+    department_id: Optional[int] = None,
     search: Optional[str] = None,
     expiring_within_days: Optional[int] = None,
     db: Session = Depends(get_db),
@@ -445,7 +454,10 @@ async def get_training_enrollments(
             TrainingEnrollment.expiry_date >= date.today(),
         )
     enrollments = q.order_by(TrainingEnrollment.enrollment_date.desc()).offset(skip).limit(limit).all()
-    return [_enrich_enrollment(e) for e in enrollments]
+    enriched = [_enrich_enrollment(e) for e in enrollments]
+    if department_id:
+        enriched = [e for e in enriched if e.department_id == department_id]
+    return enriched
 
 
 @router.get("/training/enrollments/{enrollment_id}", response_model=TrainingEnrollmentResponse)

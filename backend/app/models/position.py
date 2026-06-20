@@ -42,6 +42,9 @@ class Position(Base):
     salary_range_max = Column(Float, nullable=True)
     currency = Column(String(3), default="USD")
     
+    # Staffing target
+    headcount = Column(Integer, default=1, nullable=True)  # Target number of personnel for this position
+
     # Status
     is_active = Column(Boolean, default=True, index=True)
     is_safety_critical = Column(Boolean, default=False, index=True)

@@ -337,6 +337,8 @@ class MusteringEvent(Base):
     total_safe = Column(Integer, default=0)
     total_missing = Column(Integer, default=0)
     total_injured = Column(Integer, default=0)
+    # 0 = no auto-end; >0 = auto-end after this many minutes (safety net for forgotten drills)
+    max_duration_minutes = Column(Integer, default=0, nullable=False, server_default="0")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

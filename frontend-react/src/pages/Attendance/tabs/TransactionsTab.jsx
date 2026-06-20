@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useMemo } from 'react';
 import {
   Table, Button, Space, Tag, App, Popconfirm,
   Select, DatePicker, Row, Col, Divider, Descriptions,
@@ -68,7 +68,7 @@ const TransactionsTab = () => {
   const [page,       setPage]       = useState(1);
   const [selected,   setSelected]   = useState([]);
   const [detailOpen, setDetailOpen] = useState(false);
-  const [detailRec,  setDetailRec]  = useState(null);
+  const [detailId,   setDetailId]   = useState(null);
 
   const startDate = dateRange?.[0]?.format('YYYY-MM-DD') ?? dayjs().startOf('week').format('YYYY-MM-DD');
   const endDate   = dateRange?.[1]?.format('YYYY-MM-DD') ?? dayjs().endOf('week').format('YYYY-MM-DD');
@@ -107,9 +107,10 @@ const TransactionsTab = () => {
     refetchInterval: 15000,
     staleTime:       10000,
   });
-  const rows  = data?.data  || [];
-  const total = data?.total ?? rows.length;
-  const stats = data?.stats ?? {};
+  const rows     = data?.data  || [];
+  const total    = data?.total ?? rows.length;
+  const stats    = data?.stats ?? {};
+  const detailRec = useMemo(() => rows.find(r => r.id === detailId) ?? null, [rows, detailId]);
 
   const { data: deptData } = useQuery({
     queryKey: ['departments'],
@@ -168,7 +169,7 @@ const TransactionsTab = () => {
           name={r.emp_name}
           code={r.emp_code}
           dept={r.dept_name}
-          onClick={() => { setDetailRec(r); setDetailOpen(true); }}
+          onClick={() => { setDetailId(r.id); setDetailOpen(true); }}
         />
       ),
     },
@@ -247,12 +248,12 @@ const TransactionsTab = () => {
         <Space size={4}>
           <Tooltip title="View details">
             <Button size="small" icon={<EyeOutlined />}
-              onClick={() => { setDetailRec(r); setDetailOpen(true); }} />
+              onClick={() => { setDetailId(r.id); setDetailOpen(true); }} />
           </Tooltip>
           <Tooltip title="Reprocess">
             <Button size="small" icon={<SyncOutlined />}
               onClick={() => reprocessM.mutate(r)}
-              loading={reprocessM.isPending} />
+              loading={reprocessM.isPending && reprocessM.variables?.id === r.id} />
           </Tooltip>
           <Popconfirm title="Delete this transaction?" okText="Delete" okButtonProps={{ danger:true }}
             onConfirm={() => deleteOneM.mutate(r.id)}>

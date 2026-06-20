@@ -37,7 +37,7 @@ from ..models.biotime_models import (
     IClockOperLog, IClockBioTemplate,
     PersonnelEmployee, AccDoor,
     AccLevel, AccUserAuthorize,
-    AttShift, AttTimetable,
+    AttShift, AttTimetable, MusteringEvent,
 )
 from ..models.personnel import Personnel, PersonnelStatus
 from ..services.mustering_service import MusteringService
@@ -263,6 +263,8 @@ def parse_device_options(options: str) -> Dict[str, Any]:
             info['language'] = v
         elif k == 'MAC':
             info['mac_address'] = v
+        elif k == 'IP':
+            info['reported_ip'] = v   # device's own LAN IP (some firmware sends this)
         else:
             info[k] = v
     return info
@@ -271,21 +273,18 @@ def parse_device_options(options: str) -> Dict[str, Any]:
 
 def build_options_block(terminal: IClockTerminal, pushver: str) -> str:
     """
-    Return the full BioTime-compatible options block sent in response to a heartbeat.
-    The Stamp values tell the device which records it has already successfully delivered —
-    it will only re-upload records newer than these.
+    Return the options block sent in response to a heartbeat.
 
-    DateTime= is included on every response so the device clock is continuously
-    kept in sync with the server — no manual intervention required.
+    v1.x devices only understand a small subset of fields — sending v2.x-only
+    fields (PushProtVer, PushOptionsFlag, ATTPHOTOStamp, SetTime) causes some
+    firmware to treat the response as invalid and stop heartbeating.
     """
     stamp      = terminal.att_stamp  or 0
     op_stamp   = terminal.op_stamp   or 0
     user_stamp = terminal.user_stamp or 0
     delay      = terminal.heartbeat_interval or 10
-
-    # Server local time — the device will set its display clock to match.
-    # Ensure the server OS timezone matches the site's physical timezone.
     server_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    is_v2 = pushver.startswith("2")
 
     lines = [
         "GET OPTION FROM THE SERVER",
@@ -293,7 +292,10 @@ def build_options_block(terminal: IClockTerminal, pushver: str) -> str:
         f"OpStamp={op_stamp}",
         f"ATTLOGStamp={stamp}",
         f"OPERLOGStamp={op_stamp}",
-        f"ATTPHOTOStamp=0",
+    ]
+    if is_v2:
+        lines.append("ATTPHOTOStamp=0")
+    lines += [
         f"UserStamp={user_stamp}",
         "ErrorDelay=30",
         f"Delay={delay}",
@@ -301,11 +303,12 @@ def build_options_block(terminal: IClockTerminal, pushver: str) -> str:
         "TransInterval=1",
         "TimeZone=0",
         f"DateTime={server_time}",
-        "SetTime=1",          # Force device to apply DateTime= on every heartbeat
-        f"ServerVer={pushver}",
-        "PushProtVer=2.3.1",
-        "PushOptionsFlag=1",
     ]
+    if is_v2:
+        lines.append("SetTime=1")
+    lines.append(f"ServerVer={pushver}")
+    if is_v2:
+        lines += ["PushProtVer=2.3.1", "PushOptionsFlag=1"]
     return "\n".join(lines)
 
 # ── Record handlers ──────────────────────────────────────────────────────────
@@ -396,17 +399,13 @@ def handle_attlog(records: List[Dict], sn: str, db: Session) -> Tuple[int, int, 
                 db.rollback()
 
             # Write to acc_event so every door swipe appears in the access control log.
-            # Prefer the door whose name matches the direction; fall back to nearest id.
+            # Use _ensure_access_control_records so door_id is always valid.
             try:
                 in_out_val = 0 if direction == 'ENTRY' else 1
-                door_row = db.execute(text("""
-                    SELECT id, name FROM acc_door WHERE terminal_sn = :sn
-                    ORDER BY (CASE
-                        WHEN :is_entry AND (lower(name) LIKE '%entrance%' OR lower(name) LIKE '%entry%') THEN 0
-                        WHEN NOT :is_entry AND lower(name) LIKE '%exit%' THEN 0
-                        ELSE 1 END), id
-                    LIMIT 1
-                """), {'sn': sn, 'is_entry': (direction == 'ENTRY')}).fetchone()
+                door_id = _ensure_access_control_records(
+                    sn, getattr(terminal, 'alias', None) or sn,
+                    terminal.zone_id, direction, db
+                )
 
                 emp_row = db.execute(text(
                     "SELECT first_name || ' ' || last_name AS full_name "
@@ -422,7 +421,7 @@ def handle_attlog(records: List[Dict], sn: str, db: Session) -> Tuple[int, int, 
                 """), {
                     'et':   punch_time,
                     'sn':   sn,
-                    'did':  door_row.id if door_row else None,
+                    'did':  door_id,
                     'ec':   emp_code,
                     'en':   emp_row.full_name if emp_row else '',
                     'io':   in_out_val,
@@ -437,6 +436,10 @@ def handle_attlog(records: List[Dict], sn: str, db: Session) -> Tuple[int, int, 
         raw_state = rec.get('Status') or rec.get('InOutStatus') or rec.get('INOUTSTATUS') or '0'
         try:
             punch_state = int(raw_state)
+            # Valid range: 0=check-in 1=check-out 2=break-out 3=break-in 4=ot-in 5=ot-out
+            if not (0 <= punch_state <= 5):
+                logger.warning("ADMS %s: punch_state=%s out of range for %s — reset to 0", sn, punch_state, emp_code)
+                punch_state = 0
         except (ValueError, TypeError):
             punch_state = 0
 
@@ -756,15 +759,19 @@ def upsert_terminal(
 
         # Always update heartbeat fields regardless of approval state
         terminal.last_activity = datetime.now(timezone.utc)
-        # Only skip the IP update if the incoming address is a known Docker-internal
-        # gateway (never a real device IP) and the terminal already has a real IP stored.
-        # Preserving the old IP is correct here because the gateway IP is an artefact of
-        # Docker Desktop's NAT, not the device's actual address.
+        # Resolve the best available IP:
+        #   1. Use the TCP source IP if it is not a Docker gateway
+        #   2. Fall back to the device-reported IP from its options string (LAN IP)
+        #   3. Keep the existing stored IP if neither is available
         _is_docker_gateway = client_ip in _DOCKER_GATEWAY_IPS
-        if not _is_docker_gateway or not terminal.ip_address:
-            if terminal.ip_address != client_ip:
-                logger.info(f"ADMS {sn}: IP updated {terminal.ip_address!r} → {client_ip!r}")
-            terminal.ip_address = client_ip
+        best_ip = (
+            client_ip if not _is_docker_gateway
+            else device_info.get('reported_ip') or (terminal.ip_address if terminal.ip_address not in _DOCKER_GATEWAY_IPS else None)
+            or client_ip
+        )
+        if best_ip and terminal.ip_address != best_ip:
+            logger.info(f"ADMS {sn}: IP updated {terminal.ip_address!r} → {best_ip!r}")
+            terminal.ip_address = best_ip
         terminal.pushver       = pushver
         if terminal.state == STATE_OFFLINE:
             terminal.state = STATE_APPROVED  # reconnected
@@ -780,6 +787,42 @@ def upsert_terminal(
             if device_info.get(src_key):
                 setattr(terminal, attr, device_info[src_key])
         db.commit()
+
+        # Keep devices table in sync so the UI always shows current stats.
+        # This runs on every heartbeat (not just state transitions) so user_count,
+        # fp_count, firmware, IP, and MAC stay fresh without waiting for state change.
+        try:
+            db.execute(text("""
+                UPDATE devices SET
+                    user_count       = COALESCE(NULLIF(:uc, 0), user_count),
+                    fp_count         = COALESCE(NULLIF(:fp, 0), fp_count),
+                    face_count       = COALESCE(NULLIF(:fc, 0), face_count),
+                    mac_address      = COALESCE(NULLIF(:mac, ''), mac_address),
+                    firmware_version = COALESCE(NULLIF(:fw, ''), firmware_version),
+                    ip_address       = CASE
+                        WHEN :ip IS NOT NULL AND :ip NOT IN (
+                            '192.168.65.1','172.17.0.1','172.18.0.1','172.19.0.1','172.20.0.1'
+                        ) THEN :ip
+                        ELSE ip_address
+                    END
+                WHERE serial_number = :sn
+            """), {
+                'sn':  sn,
+                'uc':  terminal.user_count  or 0,
+                'fp':  terminal.fp_count    or 0,
+                'fc':  terminal.face_count  or 0,
+                'mac': terminal.mac_address or '',
+                'fw':  terminal.fw_ver      or '',
+                'ip':  terminal.ip_address,
+            })
+            db.commit()
+        except Exception as _sync_err:
+            # Must rollback — on Postgres a failed statement aborts the transaction;
+            # without this every later query on `db` in this request fails with
+            # "current transaction is aborted" until something rolls it back.
+            db.rollback()
+            logger.warning("devices stat sync failed for %s: %s", sn, _sync_err)
+
         return terminal
 
     # New device
@@ -787,10 +830,16 @@ def upsert_terminal(
         logger.info(f"New device {sn} rejected — auto-registration disabled")
         return None
 
+    # For new devices, prefer the device-reported IP over a Docker gateway address
+    _is_docker_gw = client_ip in _DOCKER_GATEWAY_IPS
+    stored_ip = (
+        client_ip if not _is_docker_gw
+        else device_info.get('reported_ip') or client_ip
+    )
     new_terminal = IClockTerminal(
         sn            = sn,
         alias         = device_info.get('device_name') or f"Terminal-{sn}",
-        ip_address    = client_ip,
+        ip_address    = stored_ip,
         state         = STATE_PENDING,   # requires admin approval
         pushver       = pushver,
         last_activity = datetime.now(timezone.utc),
@@ -812,6 +861,29 @@ def upsert_terminal(
     db.commit()
     db.refresh(new_terminal)
     logger.info(f"Auto-registered new terminal {sn} from {client_ip} — PENDING approval")
+
+    # Also create a matching row in `devices` so the device appears in the UI immediately.
+    # Use a try/except so a failure here never blocks the ADMS protocol response.
+    try:
+        from ..models.device import Device, DeviceStatus
+        existing_dev = db.query(Device).filter(Device.serial_number == sn).first()
+        if not existing_dev:
+            db.add(Device(
+                name             = device_info.get('device_name') or f"Terminal-{sn}",
+                serial_number    = sn,
+                ip_address       = stored_ip if stored_ip not in _DOCKER_GATEWAY_IPS else None,
+                port             = 4370,
+                connection_mode  = "adms",
+                status           = DeviceStatus.OFFLINE,  # heartbeat will set ONLINE
+                auto_poll        = False,
+                poll_interval_sec= 300,
+            ))
+            db.commit()
+            logger.info(f"Auto-created devices row for new ADMS terminal {sn}")
+    except Exception as dev_exc:
+        logger.warning(f"Could not create devices row for {sn}: {dev_exc}")
+        db.rollback()
+
     return new_terminal
 
 
@@ -874,7 +946,70 @@ async def _direct_sync_time(ip: str, port: int) -> Dict[str, Any]:
     from ..services.zkteco.direct_connection import zkteco_direct
     return await zkteco_direct.sync_time(ip=ip, port=port or 4370)
 
-# ── Zone tracking (unchanged logic, extracted) ───────────────────────────────
+# ── Zone tracking helpers ────────────────────────────────────────────────────
+
+def _ensure_access_control_records(
+    sn: str, terminal_alias: str, zones_zone_id: int, direction: str, db: Session
+) -> Optional[int]:
+    """
+    Lazily create acc_door / acc_zone / acc_zone_door rows the first time a
+    zone-access reader punches, so the acc_event table gets a proper door_id
+    and the ACZones UI can count occupancy.
+
+    Returns the acc_door.id for use in the acc_event INSERT, or None on error.
+    direction: 'ENTRY' → acc_zone_door.direction=0  |  'EXIT' → direction=1
+    """
+    try:
+        # 1. acc_door — one row per terminal
+        door_row = db.execute(text(
+            "SELECT id FROM acc_door WHERE terminal_sn = :sn LIMIT 1"
+        ), {"sn": sn}).fetchone()
+
+        if not door_row:
+            door_name = f"{terminal_alias or sn} ({'Entry' if direction == 'ENTRY' else 'Exit'})"[:50]
+            door_row = db.execute(text("""
+                INSERT INTO acc_door (name, terminal_sn)
+                VALUES (:name, :sn)
+                RETURNING id
+            """), {"name": door_name, "sn": sn}).fetchone()
+
+        door_id = door_row.id
+
+        # 2. acc_zone — mirror the zones table entry
+        zone_info = db.execute(text(
+            "SELECT name FROM zones WHERE id = :zid"
+        ), {"zid": zones_zone_id}).fetchone()
+        zone_name = (zone_info.name if zone_info else f"Zone-{zones_zone_id}")[:100]
+
+        az_row = db.execute(text(
+            "SELECT id FROM acc_zone WHERE zone_name = :n LIMIT 1"
+        ), {"n": zone_name}).fetchone()
+
+        if not az_row:
+            az_row = db.execute(text("""
+                INSERT INTO acc_zone (zone_name)
+                VALUES (:n)
+                ON CONFLICT (zone_name) DO UPDATE SET zone_name = EXCLUDED.zone_name
+                RETURNING id
+            """), {"n": zone_name}).fetchone()
+
+        acc_zone_id = az_row.id
+
+        # 3. acc_zone_door — link door to zone with the right direction
+        dir_int = 0 if direction == 'ENTRY' else 1
+        db.execute(text("""
+            INSERT INTO acc_zone_door (zone_id, door_id, direction)
+            VALUES (:zid, :did, :dir)
+            ON CONFLICT (zone_id, door_id) DO UPDATE SET direction = :dir
+        """), {"zid": acc_zone_id, "did": door_id, "dir": dir_int})
+
+        return door_id
+
+    except Exception as exc:
+        logger.error("_ensure_access_control_records %s: %s", sn, exc)
+        db.rollback()
+        return None
+
 
 def _handle_zone_access(
     emp_code: str, device_sn: str, punch_time: datetime,
@@ -898,7 +1033,35 @@ def _handle_zone_access(
     zone_id = terminal.zone_id if terminal else None
     if not zone_id:
         logger.warning(f"Access control reader {device_sn} has no zone_id — punch ignored")
+        # If a muster is active, a punch at an unconfigured reader is a safety gap:
+        # the person is physically present but will appear MISSING in the muster.
+        active_muster = db.query(MusteringEvent).filter(MusteringEvent.status == 0).first()
+        if active_muster:
+            dedup_key = f"muster_punch_no_zone_{device_sn}_{emp_code}_{active_muster.id}"
+            db.execute(text("""
+                INSERT INTO sys_notifications
+                    (dedup_key, notification_type, title, message, priority, expires_at)
+                VALUES (:dk, :nt, :title, :msg, :pri, NOW() + INTERVAL '4 hours')
+                ON CONFLICT (dedup_key) DO NOTHING
+            """), {
+                "dk": dedup_key,
+                "nt": "muster_punch_dropped",
+                "title": "Punch Dropped — Reader Not Assigned to Zone",
+                "msg": (
+                    f"Employee {emp_code} punched at reader {device_sn} during active "
+                    f"muster event #{active_muster.id}, but this reader has no zone_id "
+                    f"configured. The punch was NOT recorded in the muster — "
+                    f"this person may appear as MISSING."
+                ),
+                "pri": "critical",
+            })
+            db.commit()
         return {}
+
+    # Ensure acc_door/acc_zone/acc_zone_door exist so the ACZones UI can count occupancy
+    _ensure_access_control_records(
+        device_sn, getattr(terminal, 'alias', None) or device_sn, zone_id, direction, db
+    )
 
     # Look up the person
     person_row = db.execute(text("""
@@ -1077,6 +1240,15 @@ async def _handle_cdata(request: Request, db: Session) -> PlainTextResponse:
     if terminal.state == STATE_REJECTED:
         return PlainTextResponse(f"{ADMS_ERROR}Device rejected")
 
+    # Validate comm_key if configured on this terminal.
+    # ZKTeco devices send their comm password as the Key= query parameter.
+    stored_key = getattr(terminal, "comm_key", None)
+    if stored_key and stored_key not in ("0", "", None):
+        device_key = request.query_params.get("Key", "0")
+        if device_key != stored_key:
+            logger.warning("ADMS %s: comm_key mismatch from %s", sn, client_ip)
+            return PlainTextResponse(f"{ADMS_ERROR}Authentication failed")
+
     # Parse and route the POST body
     body_bytes = await request.body()
     body_str   = body_bytes.decode('utf-8', errors='replace') if body_bytes else ""
@@ -1105,8 +1277,12 @@ async def _handle_cdata(request: Request, db: Session) -> PlainTextResponse:
                             "SELECT id, name FROM zones WHERE id = ANY(:ids)"
                         ), {"ids": list(zone_updates.keys())}).fetchall()
                         zone_names = {r.id: r.name for r in rows}
-                    except Exception:
-                        pass
+                    except Exception as _zn_exc:
+                        # Must rollback — a failed statement aborts the Postgres
+                        # transaction; without this the OPERLOG commit below (and
+                        # anything else on this session) would fail too.
+                        db.rollback()
+                        logger.warning("Zone name lookup failed for %s: %s", sn, _zn_exc)
                     for zid, cnt in zone_updates.items():
                         asyncio.create_task(
                             broadcast_zone_update(zid, cnt, zone_names.get(zid, ""))
@@ -1182,7 +1358,42 @@ def _recover_stale_commands(sn: str, db: Session) -> None:
           AND status = 1
           AND cmd_trans_time < NOW() - INTERVAL '3 minutes'
     """), {'sn': sn})
+    # Also cancel commands that ADMS devices never process (ZKLib-only semantics)
+    db.execute(text("""
+        UPDATE iclock_devcmd
+        SET status = 2,
+            cmd_return = 'Auto-completed (not an ADMS command)',
+            cmd_return_time = NOW()
+        WHERE sn = :sn
+          AND status IN (0, 1)
+          AND UPPER(TRIM(cmd_content)) IN (
+              'PULL ATTENDANCE', 'GET LOG', 'GETALLLOG', 'PULL LOG',
+              'GET USERINFO', 'GETUSERINFO', 'GET USERS',
+              'CLEAR LOG', 'CLEARATTLOG', 'CLEAR ATTENDANCE'
+          )
+          AND EXISTS (
+              SELECT 1 FROM devices
+              WHERE serial_number = :sn AND connection_mode = 'adms'
+          )
+    """), {'sn': sn})
     db.commit()
+
+
+def _check_comm_key(request: Request, sn: str, db: Session) -> bool:
+    """Return False (reject) if terminal has a comm_key and the request Key= doesn't match."""
+    try:
+        row = db.execute(text(
+            "SELECT comm_key FROM iclock_terminal WHERE sn = :sn"
+        ), {"sn": sn}).fetchone()
+        if row and row[0] and row[0] not in ("0", ""):
+            return request.query_params.get("Key", "0") == row[0]
+    except Exception as _ck_exc:
+        # Rollback so this doesn't poison the session for the rest of the
+        # request — this check runs before upsert_terminal/handle_attlog,
+        # which would otherwise all silently fail with "transaction aborted".
+        db.rollback()
+        logger.warning("comm_key check failed for %s: %s", sn, _ck_exc)
+    return True  # no key configured — allow
 
 
 @router.get("/iclock/getrequest", response_class=PlainTextResponse)
@@ -1190,6 +1401,10 @@ async def adms_getrequest(request: Request, db: Session = Depends(get_db)):
     sn = request.query_params.get('SN', '')
     if not _valid_sn(sn):
         return PlainTextResponse(f"{ADMS_ERROR}Invalid SN")
+
+    if not _check_comm_key(request, sn, db):
+        logger.warning("ADMS getrequest %s: comm_key mismatch", sn)
+        return PlainTextResponse(f"{ADMS_ERROR}Authentication failed")
 
     # Update last_activity
     db.execute(text(
@@ -1424,6 +1639,8 @@ async def _sync_users_to_terminal(terminal: IClockTerminal, db) -> str:
 async def get_operlog(
     sn: Optional[str] = None,
     event_type: Optional[int] = None,
+    from_dt: Optional[str] = None,
+    to_dt: Optional[str] = None,
     limit: int = 200,
     offset: int = 0,
     db: Session = Depends(get_db),
@@ -1434,6 +1651,16 @@ async def get_operlog(
         q = q.filter(IClockOperLog.terminal_sn == sn)
     if event_type is not None:
         q = q.filter(IClockOperLog.oper_event == event_type)
+    if from_dt:
+        try:
+            q = q.filter(IClockOperLog.event_time >= datetime.fromisoformat(from_dt))
+        except ValueError:
+            pass
+    if to_dt:
+        try:
+            q = q.filter(IClockOperLog.event_time <= datetime.fromisoformat(to_dt))
+        except ValueError:
+            pass
     total = q.count()
     rows  = q.order_by(IClockOperLog.event_time.desc()).offset(offset).limit(limit).all()
     return {

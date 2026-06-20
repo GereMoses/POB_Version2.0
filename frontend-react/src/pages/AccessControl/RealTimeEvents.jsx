@@ -71,7 +71,8 @@ const RealTimeEvents = () => {
   const connectWebSocket = () => {
     try {
       const token = localStorage.getItem('token') || sessionStorage.getItem('token') || '';
-      const wsUrl = `ws://${window.location.hostname}:8000/ws/access-control/events/?token=${token}`;
+      const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${proto}//${window.location.host}/ws/access-control/events/?token=${token}`;
       
       wsRef.current = new WebSocket(wsUrl);
       

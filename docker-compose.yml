@@ -19,8 +19,9 @@ services:
       POSTGRES_CHECKPOINT_COMPLETION_TARGET: "0.9"
       POSTGRES_WAL_BUFFERS: "16MB"
       POSTGRES_DEFAULT_STATISTICS_TARGET: "100"
+    # Expose to localhost only so the backend (host-network mode) can connect via 127.0.0.1
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       # PostgreSQL configuration for ZKTeco ADMS
@@ -48,25 +49,54 @@ services:
   redis:
     image: redis:7-alpine
     container_name: pob_redis
+    # Expose to localhost only so the backend (host-network mode) can connect via 127.0.0.1
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis_data:/data
+    # Require password auth when REDIS_PASSWORD is set; fall back to no-auth for local dev
+    command: >
+      sh -c "if [ -n \"$$REDIS_PASSWORD\" ]; then
+               redis-server --requirepass \"$$REDIS_PASSWORD\" --appendonly yes;
+             else
+               redis-server --appendonly yes;
+             fi"
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: >
+        sh -c "if [ -n \"$$REDIS_PASSWORD\" ]; then
+                 redis-cli -a \"$$REDIS_PASSWORD\" ping;
+               else
+                 redis-cli ping;
+               fi"
       interval: 10s
       timeout: 5s
       retries: 5
     restart: unless-stopped
 
   # Backend API
+  #
+  # network_mode: host — the backend runs on the host's network stack so it can
+  # see every real LAN interface.  This is what makes ZKTeco auto-discovery work
+  # regardless of which network the server is plugged into; moving to a new site
+  # is automatically detected without any config change.
+  #
+  # NOTE: host networking is supported on Linux only.  On macOS / Windows Docker
+  # Desktop the daemon silently falls back to bridge networking; set the
+  # DEVICE_SCAN_SUBNETS env var (e.g. 192.168.1.0/24) for dev on those platforms.
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
     container_name: pob_backend
+    # NOTE for production (Linux): switch to network_mode: host so the backend can
+    # see every real LAN interface for ZKTeco auto-discovery, and change the DB/Redis
+    # URLs below to 127.0.0.1 (postgres/redis publish to localhost in that mode).
+    # On macOS Docker Desktop, network_mode: host puts the container on the Linux VM's
+    # network stack, not the macOS host's — so bridge mode + explicit ports is used here.
     ports:
-      - "8000:8000"
+      - "0.0.0.0:8000:8000"
     volumes:
       # Mount source code for hot reload (dev only — production uses baked image)
       - ./backend:/app
@@ -78,13 +108,17 @@ services:
       - logs_dev:/app/logs
     environment:
       - DATABASE_URL=postgresql://${POSTGRES_USER:-pob_user}:${POSTGRES_PASSWORD:-pob_password}@postgres:5432/${POSTGRES_DB:-pob_system}
-      - REDIS_URL=redis://redis:6379/0
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
       - REDIS_HOST=redis
       - SECRET_KEY=${SECRET_KEY:-pob-system-production-secret-key-2024-secure-jwt-auth}
-      - BACKEND_CORS_ORIGINS=${BACKEND_CORS_ORIGINS:-http://localhost:3000,http://localhost:3001}
+      - ENVIRONMENT=${ENVIRONMENT:-production}
       - DEBUG=False
       - LOG_LEVEL=INFO
-    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--timeout-graceful-shutdown", "3"]
+      # Optional extra subnets to scan — leave empty for fully automatic detection.
+      # Set this only if you need to scan an additional range the server is not on.
+      # Example: DEVICE_SCAN_SUBNETS=10.10.5.0/24,172.16.0.0/24
+      - DEVICE_SCAN_SUBNETS=${DEVICE_SCAN_SUBNETS:-}
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4", "--timeout-graceful-shutdown", "30", "--access-log"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -115,10 +149,10 @@ services:
       - logs_dev:/app/logs
     environment:
       - DATABASE_URL=postgresql://${POSTGRES_USER:-pob_user}:${POSTGRES_PASSWORD:-pob_password}@postgres:5432/${POSTGRES_DB:-pob_system}
-      - REDIS_URL=redis://redis:6379/0
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
       - REDIS_HOST=redis
       - SECRET_KEY=${SECRET_KEY:-pob-system-production-secret-key-2024-secure-jwt-auth}
-      - BACKEND_CORS_ORIGINS=${BACKEND_CORS_ORIGINS:-http://localhost:3000,http://localhost:3001}
+      - ENVIRONMENT=${ENVIRONMENT:-production}
       - DEBUG=False
     depends_on:
       postgres:
@@ -140,10 +174,13 @@ services:
       dockerfile: Dockerfile
     container_name: pob_frontend
     ports:
+      - "80:80"
       - "3000:80"
     volumes:
       # Mount built files for updates
       - ./frontend-react/build:/usr/share/nginx/html:ro
+      # Mount nginx config so changes take effect without rebuilding the image
+      - ./frontend-react/nginx.conf:/etc/nginx/conf.d/default.conf:ro
     environment:
       - REACT_APP_API_BASE_URL=http://pob_backend:8000/api/v1
     depends_on:
@@ -177,6 +214,8 @@ services:
       - WDS_SOCKET_PORT=3001
       - WDS_SOCKET_HOST=localhost
       - DANGEROUSLY_DISABLE_HOST_CHECK=true
+      - NODE_OPTIONS=--max-old-space-size=4096
+      - GENERATE_SOURCEMAP=false
     depends_on:
       - backend
     healthcheck:
@@ -197,6 +236,8 @@ volumes:
   postgres_data:
     driver: local
   redis_data:
+    driver: local
+  ollama_data:
     driver: local
   uploads_dev:
     driver: local

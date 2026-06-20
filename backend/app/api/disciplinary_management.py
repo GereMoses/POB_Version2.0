@@ -88,6 +88,9 @@ def _enrich(case: DisciplinaryCase, db: Session) -> DisciplinaryCase:
     case.personnel_company  = getattr(p, "company", None)
     case.reporter_name      = _user_name(reporter)
     case.assignee_name      = _user_name(assignee)
+    dept = getattr(p, "department", None) if p else None
+    case.department_id   = getattr(p, "department_id", None) if p else None
+    case.department_name = getattr(dept, "name", None) if dept else None
 
     # Count open/active cases for this person (excluding current if closed)
     case.open_cases_count = db.query(DisciplinaryCase).filter(
@@ -152,8 +155,9 @@ async def list_cases(
     severity_level: Optional[str] = None,
     incident_type:  Optional[str] = None,
     action_type:    Optional[str] = None,
+    department_id:  Optional[int] = None,
     skip: int = Query(0, ge=0),
-    limit: int = Query(200, ge=1, le=1000),
+    limit: int = Query(500, ge=1, le=1000),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -169,7 +173,10 @@ async def list_cases(
     if action_type:
         q = q.filter(DisciplinaryCase.action_type == action_type)
     cases = q.order_by(DisciplinaryCase.incident_date.desc()).offset(skip).limit(limit).all()
-    return [_enrich(c, db) for c in cases]
+    enriched = [_enrich(c, db) for c in cases]
+    if department_id:
+        enriched = [c for c in enriched if c.department_id == department_id]
+    return enriched
 
 
 @router.get("/disciplinary/cases/{case_id}", response_model=DisciplinaryCaseResponse)
@@ -256,12 +263,16 @@ async def disciplinary_summary(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    from datetime import timedelta
     cases = db.query(DisciplinaryCase).all()
 
-    by_severity = {}
-    by_type     = {}
-    by_action   = {}
+    by_severity   = {}
+    by_type       = {}
+    by_action     = {}
+    by_status     = {}
+    by_dept: dict = {}
     person_counts: dict = {}
+    month_counts: dict  = {}
 
     for c in cases:
         if c.severity_level:
@@ -270,24 +281,67 @@ async def disciplinary_summary(
             by_type[c.incident_type] = by_type.get(c.incident_type, 0) + 1
         if c.action_type:
             by_action[c.action_type] = by_action.get(c.action_type, 0) + 1
+        by_status[c.status] = by_status.get(c.status, 0) + 1
         if c.status in ("open", "under_investigation", "appealed"):
             person_counts[c.personnel_id] = person_counts.get(c.personnel_id, 0) + 1
+        if c.incident_date:
+            mk = c.incident_date.strftime("%Y-%m")
+            month_counts[mk] = month_counts.get(mk, 0) + 1
+        # department breakdown via Personnel join
+        p = db.query(Personnel).filter(Personnel.id == c.personnel_id).first()
+        dept = getattr(p, "department", None) if p else None
+        dept_name = getattr(dept, "name", "No Department") if dept else "No Department"
+        if dept_name not in by_dept:
+            by_dept[dept_name] = {"total": 0, "critical": 0, "hse": 0, "active": 0}
+        by_dept[dept_name]["total"] += 1
+        if c.severity_level == "critical":
+            by_dept[dept_name]["critical"] += 1
+        hse_types = {"safety_violation", "hse_breach", "substance_abuse", "negligence"}
+        if c.incident_type in hse_types:
+            by_dept[dept_name]["hse"] += 1
+        if c.status in ("open", "under_investigation", "appealed"):
+            by_dept[dept_name]["active"] += 1
+
+    # Last 12 months trend
+    today = date.today()
+    monthly_trend = []
+    for i in range(11, -1, -1):
+        d = today.replace(day=1) - timedelta(days=1)
+        # step back i months from current
+        yr  = today.year  - (i // 12)
+        mo  = today.month - (i % 12)
+        if mo <= 0:
+            mo += 12
+            yr -= 1
+        mk  = f"{yr:04d}-{mo:02d}"
+        monthly_trend.append({"month": mk, "count": month_counts.get(mk, 0)})
 
     repeat_offenders = []
     for pid, cnt in person_counts.items():
         if cnt >= 2:
             p = db.query(Personnel).filter(Personnel.id == pid).first()
             name = f"{getattr(p,'first_name','')} {getattr(p,'last_name','')}".strip() if p else str(pid)
-            repeat_offenders.append({"personnel_id": pid, "name": name, "active_cases": cnt})
+            emp_code = getattr(p, "emp_code", None) if p else None
+            repeat_offenders.append({"personnel_id": pid, "name": name, "emp_code": emp_code, "active_cases": cnt})
     repeat_offenders.sort(key=lambda x: -x["active_cases"])
+
+    dept_summary = [
+        {"department": k, **v}
+        for k, v in sorted(by_dept.items(), key=lambda x: -x[1]["total"])
+    ]
 
     return {
         "total":               len(cases),
         "open":                sum(1 for c in cases if c.status == "open"),
         "under_investigation": sum(1 for c in cases if c.status == "under_investigation"),
         "resolved":            sum(1 for c in cases if c.status == "resolved"),
+        "appealed":            sum(1 for c in cases if c.status == "appealed"),
+        "closed":              sum(1 for c in cases if c.status == "closed"),
+        "by_status":           by_status,
         "by_severity":         by_severity,
         "by_type":             by_type,
         "by_action":           by_action,
+        "by_dept":             dept_summary,
+        "monthly_trend":       monthly_trend,
         "repeat_offenders":    repeat_offenders[:10],
     }

@@ -1,56 +1,95 @@
 import React, { useState } from 'react';
 import {
-  Card, Form, Input, Select, Button, message, Alert, Descriptions, Tag, Divider, Row, Col, Tabs,
+  Card, Form, Input, Select, Button, message, Alert, Descriptions, Tag, Divider,
+  Row, Col, Tabs, Space, Typography,
 } from 'antd';
-import { LoginOutlined, SearchOutlined, QrcodeOutlined, UserAddOutlined } from '@ant-design/icons';
+import {
+  LoginOutlined, QrcodeOutlined, UserAddOutlined, SearchOutlined,
+  CheckCircleOutlined, CloseCircleOutlined,
+} from '@ant-design/icons';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import dayjs from 'dayjs';
 import visitorAPI from '../../../services/visitorAPI';
 import usePersonnel from '../../../hooks/usePersonnel';
 
+const { Text } = Typography;
+
+const ID_TYPE_LABELS = { 0: 'National ID', 1: 'Passport', 2: "Driver's Licence" };
+
 const CheckIn = () => {
-  const [preReg, setPreReg]     = useState(null);
-  const [walkInForm]            = Form.useForm();
-  const [preRegForm]            = Form.useForm();
-  const qc                      = useQueryClient();
+  const [preReg, setPreReg]               = useState(null);
+  const [returnVisitor, setReturnVisitor] = useState(null); // existing visitor found by lookup
+  const [walkInMode, setWalkInMode]       = useState('new'); // 'new' | 'returning'
+  const [walkInForm]                      = Form.useForm();
+  const [preRegForm]                      = Form.useForm();
+  const [lookupForm]                      = Form.useForm();
+  const qc                                = useQueryClient();
 
   const { empOptions } = usePersonnel();
 
   const { data: typesData } = useQuery({
     queryKey: ['visitor-types'],
-    queryFn:  () => visitorAPI.getVisitorTypes(),
+    queryFn: () => visitorAPI.getVisitorTypes(),
     staleTime: 60000,
   });
   const typeOptions = (typesData?.data ?? []).map(t => ({ value: t.id, label: t.type_name }));
 
   const checkInMut = useMutation({
-    mutationFn: d => visitorAPI.checkInVisitor(d),
+    mutationFn: (d) => visitorAPI.checkInVisitor(d),
     onSuccess: () => {
       message.success('Visitor checked in successfully');
       preRegForm.resetFields();
       walkInForm.resetFields();
+      lookupForm.resetFields();
       setPreReg(null);
+      setReturnVisitor(null);
+      setWalkInMode('new');
       qc.invalidateQueries(['visitor-stats']);
       qc.invalidateQueries(['visitor-records']);
+      qc.invalidateQueries(['visitor-on-site']);
     },
-    onError: e => message.error(e.response?.data?.detail || e.message),
+    onError: (e) => message.error(e.response?.data?.detail || e.message),
   });
 
-  const lookupMut = useMutation({
-    mutationFn: qr => visitorAPI.getQRData(qr),
-    onSuccess: d => {
+  const qrLookupMut = useMutation({
+    mutationFn: (qr) => visitorAPI.getQRData(qr),
+    onSuccess: (d) => {
       if (d?.data) setPreReg(d.data);
       else message.warning('QR code not found');
     },
     onError: () => message.error('Invalid QR code'),
   });
 
-  const handlePreRegCheckIn = v => {
+  const visitorLookupMut = useMutation({
+    mutationFn: (params) => visitorAPI.lookupVisitor(params),
+    onSuccess: (d) => {
+      const visitors = d?.data ?? [];
+      if (visitors.length === 0) {
+        message.warning('No existing visitor found. Fill in the form below as a new visitor.');
+        setReturnVisitor(null);
+        setWalkInMode('new');
+      } else if (visitors.length === 1) {
+        setReturnVisitor(visitors[0]);
+        setWalkInMode('returning');
+        message.success(`Found: ${visitors[0].full_name}`);
+      } else {
+        // Multiple matches – take the first (best match)
+        setReturnVisitor(visitors[0]);
+        setWalkInMode('returning');
+        message.info(`${visitors.length} matches found; using first match. Verify below.`);
+      }
+    },
+    onError: () => message.error('Lookup failed'),
+  });
+
+  // Pre-registered check-in
+  const handlePreRegCheckIn = () => {
     if (!preReg) { message.warning('Scan QR code first'); return; }
-    checkInMut.mutate({ pre_reg_id: undefined, qr_code: v.qr_code });
+    checkInMut.mutate({ qr_code: preReg.qr_code });
   };
 
-  const handleWalkInCheckIn = v => {
+  // Walk-in with new visitor
+  const handleNewWalkIn = (v) => {
     checkInMut.mutate({
       visitor_data: {
         full_name:       v.full_name,
@@ -62,18 +101,29 @@ const CheckIn = () => {
         visitor_type_id: v.visitor_type_id ?? null,
       },
       host_emp_id: v.host_emp_id,
+      area_id:     v.area_id ?? null,
     });
   };
 
+  // Walk-in with existing/returning visitor
+  const handleReturningCheckIn = (v) => {
+    checkInMut.mutate({
+      visitor_id:  returnVisitor.id,
+      host_emp_id: v.host_emp_id,
+      area_id:     v.area_id ?? null,
+    });
+  };
+
+  // ── PRE-REGISTERED TAB ───────────────────────────────────────────────────────
   const preRegTabContent = (
     <div style={{ maxWidth: 500 }}>
-      <Form form={preRegForm} layout="vertical" onFinish={handlePreRegCheckIn}>
+      <Form form={preRegForm} layout="vertical">
         <Form.Item name="qr_code" label="QR Code / Pre-Registration Code" rules={[{ required: true }]}>
           <Input.Search
             placeholder="Scan or type QR code…"
             enterButton={<><QrcodeOutlined /> Lookup</>}
-            onSearch={v => lookupMut.mutate(v)}
-            loading={lookupMut.isPending}
+            onSearch={(v) => qrLookupMut.mutate(v)}
+            loading={qrLookupMut.isPending}
           />
         </Form.Item>
       </Form>
@@ -88,14 +138,18 @@ const CheckIn = () => {
             <Descriptions.Item label="Date">{preReg.visit_date ? dayjs(preReg.visit_date).format('DD MMM YYYY') : '—'}</Descriptions.Item>
             <Descriptions.Item label="Time">{preReg.visit_time_start} – {preReg.visit_time_end}</Descriptions.Item>
             <Descriptions.Item label="Purpose">{preReg.purpose || '—'}</Descriptions.Item>
-            <Descriptions.Item label="Status"><Tag color={preReg.status === 1 ? 'green' : 'gold'}>{preReg.status === 1 ? 'Approved' : 'Pending'}</Tag></Descriptions.Item>
+            <Descriptions.Item label="Status">
+              <Tag color={preReg.status === 1 ? 'green' : 'gold'}>
+                {preReg.status === 1 ? 'Approved' : 'Pending'}
+              </Tag>
+            </Descriptions.Item>
           </Descriptions>
           <Button
             type="primary"
             icon={<LoginOutlined />}
             style={{ marginTop: 16 }}
             loading={checkInMut.isPending}
-            onClick={() => checkInMut.mutate({ pre_reg_id: undefined, qr_code: preReg.qr_code })}
+            onClick={handlePreRegCheckIn}
             block
           >
             Confirm Check-In
@@ -105,27 +159,72 @@ const CheckIn = () => {
     </div>
   );
 
+  // ── WALK-IN TAB ──────────────────────────────────────────────────────────────
   const walkInTabContent = (
     <div style={{ maxWidth: 560 }}>
-      <Form form={walkInForm} layout="vertical" onFinish={handleWalkInCheckIn}
-        initialValues={{ id_type: 0 }}>
-        <Row gutter={12}>
-          <Col span={12}><Form.Item name="full_name" label="Full Name" rules={[{ required: true }]}><Input /></Form.Item></Col>
-          <Col span={12}><Form.Item name="phone" label="Phone"><Input /></Form.Item></Col>
-          <Col span={12}><Form.Item name="email" label="Email"><Input /></Form.Item></Col>
-          <Col span={12}><Form.Item name="company" label="Company"><Input /></Form.Item></Col>
-          <Col span={12}>
-            <Form.Item name="id_type" label="ID Type">
-              <Select options={[{ value: 0, label: 'National ID' }, { value: 1, label: 'Passport' }, { value: 2, label: "Driver's Licence" }]} />
-            </Form.Item>
-          </Col>
-          <Col span={12}><Form.Item name="id_no" label="ID Number"><Input /></Form.Item></Col>
-          <Col span={12}>
-            <Form.Item name="visitor_type_id" label="Visitor Type">
-              <Select options={typeOptions} allowClear />
-            </Form.Item>
-          </Col>
-          <Col span={12}>
+
+      {/* Step 1: Returning visitor lookup */}
+      <Card
+        size="small"
+        title="Step 1 — Check if visitor is already registered"
+        style={{ marginBottom: 16 }}
+        extra={
+          returnVisitor && (
+            <Button
+              size="small"
+              icon={<CloseCircleOutlined />}
+              onClick={() => { setReturnVisitor(null); setWalkInMode('new'); }}
+            >
+              Clear
+            </Button>
+          )
+        }
+      >
+        <Form form={lookupForm} layout="inline">
+          <Form.Item name="phone" style={{ marginBottom: 8 }}>
+            <Input placeholder="Phone number" prefix={<SearchOutlined />} style={{ width: 160 }} allowClear />
+          </Form.Item>
+          <Form.Item name="id_no" style={{ marginBottom: 8 }}>
+            <Input placeholder="ID / Passport No" style={{ width: 160 }} allowClear />
+          </Form.Item>
+          <Form.Item style={{ marginBottom: 8 }}>
+            <Button
+              icon={<SearchOutlined />}
+              loading={visitorLookupMut.isPending}
+              onClick={() => {
+                const vals = lookupForm.getFieldsValue();
+                if (!vals.phone && !vals.id_no) { message.warning('Enter phone or ID to search'); return; }
+                visitorLookupMut.mutate({ phone: vals.phone || undefined, id_no: vals.id_no || undefined });
+              }}
+            >
+              Find Visitor
+            </Button>
+          </Form.Item>
+        </Form>
+
+        {returnVisitor && (
+          <Alert
+            type="success"
+            icon={<CheckCircleOutlined />}
+            showIcon
+            message={
+              <Space>
+                <Text strong>{returnVisitor.full_name}</Text>
+                {returnVisitor.company && <Text type="secondary">· {returnVisitor.company}</Text>}
+                <Tag>{returnVisitor.visitor_type?.type_name || 'Visitor'}</Tag>
+                <Tag color="blue">{returnVisitor.visitor_code}</Tag>
+                <Text type="secondary">{ID_TYPE_LABELS[returnVisitor.id_type]} · {returnVisitor.id_no}</Text>
+              </Space>
+            }
+            style={{ marginTop: 8 }}
+          />
+        )}
+      </Card>
+
+      {/* Step 2: returning visitor – just assign host */}
+      {walkInMode === 'returning' && returnVisitor && (
+        <Card size="small" title="Step 2 — Assign Host &amp; Check In">
+          <Form layout="vertical" onFinish={handleReturningCheckIn}>
             <Form.Item name="host_emp_id" label="Host Employee" rules={[{ required: true }]}>
               <Select
                 options={empOptions}
@@ -134,12 +233,54 @@ const CheckIn = () => {
                 placeholder="Select host…"
               />
             </Form.Item>
-          </Col>
-        </Row>
-        <Button type="primary" icon={<LoginOutlined />} htmlType="submit" loading={checkInMut.isPending} block>
-          Check In (Walk-in)
-        </Button>
-      </Form>
+            <Button type="primary" icon={<LoginOutlined />} htmlType="submit" loading={checkInMut.isPending} block>
+              Check In {returnVisitor.full_name}
+            </Button>
+          </Form>
+        </Card>
+      )}
+
+      {/* Step 2: new visitor – full form */}
+      {walkInMode === 'new' && (
+        <Card size="small" title={returnVisitor ? 'New Visitor Form' : 'Step 2 — New Visitor Details'}>
+          <Form form={walkInForm} layout="vertical" onFinish={handleNewWalkIn} initialValues={{ id_type: 0 }}>
+            <Row gutter={12}>
+              <Col span={12}><Form.Item name="full_name" label="Full Name" rules={[{ required: true }]}><Input /></Form.Item></Col>
+              <Col span={12}><Form.Item name="phone" label="Phone"><Input /></Form.Item></Col>
+              <Col span={12}><Form.Item name="email" label="Email"><Input /></Form.Item></Col>
+              <Col span={12}><Form.Item name="company" label="Company"><Input /></Form.Item></Col>
+              <Col span={12}>
+                <Form.Item name="id_type" label="ID Type">
+                  <Select options={[
+                    { value: 0, label: 'National ID' },
+                    { value: 1, label: 'Passport' },
+                    { value: 2, label: "Driver's Licence" },
+                  ]} />
+                </Form.Item>
+              </Col>
+              <Col span={12}><Form.Item name="id_no" label="ID Number"><Input /></Form.Item></Col>
+              <Col span={12}>
+                <Form.Item name="visitor_type_id" label="Visitor Type">
+                  <Select options={typeOptions} allowClear placeholder="Select type…" />
+                </Form.Item>
+              </Col>
+              <Col span={12}>
+                <Form.Item name="host_emp_id" label="Host Employee" rules={[{ required: true }]}>
+                  <Select
+                    options={empOptions}
+                    showSearch
+                    filterOption={(i, o) => o.label?.toLowerCase().includes(i.toLowerCase())}
+                    placeholder="Select host…"
+                  />
+                </Form.Item>
+              </Col>
+            </Row>
+            <Button type="primary" icon={<LoginOutlined />} htmlType="submit" loading={checkInMut.isPending} block>
+              Check In (New Visitor)
+            </Button>
+          </Form>
+        </Card>
+      )}
     </div>
   );
 
@@ -147,8 +288,8 @@ const CheckIn = () => {
     <Card>
       <Tabs
         items={[
-          { key: 'pre-reg', label: <span><QrcodeOutlined />Pre-Registered Visitor</span>, children: preRegTabContent },
-          { key: 'walk-in', label: <span><UserAddOutlined />Walk-in Visitor</span>,      children: walkInTabContent },
+          { key: 'pre-reg', label: <span><QrcodeOutlined /> Pre-Registered Visitor</span>, children: preRegTabContent },
+          { key: 'walk-in', label: <span><UserAddOutlined /> Walk-in Visitor</span>,       children: walkInTabContent },
         ]}
       />
     </Card>

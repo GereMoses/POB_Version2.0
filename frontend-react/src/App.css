@@ -1,5 +1,398 @@
+/* ════════════════════════════════════════════════════════════════════════════
+   GLOBAL BASE
+════════════════════════════════════════════════════════════════════════════ */
 .App {
   text-align: center;
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+   MOBILE RESPONSIVENESS
+   Breakpoints: tablet ≤ 1024px, phone ≤ 640px
+════════════════════════════════════════════════════════════════════════════ */
+
+/* Prevent horizontal overflow on small screens */
+html, body, #root {
+  overflow-x: hidden;
+}
+
+/* Antd tables — always allow horizontal scroll on small screens */
+.ant-table-wrapper {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Cards inside page containers should never overflow */
+.ant-card {
+  max-width: 100%;
+}
+
+/* ── Tablet ≤ 1024px ────────────────────────────────────────────────── */
+@media (max-width: 1024px) {
+  /* Reduce page content padding */
+  .ant-layout-content > div,
+  [style*="padding: 24px"] {
+    padding: 16px !important;
+  }
+
+  /* Sidebar auto-collapses at tablet — handled by JS in Layout.jsx */
+  .pob-sidebar-scroll {
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+}
+
+/* ── Phone ≤ 640px ──────────────────────────────────────────────────── */
+@media (max-width: 640px) {
+  /* Full-width drawer on phones */
+  .ant-drawer-content-wrapper {
+    width: 100% !important;
+    max-width: 100vw !important;
+  }
+
+  /* Modal full-width on phones */
+  .ant-modal {
+    max-width: 100vw !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    top: 0 !important;
+  }
+  .ant-modal-content {
+    border-radius: 0 !important;
+  }
+
+  /* Topbar: hide non-essential items */
+  .pob-topbar-clock {
+    display: none !important;
+  }
+  .pob-topbar-sub-badge {
+    display: none !important;
+  }
+
+  /* Stack Ant Design Row/Col grids on phones */
+  .ant-row {
+    flex-wrap: wrap;
+  }
+
+  /* Tables: smaller font on phones */
+  .ant-table {
+    font-size: 12px;
+  }
+
+  /* Tabs: scrollable on phones */
+  .ant-tabs-nav {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .ant-tabs-tab {
+    padding: 8px 10px !important;
+    font-size: 12px !important;
+  }
+
+  /* Statistic value font — smaller on phones */
+  .ant-statistic-content-value {
+    font-size: 20px !important;
+  }
+
+  /* Page title reduction */
+  h2.ant-typography, h3.ant-typography {
+    font-size: 16px !important;
+  }
+
+  /* Forms — single column on phones */
+  .ant-form-item {
+    margin-bottom: 12px;
+  }
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+   DARK MODE OVERRIDES
+   Targets body.pob-dark (set by ThemeContext when dark theme is active).
+   Corrects hardcoded light colors in inline JSX styles.
+════════════════════════════════════════════════════════════════════════════ */
+
+body.pob-dark {
+  background: var(--pob-bg-page);
+  color: var(--pob-text-primary);
+}
+
+/* Cards */
+body.pob-dark .ant-card {
+  background: var(--pob-bg-card) !important;
+  border-color: var(--pob-border) !important;
+}
+
+/* Table header */
+body.pob-dark .ant-table-thead > tr > th {
+  background: #1f1f1f !important;
+  color: #d9d9d9 !important;
+  border-color: #303030 !important;
+}
+
+/* Statistic value */
+body.pob-dark .ant-statistic-content-value {
+  color: var(--pob-text-primary) !important;
+}
+
+/* Divider */
+body.pob-dark .ant-divider {
+  border-color: var(--pob-border) !important;
+}
+
+/* Input / Select */
+body.pob-dark .ant-input,
+body.pob-dark .ant-select-selector,
+body.pob-dark .ant-picker {
+  background: #1f1f1f !important;
+  border-color: #303030 !important;
+  color: #d9d9d9 !important;
+}
+
+/* Descriptions */
+body.pob-dark .ant-descriptions-item-label {
+  background: #1f1f1f !important;
+  color: #8c8c8c !important;
+}
+body.pob-dark .ant-descriptions-item-content {
+  color: #d9d9d9 !important;
+}
+
+/* Scrollbar — dark mode friendly */
+@media (prefers-color-scheme: dark) {
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 3px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+}
+
+/* Custom sidebar scrollbar styling */
+.pob-sidebar-scroll::-webkit-scrollbar { width: 4px; }
+.pob-sidebar-scroll::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 2px; }
+.pob-sidebar-scroll::-webkit-scrollbar-track { background: transparent; }
+
+/* ════════════════════════════════════════════════════════════════════════════
+   DEVICE MODULE — allow badge counts to overflow tab bar and card header
+   AntD hard-codes overflow:hidden at multiple levels (the card itself,
+   ant-card-head-wrapper, ant-tabs-nav-wrap, etc.). Every ancestor in the
+   clip chain must be set to visible for badges to show fully.
+════════════════════════════════════════════════════════════════════════════ */
+
+/* Card: the card itself clips children; head/title/wrapper also clip */
+.device-module > .ant-card,
+.device-module > .ant-card > .ant-card-head,
+.device-module > .ant-card > .ant-card-head > .ant-card-head-wrapper,
+.device-module > .ant-card > .ant-card-head > .ant-card-head-wrapper > .ant-card-head-title {
+  overflow: visible !important;
+}
+
+/* Tabs: nav-wrap is the main clip ancestor; list and individual tabs also need it */
+.device-module .ant-tabs-nav,
+.device-module .ant-tabs-nav-wrap,
+.device-module .ant-tabs-nav-list,
+.device-module .ant-tabs-tab,
+.device-module .ant-tabs-tab-btn {
+  overflow: visible !important;
+}
+
+/* Push tab strip down so badge counts have room above the strip */
+.device-module .ant-tabs-nav {
+  margin-top: 4px;
+  padding-top: 8px;
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+   PAYROLL MODULE — same overflow fixes as device-module
+════════════════════════════════════════════════════════════════════════════ */
+.payroll-module > .ant-card,
+.payroll-module > .ant-card > .ant-card-head,
+.payroll-module > .ant-card > .ant-card-head > .ant-card-head-wrapper,
+.payroll-module > .ant-card > .ant-card-head > .ant-card-head-wrapper > .ant-card-head-title {
+  overflow: visible !important;
+}
+
+.payroll-module .ant-tabs-nav,
+.payroll-module .ant-tabs-nav-wrap,
+.payroll-module .ant-tabs-nav-list,
+.payroll-module .ant-tabs-tab,
+.payroll-module .ant-tabs-tab-btn {
+  overflow: visible !important;
+}
+
+.payroll-module .ant-tabs-nav {
+  margin-top: 4px;
+  padding-top: 8px;
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+   PERSONNEL MODULE — same overflow fixes as device-module
+════════════════════════════════════════════════════════════════════════════ */
+.personnel-module > .ant-card,
+.personnel-module > .ant-card > .ant-card-head,
+.personnel-module > .ant-card > .ant-card-head > .ant-card-head-wrapper,
+.personnel-module > .ant-card > .ant-card-head > .ant-card-head-wrapper > .ant-card-head-title {
+  overflow: visible !important;
+}
+
+.personnel-module .ant-tabs-nav,
+.personnel-module .ant-tabs-nav-wrap,
+.personnel-module .ant-tabs-nav-list,
+.personnel-module .ant-tabs-tab,
+.personnel-module .ant-tabs-tab-btn {
+  overflow: visible !important;
+}
+
+.personnel-module .ant-tabs-nav {
+  margin-top: 4px;
+  padding-top: 8px;
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+   EMERGENCY RESPONSE MODULE (unified Emergency + Mustering page)
+════════════════════════════════════════════════════════════════════════════ */
+.emergency-response-module > .ant-card,
+.emergency-response-module > .ant-card > .ant-card-head,
+.emergency-response-module > .ant-card > .ant-card-head > .ant-card-head-wrapper,
+.emergency-response-module > .ant-card > .ant-card-head > .ant-card-head-wrapper > .ant-card-head-title {
+  overflow: visible !important;
+}
+
+.emergency-response-module .ant-tabs-nav,
+.emergency-response-module .ant-tabs-nav-wrap,
+.emergency-response-module .ant-tabs-nav-list,
+.emergency-response-module .ant-tabs-tab,
+.emergency-response-module .ant-tabs-tab-btn {
+  overflow: visible !important;
+}
+
+.emergency-response-module .ant-tabs-nav {
+  margin-top: 4px;
+  padding-top: 8px;
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+   EMERGENCY MODULE — same overflow fixes as device-module
+════════════════════════════════════════════════════════════════════════════ */
+.emergency-module > .ant-card,
+.emergency-module > .ant-card > .ant-card-head,
+.emergency-module > .ant-card > .ant-card-head > .ant-card-head-wrapper,
+.emergency-module > .ant-card > .ant-card-head > .ant-card-head-wrapper > .ant-card-head-title {
+  overflow: visible !important;
+}
+
+.emergency-module .ant-tabs-nav,
+.emergency-module .ant-tabs-nav-wrap,
+.emergency-module .ant-tabs-nav-list,
+.emergency-module .ant-tabs-tab,
+.emergency-module .ant-tabs-tab-btn {
+  overflow: visible !important;
+}
+
+.emergency-module .ant-tabs-nav {
+  margin-top: 4px;
+  padding-top: 8px;
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+   MUSTERING MANAGEMENT MODULE (full MusteringManagement.jsx page)
+════════════════════════════════════════════════════════════════════════════ */
+.mustering-mgmt-module > .ant-card,
+.mustering-mgmt-module > .ant-card > .ant-card-head,
+.mustering-mgmt-module > .ant-card > .ant-card-head > .ant-card-head-wrapper,
+.mustering-mgmt-module > .ant-card > .ant-card-head > .ant-card-head-wrapper > .ant-card-head-title {
+  overflow: visible !important;
+}
+
+.mustering-mgmt-module .ant-tabs-nav,
+.mustering-mgmt-module .ant-tabs-nav-wrap,
+.mustering-mgmt-module .ant-tabs-nav-list,
+.mustering-mgmt-module .ant-tabs-tab,
+.mustering-mgmt-module .ant-tabs-tab-btn {
+  overflow: visible !important;
+}
+
+.mustering-mgmt-module .ant-tabs-nav {
+  margin-top: 4px;
+  padding-top: 8px;
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+   MUSTERING MODULE — same overflow fixes as device-module
+════════════════════════════════════════════════════════════════════════════ */
+.mustering-module > .ant-card,
+.mustering-module > .ant-card > .ant-card-head,
+.mustering-module > .ant-card > .ant-card-head > .ant-card-head-wrapper,
+.mustering-module > .ant-card > .ant-card-head > .ant-card-head-wrapper > .ant-card-head-title {
+  overflow: visible !important;
+}
+
+.mustering-module .ant-tabs-nav,
+.mustering-module .ant-tabs-nav-wrap,
+.mustering-module .ant-tabs-nav-list,
+.mustering-module .ant-tabs-tab,
+.mustering-module .ant-tabs-tab-btn {
+  overflow: visible !important;
+}
+
+.mustering-module .ant-tabs-nav {
+  margin-top: 4px;
+  padding-top: 8px;
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+   TRANSPORT MODULE — same overflow fixes as device-module
+════════════════════════════════════════════════════════════════════════════ */
+.transport-module > .ant-card,
+.transport-module > .ant-card > .ant-card-head,
+.transport-module > .ant-card > .ant-card-head > .ant-card-head-wrapper,
+.transport-module > .ant-card > .ant-card-head > .ant-card-head-wrapper > .ant-card-head-title {
+  overflow: visible !important;
+}
+
+.transport-module .ant-tabs-nav,
+.transport-module .ant-tabs-nav-wrap,
+.transport-module .ant-tabs-nav-list,
+.transport-module .ant-tabs-tab,
+.transport-module .ant-tabs-tab-btn {
+  overflow: visible !important;
+}
+
+.transport-module .ant-tabs-nav {
+  margin-top: 4px;
+  padding-top: 8px;
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+   ZONE MODULE — same overflow fixes as device-module
+════════════════════════════════════════════════════════════════════════════ */
+.zone-module > .ant-card,
+.zone-module > .ant-card > .ant-card-head,
+.zone-module > .ant-card > .ant-card-head > .ant-card-head-wrapper,
+.zone-module > .ant-card > .ant-card-head > .ant-card-head-wrapper > .ant-card-head-title {
+  overflow: visible !important;
+}
+
+.zone-module .ant-tabs-nav,
+.zone-module .ant-tabs-nav-wrap,
+.zone-module .ant-tabs-nav-list,
+.zone-module .ant-tabs-tab,
+.zone-module .ant-tabs-tab-btn {
+  overflow: visible !important;
+}
+
+.zone-module .ant-tabs-nav {
+  margin-top: 4px;
+  padding-top: 8px;
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+   KIOSK PAGE — override any antd defaults for full-screen mode
+════════════════════════════════════════════════════════════════════════════ */
+.kiosk-page .ant-input,
+.kiosk-page .ant-select-selector,
+.kiosk-page .ant-btn {
+  font-size: 16px !important;
+  height: 48px !important;
+}
+.kiosk-page .ant-select-selection-item {
+  line-height: 46px !important;
 }
 
 .App-logo {

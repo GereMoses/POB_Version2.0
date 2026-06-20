@@ -126,9 +126,8 @@ async def list_mustering_zones(
     try:
         service = MusteringService(db)
         zones = db.query(MusteringZone).filter(
-            MusteringZone.zone_type.in_(_MUSTER_ZONE_TYPES),
             MusteringZone.is_active == True,
-        ).all()
+        ).order_by(MusteringZone.name).all()
 
         # Build safe-count map from active event logs (status=1 means confirmed safe/present)
         active_event_ids = [
@@ -163,6 +162,7 @@ async def list_mustering_zones(
                 "latitude": zone.latitude,
                 "longitude": zone.longitude,
                 "current_occupancy": occupancy_map.get(zone.id, 0),
+                "adms_occupancy": int(zone.current_occupancy or 0),
                 "created_at": zone.created_at,
                 "updated_at": zone.updated_at,
             })
@@ -173,7 +173,7 @@ async def list_mustering_zones(
         logger.error(f"Error listing mustering zones: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/api/mustering/zones/")
+@router.post("/api/mustering/zones")
 async def create_mustering_zone(
     zone_data: MusteringZoneCreate,
     current_user: AuthUser = Depends(get_current_user),
@@ -308,7 +308,7 @@ async def delete_mustering_zone(
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.patch("/api/mustering/zones/{zone_id}/map-position/")
+@router.patch("/api/mustering/zones/{zone_id}/map-position")
 async def update_zone_map_position(
     zone_id: int,
     data: MusteringZoneMapUpdate,
@@ -397,7 +397,7 @@ async def list_mustering_events(
         logger.error(f"Error listing mustering events: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/api/mustering/events/start/")
+@router.post("/api/mustering/events/start")
 async def start_mustering_event(
     event_data: MusteringEventStart,
     current_user: AuthUser = Depends(get_current_user),
@@ -440,7 +440,7 @@ async def start_mustering_event(
         logger.error(f"Error starting mustering event: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/api/mustering/events/{event_id}/end/")
+@router.post("/api/mustering/events/{event_id}/end")
 async def end_mustering_event(
     event_id: int,
     end_data: MusteringEventEnd,
@@ -536,7 +536,7 @@ async def get_event_logs(
         logger.error(f"Error getting event logs: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/api/mustering/events/{event_id}/mark/")
+@router.post("/api/mustering/events/{event_id}/mark")
 async def mark_person_status(
     event_id: int,
     mark_data: MusteringPersonMark,
@@ -633,7 +633,7 @@ async def get_missing_persons(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/api/mustering/events/{event_id}/search-sweeps/")
+@router.post("/api/mustering/events/{event_id}/search-sweeps")
 async def record_search_sweep(
     event_id: int,
     body: SearchSweepCreate,
@@ -692,11 +692,24 @@ async def list_search_sweeps(
 
 @router.websocket("/ws/mustering/events/{event_id}")
 async def websocket_endpoint(websocket: WebSocket, event_id: int):
-    """WebSocket endpoint for real-time mustering updates"""
+    """WebSocket endpoint for real-time mustering updates — requires valid JWT."""
+    token = websocket.query_params.get("token")
+    if not token:
+        await websocket.accept()
+        await websocket.close(code=4001, reason="Missing token")
+        return
+    try:
+        from ..core.security import verify_token
+        verify_token(token, token_type="access")
+    except Exception:
+        await websocket.accept()
+        await websocket.close(code=4001, reason="Invalid token")
+        return
+
+    await websocket.accept()
     await manager.connect(websocket, event_id)
     try:
         while True:
-            # Keep connection alive
             await asyncio.sleep(30)
             await websocket.send_text(json.dumps({"type": "ping"}))
     except WebSocketDisconnect:
@@ -744,7 +757,7 @@ async def list_drill_schedules(
         logger.error(f"Error listing drill schedules: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/api/mustering/drills/")
+@router.post("/api/mustering/drills")
 async def create_drill_schedule(
     drill_data: DrillScheduleIn,
     current_user: AuthUser = Depends(get_current_user),
@@ -795,7 +808,7 @@ async def create_drill_schedule(
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/api/mustering/drills/{drill_id}/trigger/")
+@router.post("/api/mustering/drills/{drill_id}/trigger")
 async def trigger_drill_now(
     drill_id: int,
     current_user: AuthUser = Depends(get_current_user),
@@ -810,7 +823,7 @@ async def trigger_drill_now(
         # Start the drill immediately
         service = MusteringService(db)
         event_result = service.start_mustering_event(
-            zone_id=schedule.zone_id,
+            zone_ids=[schedule.zone_id],
             event_type=schedule.event_type,
             initiated_by=current_user.id,
             notes=f"Manually triggered drill from schedule {drill_id}"
@@ -870,7 +883,7 @@ async def list_mustering_templates(
         logger.error(f"Error listing mustering templates: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/api/mustering/templates/")
+@router.post("/api/mustering/templates")
 async def create_mustering_template(
     template_data: MusteringTemplateIn,
     current_user: AuthUser = Depends(get_current_user),
@@ -1204,7 +1217,7 @@ async def get_realtime_analytics(
 
 # Mobile Mustering endpoints
 
-@router.post("/api/mustering/mobile/checkin/")
+@router.post("/api/mustering/mobile/checkin")
 async def mobile_checkin(
     checkin_data: dict,
     current_user: AuthUser = Depends(get_current_user),
@@ -1273,7 +1286,7 @@ async def get_mobile_checkins(
         logger.error(f"Error getting mobile check-ins: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# @router.post("/api/mustering/mobile/emergency-photo/")
+# @router.post("/api/mustering/mobile/emergency-photo")
 # async def upload_emergency_photo(
 #     photo_data: dict,
 #     current_user: AuthUser = Depends(get_current_user),
@@ -1312,7 +1325,7 @@ async def get_mobile_checkins(
 #         logger.error(f"Error uploading emergency photo: {e}")
 #         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/api/mustering/mobile/emergency-alert/")
+@router.post("/api/mustering/mobile/emergency-alert")
 async def send_emergency_alert(
     alert_data: dict,
     current_user: AuthUser = Depends(get_current_user),
@@ -1408,634 +1421,35 @@ async def get_websocket_metrics(
         logger.error(f"Error getting WebSocket metrics: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# Simulation and Training endpoints
+# Simulation and training endpoints — service removed (mustering_simulation.py had a
+# syntax error and is no longer present). Return 501 so callers get a clear signal.
 
-@router.post("/api/mustering/simulation/start/")
-async def start_simulation(
-    simulation_data: dict,
-    current_user: AuthUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Start a mustering simulation"""
-    try:
-        from app.services.mustering_simulation import MusteringSimulationService
-        simulation_service = MusteringSimulationService(db)
-        
-        result = simulation_service.start_simulation_mode(
-            simulation_name=simulation_data.get("simulation_name"),
-            zone_id=simulation_data.get("zone_id"),
-            event_type=simulation_data.get("event_type", 1),
-            participants=simulation_data.get("participants"),
-            scenario_type=simulation_data.get("scenario_type", "drill"),
-            duration_minutes=simulation_data.get("duration_minutes", 10),
-            auto_progress=simulation_data.get("auto_progress", True)
-        )
-        
-        return {"success": True, "data": result}
-        
-    except Exception as e:
-        logger.error(f"Error starting simulation: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.post("/api/mustering/simulation/{simulation_id}/end/")
-async def end_simulation(
-    simulation_id: str,
-    current_user: AuthUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """End a mustering simulation"""
-    try:
-        from app.services.mustering_simulation import MusteringSimulationService
-        simulation_service = MusteringSimulationService(db)
-        
-        result = simulation_service.end_simulation_mode(simulation_id)
-        
-        return {"success": True, "data": result}
-        
-    except Exception as e:
-        logger.error(f"Error ending simulation: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.post("/api/mustering/simulation/{simulation_id}/punch/")
-async def simulate_punch(
-    simulation_id: str,
-    punch_data: dict,
-    current_user: AuthUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Simulate a punch during simulation"""
-    try:
-        from app.services.mustering_simulation import MusteringSimulationService
-        simulation_service = MusteringSimulationService(db)
-        
-        result = simulation_service.simulate_punch(
-            simulation_id=simulation_id,
-            emp_code=punch_data.get("emp_code"),
-            device_sn=punch_data.get("device_sn", "SIM_DEVICE_001"),
-            status=punch_data.get("status", 1),
-            gps_coordinates=punch_data.get("gps_coordinates"),
-            response_delay_seconds=punch_data.get("response_delay_seconds", 0)
-        )
-        
-        return {"success": True, "data": result}
-        
-    except Exception as e:
-        logger.error(f"Error simulating punch: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
+@router.post("/api/mustering/simulation/start")
+@router.post("/api/mustering/simulation/{simulation_id}/end")
+@router.post("/api/mustering/simulation/{simulation_id}/punch")
 @router.get("/api/mustering/simulation/{simulation_id}/progress/")
-async def get_simulation_progress(
-    simulation_id: str,
-    current_user: AuthUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get simulation progress"""
-    try:
-        from app.services.mustering_simulation import MusteringSimulationService
-        simulation_service = MusteringSimulationService(db)
-        
-        progress = simulation_service.get_simulation_progress(simulation_id)
-        
-        return {"success": True, "data": progress}
-        
-    except Exception as e:
-        logger.error(f"Error getting simulation progress: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
 @router.get("/api/mustering/simulation/active/")
-async def get_active_simulations(
-    current_user: AuthUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get all active simulations"""
-    try:
-        from app.services.mustering_simulation import MusteringSimulationService
-        simulation_service = MusteringSimulationService(db)
-        
-        active_simulations = simulation_service.get_active_simulations()
-        
-        return {"success": True, "data": active_simulations}
-        
-    except Exception as e:
-        logger.error(f"Error getting active simulations: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
 @router.get("/api/mustering/simulation/history/")
-async def get_simulation_history(
-    limit: int = Query(50, description="Limit number of records"),
-    current_user: AuthUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get simulation history"""
-    try:
-        from app.services.mustering_simulation import MusteringSimulationService
-        simulation_service = MusteringSimulationService(db)
-        
-        history = simulation_service.get_simulation_history(limit)
-        
-        return {"success": True, "data": history}
-        
-    except Exception as e:
-        logger.error(f"Error getting simulation history: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.post("/api/mustering/simulation/{simulation_id}/auto-progress/")
-async def auto_progress_simulation(
-    simulation_id: str,
-    current_user: AuthUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Auto-progress through simulation steps"""
-    try:
-        from app.services.mustering_simulation import MusteringSimulationService
-        simulation_service = MusteringSimulationService(db)
-        
-        result = simulation_service.auto_progress_simulation(simulation_id)
-        
-        return {"success": True, "data": result}
-        
-    except Exception as e:
-        logger.error(f"Error auto-progressing simulation: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
+@router.post("/api/mustering/simulation/{simulation_id}/auto-progress")
 @router.get("/api/mustering/training/scenarios/")
-async def get_training_scenarios(
-    zone_id: Optional[int] = Query(None, description="Filter by zone ID"),
-    current_user: AuthUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get training scenarios"""
-    try:
-        from app.services.mustering_simulation import MusteringSimulationService
-        simulation_service = MusteringSimulationService(db)
-        
-        scenarios = simulation_service.get_training_scenarios(zone_id)
-        
-        return {"success": True, "data": scenarios}
-        
-    except Exception as e:
-        logger.error(f"Error getting training scenarios: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.post("/api/mustering/training/scenarios/")
-async def create_training_scenario(
-    scenario_data: dict,
-    current_user: AuthUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Create training scenario"""
-    try:
-        from app.services.mustering_simulation import MusteringSimulationService
-        simulation_service = MusteringSimulationService(db)
-        
-        result = simulation_service.create_training_scenario(
-            scenario_name=scenario_data.get("scenario_name"),
-            zone_id=scenario_data.get("zone_id"),
-            scenario_type=scenario_data.get("scenario_type", "drill"),
-            description=scenario_data.get("description"),
-            steps=scenario_data.get("steps", [])
-        )
-        
-        return {"success": True, "data": result}
-        
-    except Exception as e:
-        logger.error(f"Error creating training scenario: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
+@router.post("/api/mustering/training/scenarios")
 @router.get("/api/mustering/simulation/metrics/")
-async def get_simulation_metrics(
-    current_user: AuthUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get simulation metrics"""
-    try:
-        from app.services.mustering_simulation import MusteringSimulationService
-        simulation_service = MusteringSimulationService(db)
-        
-        metrics = simulation_service.get_simulation_metrics()
-        
-        return {"success": True, "data": metrics}
-        
-    except Exception as e:
-        logger.error(f"Error getting simulation metrics: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+async def simulation_not_implemented(*args, **kwargs):
+    raise HTTPException(status_code=501, detail="Mustering simulation is not available in this build.")
 
-# External System Integration endpoints
+
+# External integration endpoints — service removed (mustering_integration.py had no
+# working configuration). Return 501 so callers get a clear signal.
 
 @router.post("/api/mustering/integration/sap/{event_id}/sync")
-async def sync_to_sap(
-    event_id: int,
-    current_user: AuthUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Sync mustering event data to SAP system"""
-    try:
-        from app.services.mustering_integration import MusteringIntegrationService
-        integration_service = MusteringIntegrationService(db)
-        
-        result = integration_service.sync_to_sap(event_id)
-        
-        # Log integration activity
-        integration_service.log_integration_activity(
-            integration_type='sap_sync',
-            event_id=event_id,
-            status=result['success'],
-            details={'sap_response': result.get('sap_response')}
-        )
-        
-        return {"success": True, "data": result}
-        
-    except Exception as e:
-        logger.error(f"Error syncing to SAP: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
 @router.post("/api/mustering/integration/hse/{event_id}/notify")
-async def notify_hse_system(
-    event_id: int,
-    notification_data: dict,
-    current_user: AuthUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Send notification to HSE system"""
-    try:
-        from app.services.mustering_integration import MusteringIntegrationService
-        integration_service = MusteringIntegrationService(db)
-        
-        result = integration_service.notify_hse_system(
-            event_id=event_id,
-            notification_type=notification_data.get("notification_type", "emergency_alert"),
-            message=notification_data.get("message", "Emergency mustering alert")
-        )
-        
-        # Log integration activity
-        integration_service.log_integration_activity(
-            integration_type='hse_notification',
-            event_id=event_id,
-            status=result['success'],
-            details={'hse_response': result.get('hse_response')}
-        )
-        
-        return {"success": True, "data": result}
-        
-    except Exception as e:
-        logger.error(f"Error notifying HSE system: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
 @router.post("/api/mustering/integration/fire/{event_id}/trigger")
-async def trigger_fire_system(
-    event_id: int,
-    zone_id: int,
-    current_user: AuthUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Trigger fire system integration"""
-    try:
-        from app.services.mustering_integration import MusteringIntegrationService
-        integration_service = MusteringIntegrationService(db)
-        
-        result = integration_service.trigger_fire_system(event_id, zone_id)
-        
-        # Log integration activity
-        integration_service.log_integration_activity(
-            integration_type='fire_system_trigger',
-            event_id=event_id,
-            status=result['success'],
-            details={'fire_response': result.get('fire_response')}
-        )
-        
-        return {"success": True, "data": result}
-        
-    except Exception as e:
-        logger.error(f"Error triggering fire system: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
 @router.post("/api/mustering/integration/medical/{event_id}/alert")
-async def notify_medical_system(
-    event_id: int,
-    medical_alerts: dict,
-    current_user: AuthUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Send medical emergency notifications to medical system"""
-    try:
-        from app.services.mustering_integration import MusteringIntegrationService
-        integration_service = MusteringIntegrationService(db)
-        
-        result = integration_service.notify_medical_system(event_id, medical_alerts)
-        
-        # Log integration activity
-        integration_service.log_integration_activity(
-            integration_type='medical_notification',
-            event_id=event_id,
-            status=result['success'],
-            details={'medical_response': result.get('medical_response')}
-        )
-        
-        return {"success": True, "data": result}
-        
-    except Exception as e:
-        logger.error(f"Error notifying medical system: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
 @router.get("/api/mustering/integration/status/")
-async def get_integration_status(
-    current_user: AuthUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get status of all external integrations"""
-    try:
-        from app.services.mustering_integration import MusteringIntegrationService
-        integration_service = MusteringIntegrationService(db)
-        
-        status = integration_service.get_integration_status()
-        
-        return {"success": True, "data": status}
-        
-    except Exception as e:
-        logger.error(f"Error getting integration status: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-# Enhanced Dashboard endpoints
-
-@router.get("/api/mustering/dashboard/realtime/{event_id}")
-async def get_realtime_dashboard(
-    event_id: int,
-    current_user: AuthUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get comprehensive real-time dashboard data"""
-    try:
-        from app.services.mustering_dashboard import MusteringDashboardService
-        dashboard_service = MusteringDashboardService(db)
-        
-        data = dashboard_service.get_realtime_dashboard_data(event_id)
-        
-        return {"success": True, "data": data}
-        
-    except Exception as e:
-        logger.error(f"Error getting real-time dashboard: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.get("/api/mustering/dashboard/analytics/predictive/{zone_id}")
-async def get_predictive_analytics(
-    zone_id: int = Path(..., description="Zone ID"),
-    days: int = Query(30, description="Analysis period in days"),
-    current_user: AuthUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get predictive analytics for mustering"""
-    try:
-        from app.services.mustering_dashboard import MusteringDashboardService
-        dashboard_service = MusteringDashboardService(db)
-        
-        analytics = dashboard_service.get_predictive_analytics(zone_id, days)
-        
-        return {"success": True, "data": analytics}
-        
-    except Exception as e:
-        logger.error(f"Error getting predictive analytics: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.get("/api/mustering/dashboard/trends/{metric_type}")
-async def get_performance_trends(
-    metric_type: str,
-    period_days: int = Query(90, description="Analysis period in days"),
-    current_user: AuthUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get performance trends for mustering system"""
-    try:
-        from app.services.mustering_dashboard import MusteringDashboardService
-        dashboard_service = MusteringDashboardService(db)
-        
-        trends = dashboard_service.get_performance_trends(metric_type, period_days)
-        
-        return {"success": True, "data": trends}
-        
-    except Exception as e:
-        logger.error(f"Error getting performance trends: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.get("/api/mustering/dashboard/zone-comparison/")
-async def get_zone_performance_comparison(
-    zone_ids: str = Query(..., description="Comma-separated zone IDs"),
-    current_user: AuthUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Compare performance across multiple zones"""
-    try:
-        from app.services.mustering_dashboard import MusteringDashboardService
-        dashboard_service = MusteringDashboardService(db)
-        
-        zone_id_list = [int(zone_id.strip()) for zone_id in zone_ids.split(',') if zone_ids]
-        
-        comparison = dashboard_service.get_zone_performance_comparison(zone_id_list)
-        
-        return {"success": True, "data": comparison}
-        
-    except Exception as e:
-        logger.error(f"Error getting zone performance comparison: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.get("/api/mustering/dashboard/kpi/{time_period}")
-async def get_kpi_dashboard(
-    time_period: str = Path(..., description="Time period: week, month, quarter, year"),
-    current_user: AuthUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get comprehensive KPI dashboard"""
-    try:
-        from app.services.mustering_dashboard import MusteringDashboardService
-        dashboard_service = MusteringDashboardService(db)
-        
-        kpi_data = dashboard_service.get_kpi_dashboard(time_period)
-        
-        return {"success": True, "data": kpi_data}
-        
-    except Exception as e:
-            logger.error(f"Error getting KPI dashboard: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
-
-# AI Analytics endpoints
-
-@router.get("/api/mustering/analytics/predictive/{zone_id}")
-async def get_predictive_analytics(
-    zone_id: int = Path(..., description="Zone ID"),
-    days: int = Query(30, description="Analysis period in days"),
-    current_user: AuthUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get predictive analytics for mustering"""
-    try:
-            from app.services.mustering_ai_analytics import MusteringAIAnalyticsService
-            ai_service = MusteringAIAnalyticsService(self.db)
-            
-            analytics = ai_service.get_predictive_analytics(zone_id, days)
-            
-            return {"success": True, "data": analytics}
-        
-    except Exception as e:
-            logger.error(f"Error getting predictive analytics: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
-
-@router.get("/api/mustering/analytics/anomaly/{zone_id}")
-async def get_anomaly_detection(
-    zone_id: int = Path(..., description="Zone ID"),
-    days: int = Query(7, description="Analysis period in days"),
-    current_user: AuthUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get anomaly detection for mustering patterns"""
-    try:
-            from app.services.mustering_ai_analytics import MusteringAIAnalyticsService
-            anomalies = ai_service.get_anomaly_detection(zone_id, days)
-            
-            return {"success": True, "data": anomalies}
-        
-    except Exception as e:
-            logger.error(f"Error getting anomaly detection: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
-
-@router.post("/api/mustering/analytics/train-models")
-async def train_analytics_models(
-    current_user: AuthUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Train or retrain AI models"""
-    try:
-            from app.services.mustering_ai_analytics import MusteringAIAnalyticsService
-            ai_service.train_models()
-            
-            return {"success": True, "message": "AI models trained successfully"}
-        
-    except Exception as e:
-            logger.error(f"Error training AI models: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
-
-@router.get("/api/mustering/analytics/feature-importance")
-async def get_feature_importance(
-    current_user: AuthUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get feature importance for ML models"""
-    try:
-            from app.services.mustering_ai_analytics import MusteringAIAnalyticsService
-            feature_importance = ai_service.get_feature_importance()
-            
-            return {"success": True, "data": feature_importance}
-        
-    except Exception as e:
-            logger.error(f"Error getting feature importance: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
-
-@router.get("/api/mustering/analytics/model-status/")
-async def get_model_status(
-    current_user: AuthUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Get status of ML models"""
-    try:
-            from app.services.mustering_ai_analytics import MusteringAIAnalyticsService
-            model_status = {
-                'completion_model_loaded': hasattr(ai_service.models, 'completion_model'),
-                'duration_model_loaded': hasattr(ai_service.models, 'duration_model'),
-                'risk_assessment_model_loaded': hasattr(ai_service.models, 'risk_assessment_model'),
-                'feature_importance_calculated': ai_service.feature_importance is not None
-            }
-            
-            return {"success": True, "data": model_status}
-        
-    except Exception as e:
-            logger.error(f"Error getting model status: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
-
 @router.post("/api/mustering/integration/test/{integration_type}")
-async def test_integration(
-    integration_type: str,
-    current_user: AuthUser = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """Test external integration connection"""
-    try:
-        from app.services.mustering_integration import MusteringIntegrationService
-        integration_service = MusteringIntegrationService(db)
-        
-        # Test the specified integration
-        if integration_type == 'sap':
-            # Test SAP connection
-            if not integration_service.config['sap_api_url']:
-                return {"success": False, "message": "SAP integration not configured"}
-            
-            response = requests.get(
-                f"{integration_service.config['sap_api_url']}/api/health",
-                headers={'Authorization': f"Bearer {integration_service.config['sap_api_key']}"},
-                timeout=10
-            )
-            
-            status = 'available' if response.status_code == 200 else 'error'
-            
-        elif integration_type == 'hse':
-            # Test HSE connection
-            if not integration_service.config['hse_api_url']:
-                return {"success": False, "message": "HSE integration not configured"}
-            
-            response = requests.get(
-                f"{integration_service.config['hse_api_url']}/api/health",
-                headers={'Authorization': f"Bearer {integration_service.config['hse_api_key']}"},
-                timeout=10
-            )
-            
-            status = 'available' if response.status_code == 200 else 'error'
-            
-        elif integration_type == 'fire_system':
-            # Test fire system connection
-            if not integration_service.config['fire_system_api_url']:
-                return {"success": False, "message": "Fire system integration not configured"}
-            
-            response = requests.get(
-                f"{integration_service.config['fire_system_api_url']}/api/health",
-                headers={'Authorization': f"Bearer {integration_service.config['fire_system_api_key']}"},
-                timeout=10
-            )
-            
-            status = 'available' if response.status_code == 200 else 'error'
-            
-        elif integration_type == 'medical':
-            # Test medical system connection
-            if not integration_service.config['medical_api_url']:
-                return {"success": False, "message": "Medical system integration not configured"}
-            
-            response = requests.get(
-                f"{integration_service.config['medical_api_url']}/api/health",
-                headers={'Authorization': f"Bearer {integration_service.config['medical_api_key']}"},
-                timeout=10
-            )
-            
-            status = 'available' if response.status_code == 200 else 'error'
-            
-        else:
-            return {"success": False, "message": f"Unknown integration type: {integration_type}"}
-        
-        # Log test result
-        integration_service.log_integration_activity(
-            integration_type=f'{integration_type}_test',
-            event_id=None,
-            status='success' if status == 'available' else 'error',
-            details={'http_status': response.status_code, 'response': response.text[:200] if response.text else None}
-        )
-        
-        return {
-            "success": True,
-            "integration_type": integration_type,
-            "status": status,
-            "response_time": datetime.utcnow().isoformat(),
-            "http_status": response.status_code,
-            "response": response.text[:500] if response.text else None
-        }
-        
-    except Exception as e:
-        logger.error(f"Error testing integration {integration_type}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+async def integration_not_implemented(*args, **kwargs):
+    raise HTTPException(status_code=501, detail="External integrations are not configured in this build.")
+
 
 # Import models at the end to avoid circular imports
 from app.models.biotime_models import (

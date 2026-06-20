@@ -82,7 +82,7 @@ class BrandingComplianceService:
     def _get_default_branding(self) -> Dict[str, Any]:
         """Get default branding configuration"""
         return {
-            "app_name": "POB System",
+            "app_name": "Apex POB",
             "company_name": "POB Management",
             "logo_url": "/assets/logo.png",
             "favicon_url": "/assets/favicon.ico",
@@ -97,7 +97,7 @@ class BrandingComplianceService:
             "custom_css": "",
             "custom_js": "",
             "company_tagline": "Personnel On Board Management System",
-            "footer_text": "© 2024 POB System. All rights reserved.",
+            "footer_text": "© 2024 Apex POB. All rights reserved.",
             "login_background": "/assets/login-bg.jpg",
             "sidebar_logo": "/assets/sidebar-logo.png",
             "is_active": True
@@ -114,7 +114,7 @@ class BrandingComplianceService:
             if not branding:
                 # Create new branding
                 branding = Branding(
-                    app_name=branding_data.get("app_name", "POB System"),
+                    app_name=branding_data.get("app_name", "Apex POB"),
                     company_name=branding_data.get("company_name", "POB Management"),
                     is_active=True,
                     created_by=updated_by

@@ -64,6 +64,10 @@ class OvertimeManagementResponse(BaseModel):
     # Enriched at query time
     personnel_name: Optional[str] = None
     personnel_emp_code: Optional[str] = None
+    personnel_type: Optional[str] = None
+    personnel_company: Optional[str] = None
+    department_id: Optional[int] = None
+    department_name: Optional[str] = None
 
     class Config:
         from_attributes = True

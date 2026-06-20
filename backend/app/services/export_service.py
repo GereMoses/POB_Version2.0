@@ -141,7 +141,7 @@ class ExportService:
         
         # Get company info for header
         company = self.db.query(BaseCompany).first()
-        company_name = company.company_name if company else "POB System"
+        company_name = company.company_name if company else "Apex POB"
         company_logo = company.logo_path if company and company.logo_path else None
         
         # Build story
@@ -324,7 +324,7 @@ class ExportService:
         
         # Get company info
         company = self.db.query(BaseCompany).first()
-        company_name = company.company_name if company else "POB System"
+        company_name = company.company_name if company else "Apex POB"
         
         # Write headers
         row = 0
@@ -439,7 +439,7 @@ class ExportService:
             
             # Write header info
             company = self.db.query(BaseCompany).first()
-            company_name = company.company_name if company else "POB System"
+            company_name = company.company_name if company else "Apex POB"
             report_name = self._get_report_name(report_code)
             
             writer.writerow([f"{company_name} - {report_name}"])

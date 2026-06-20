@@ -175,8 +175,8 @@ class MusteringDashboardService:
             events = self.db.query(MusteringEvent).filter(
                 and_(
                     MusteringEvent.start_time >= start_date,
-                    MusteringEvent.start_time <= end_date
-                    MusteringEvent.status == 1
+                    MusteringEvent.start_time <= end_date,
+                    MusteringEvent.status == 1,
                 )
             ).order_by(desc(MusteringEvent.start_time)).all()
             
@@ -728,16 +728,18 @@ class MusteringDashboardService:
             for zone_id in zone_performance:
                 zone_data = zone_performance[zone_id]
                 if zone_data['events'] > 0:
-                    zone_data['avg_completion_rate'] = sum(
-                        completion_rates[i] 
-                        for i, event in enumerate(events) 
-                        if event.zone_id == zone_id and event.total_expected and event.total_safe
-                    ]) / sum(
-                        total_expecteds[i] 
-                        for i, event in enumerate(events) 
+                    zone_total_expecteds = [
+                        total_expecteds[i]
+                        for i, event in enumerate(events)
                         if event.zone_id == zone_id
-                    )
-                    ) if any(total_expecteds) else 0
+                    ]
+                    zone_data['avg_completion_rate'] = (
+                        sum(
+                            completion_rates[i]
+                            for i, event in enumerate(events)
+                            if event.zone_id == zone_id and event.total_expected and event.total_safe
+                        ) / sum(zone_total_expecteds)
+                    ) if any(zone_total_expecteds) else 0
                 
                 zone_data['avg_utilization'] = 0
                 if zone_data['events'] > 0 and zone.max_capacity:
@@ -754,8 +756,8 @@ class MusteringDashboardService:
                 for zone_id, zone_data in zone_performance.items()
             }
             
-            best_zone_id = max(zone_avg_completion_rates, key=zone_avg_completion_rates.get) if zone_avg_completion_rates else 0)
-            worst_zone_id = min(zone_avg_completion_rates, key=zone_avg_completion_rates.get) if zone_avg_completion_rates else 0)
+            best_zone_id = max(zone_avg_completion_rates, key=zone_avg_completion_rates.get) if zone_avg_completion_rates else 0
+            worst_zone_id = min(zone_avg_completion_rates, key=zone_avg_completion_rates.get) if zone_avg_completion_rates else 0
             
             return {
                 'total_events': total_events,
@@ -771,9 +773,8 @@ class MusteringDashboardService:
                     'completion_rate_trend': 'improving' if self._is_improving_trend(
                         [completion_rates[i] for i in range(len(completion_rates)-3)]
                     ) else 'stable',
-                    'duration_trend': 'improving' if self._is_improving_trend(durations[-3:]) else 'stable'
-                }
-                }
+                    'duration_trend': 'improving' if self._is_improving_trend(durations[-3:]) else 'stable',
+                },
             }
             
         except Exception as e:
@@ -803,7 +804,7 @@ class MusteringDashboardService:
             )
             
             headcount_result = headcount_query.first()
-            missing_rate = (headcount_result.total / event.total_expected) if event.total_expected > 0 else 0)
+            missing_rate = (headcount_result.total / event.total_expected) if event.total_expected > 0 else 0
             
             if missing_rate > 0.3:  # More than 30% missing
                 alerts.append({

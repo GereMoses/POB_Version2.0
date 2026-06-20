@@ -834,7 +834,7 @@ const TimetablesTab = () => {
             <Col span={8}>
               <Form.Item name="work_day" label="Work Day Value" initialValue={1.0}
                 tooltip="1.0 = full day, 0.5 = half day">
-                <InputNumber min={0} max={2} step={0.5} style={{ width: '100%' }} size="middle" addonAfter="×" />
+                <Space.Compact style={{ width: '100%' }}><InputNumber min={0} max={2} step={0.5} size="middle" style={{ flex: 1 }} /><Input readOnly value="×" style={{ width: 36, textAlign: 'center' }} size="middle" /></Space.Compact>
               </Form.Item>
             </Col>
           </Row>
@@ -885,12 +885,12 @@ const TimetablesTab = () => {
           <Row gutter={12}>
             <Col span={12}>
               <Form.Item name="late_minutes" label="Late Grace (min)" initialValue={0}>
-                <InputNumber min={0} max={120} style={{ width: '100%' }} size="middle" addonAfter="min" />
+                <Space.Compact style={{ width: '100%' }}><InputNumber min={0} max={120} size="middle" style={{ flex: 1 }} /><Input readOnly value="min" style={{ width: 44, textAlign: 'center' }} size="middle" /></Space.Compact>
               </Form.Item>
             </Col>
             <Col span={12}>
               <Form.Item name="early_minutes" label="Early Exit Grace (min)" initialValue={0}>
-                <InputNumber min={0} max={120} style={{ width: '100%' }} size="middle" addonAfter="min" />
+                <Space.Compact style={{ width: '100%' }}><InputNumber min={0} max={120} size="middle" style={{ flex: 1 }} /><Input readOnly value="min" style={{ width: 44, textAlign: 'center' }} size="middle" /></Space.Compact>
               </Form.Item>
             </Col>
           </Row>

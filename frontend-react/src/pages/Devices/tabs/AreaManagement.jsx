@@ -54,7 +54,7 @@ const AreaManagement = () => {
   const fetchDevices = async () => {
     try {
       const res = await deviceAPI.getTerminals({ limit: 500 });
-      setDevices(res || []);
+      setDevices(Array.isArray(res) ? res : (res?.data || []));
     } catch {
       /* non-critical */
     }
