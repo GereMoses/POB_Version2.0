@@ -184,7 +184,7 @@ const Login = ({ onLogin }) => {
           }} />
         ))}
 
-        {/* Top: MtxTech-Pro Logo */}
+        {/* Top: Apex POB (application) logo */}
         <div style={{ position: 'relative', zIndex: 2 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 18, marginBottom: 6 }}>
             <div style={{
@@ -197,17 +197,17 @@ const Login = ({ onLogin }) => {
               justifyContent: 'center',
             }}>
               <img
-                src="/logo/mtxtechpro.png"
-                alt="MtxTech-Pro"
+                src="/logo/apex-pob.png"
+                alt="Apex POB"
                 style={{ height: 44, width: 'auto', display: 'block' }}
               />
             </div>
             <div>
               <div style={{ color: 'white', fontSize: 18, fontWeight: 800, letterSpacing: '-0.2px', lineHeight: 1.2 }}>
-                MtxTech-Pro
+                Apex POB
               </div>
               <div style={{ color: 'rgba(255,255,255,0.4)', fontSize: 10, letterSpacing: '0.14em', textTransform: 'uppercase', marginTop: 3 }}>
-                mtxtechpro.ng
+                Personnel On Board
               </div>
             </div>
           </div>
@@ -349,8 +349,8 @@ const Login = ({ onLogin }) => {
               marginBottom: 18,
             }}>
               <img
-                src="/logo/apex-pob.png"
-                alt="Marconi"
+                src="/logo/image.png"
+                alt="Marconi.ng EPC Limited"
                 style={{
                   height: 72, width: 'auto',
                   filter: 'drop-shadow(0 4px 12px rgba(0,120,60,0.18))',
@@ -526,18 +526,10 @@ const Login = ({ onLogin }) => {
         {/* Footer */}
         <div style={{ marginTop: 28, textAlign: 'center' }}>
           <div style={{ color: '#94a3b8', fontSize: 12 }}>
-            © {year} MtxTech-Pro · All rights reserved
+            © {year} Apex POB · All rights reserved
           </div>
           <div style={{ fontSize: 11, marginTop: 4 }}>
-            <a
-              href="https://mtxtechpro.ng"
-              target="_blank"
-              rel="noopener noreferrer"
-              style={{ color: '#4f8ef7', textDecoration: 'none' }}
-            >
-              mtxtechpro.ng
-            </a>
-            <span style={{ color: '#cbd5e1' }}> · Apex POB v2.0 · Marconi.ng EPC Limited</span>
+            <span style={{ color: '#cbd5e1' }}>Apex POB v2.0 · Deployed for Marconi.ng EPC Limited</span>
           </div>
         </div>
       </div>

@@ -3,12 +3,12 @@
   "name": "Apex POB — Marconi.ng EPC Limited",
   "icons": [
     {
-      "src": "/logo/apex-pob.png",
+      "src": "/logo/image.png",
       "sizes": "192x192",
       "type": "image/png"
     },
     {
-      "src": "/logo/apex-pob.png",
+      "src": "/logo/image.png",
       "sizes": "512x512",
       "type": "image/png"
     }

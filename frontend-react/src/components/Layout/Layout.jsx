@@ -1016,7 +1016,7 @@ const Layout = ({ user, onLogout, children }) => {
           borderBottom: `1px solid ${SIDEBAR.border}`,
           gap: 10, flexShrink: 0,
         }}>
-          <img src="/logo/apex-pob.png" alt="Apex POB"
+          <img src="/logo/image.png" alt="Marconi.ng EPC Limited"
             style={{ width: collapsed ? 32 : 36, height: collapsed ? 32 : 36,
               borderRadius: 6, objectFit: 'contain', flexShrink: 0, background: '#fff', padding: 2 }} />
           {!collapsed && (
