@@ -9,6 +9,9 @@ import {
   SyncOutlined, LoginOutlined, LogoutOutlined, ThunderboltOutlined,
 } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
+import L from 'leaflet';
+import 'leaflet/dist/leaflet.css';
 import apiService from '../../services/api';
 
 const MAP_KEY = 'pob-map-image';
@@ -22,6 +25,75 @@ const DEFAULT_TILE_COLORS = {
 };
 
 const tileColor = z => z.display_color || DEFAULT_TILE_COLORS[z.zone_type] || '#52c41a';
+
+/* ── Live zone map (replaces the static country image) ──────────────────────── */
+const _miniIcon = (zone, count) => {
+  const color = tileColor(zone);
+  const size = 38;
+  const label = zone.name.length > 18 ? zone.name.slice(0, 16) + '…' : zone.name;
+  return L.divIcon({
+    className: '',
+    html: `
+      <div style="text-align:center;cursor:pointer;">
+        <div style="width:${size}px;height:${size}px;background:linear-gradient(135deg,${color}dd,${color});border-radius:50%;border:2px solid #fff;box-shadow:0 2px 10px rgba(0,0,0,0.4);display:flex;align-items:center;justify-content:center;margin:0 auto;">
+          <span style="color:#fff;font-weight:900;font-size:${count >= 100 ? 11 : 14}px;text-shadow:0 1px 3px rgba(0,0,0,0.4);">${count}</span>
+        </div>
+        <div style="background:rgba(15,20,35,0.82);color:#fff;font-size:9px;font-weight:700;padding:2px 6px;border-radius:3px;margin-top:4px;display:inline-block;max-width:140px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-bottom:2px solid ${color};">${label}</div>
+      </div>`,
+    iconSize: [120, 60], iconAnchor: [60, 19], popupAnchor: [0, -30],
+  });
+};
+
+const FitToZones = ({ coords }) => {
+  const map = useMap();
+  useEffect(() => {
+    const c = map.getContainer();
+    if (!c || typeof ResizeObserver === 'undefined') return;
+    let had = false;
+    const ro = new ResizeObserver(() => {
+      const r = c.getBoundingClientRect();
+      const has = r.width > 0 && r.height > 0;
+      if (has && !had) map.invalidateSize();
+      had = has;
+    });
+    ro.observe(c);
+    return () => ro.disconnect();
+  }, [map]);
+  useEffect(() => {
+    if (!coords.length) return;
+    const go = () => { try { map.fitBounds(coords, { padding: [50, 50], maxZoom: 14, animate: false }); } catch (_) {} };
+    const s = map.getSize();
+    if (s && s.x > 0) go(); else { map.once('resize', go); return () => map.off('resize', go); }
+  }, [coords, map]); // eslint-disable-line
+  return null;
+};
+
+const LiveZoneMap = ({ zones, getCount, onZoneClick }) => {
+  const pts = zones.filter(z => !isNaN(parseFloat(z.latitude)) && !isNaN(parseFloat(z.longitude)));
+  const coords = pts.map(z => [parseFloat(z.latitude), parseFloat(z.longitude)]);
+  const center = coords.length ? coords[0] : [9.08, 8.68]; // Nigeria fallback
+  return (
+    <MapContainer center={center} zoom={11} style={{ width: '100%', height: '100%' }}
+      scrollWheelZoom attributionControl={false} preferCanvas>
+      <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" maxZoom={19} />
+      <FitToZones coords={coords} />
+      {pts.map(z => {
+        const c = getCount(z);
+        return (
+          <Marker key={z.id} position={[parseFloat(z.latitude), parseFloat(z.longitude)]}
+            icon={_miniIcon(z, c)} eventHandlers={{ click: () => onZoneClick?.(z) }}>
+            <Popup>
+              <div style={{ fontWeight: 700, fontSize: 13 }}>{z.name}</div>
+              <div style={{ fontSize: 12, color: '#6B7280', marginTop: 2 }}>
+                {(z.zone_type || '').replace('_', ' ')} · <b style={{ color: '#111827' }}>{c}</b> on board
+              </div>
+            </Popup>
+          </Marker>
+        );
+      })}
+    </MapContainer>
+  );
+};
 
 const POSITION_ITEMS = [
   { key: 'left',   label: 'Left',   icon: <VerticalRightOutlined /> },
@@ -307,6 +379,8 @@ const CountryOverview = ({ topLevelZones, totalPOB, byParent, onSelectZone, getC
   const pobInRight  = !pobInLeft && finalRight.length > 0;
   const pobOnMap    = !pobInLeft && !pobInRight;
 
+  const allZonesFlat = [...topLevelZones, ...Object.values(byParent || {}).flat()];
+
   const renderTile = (z) => {
     const hasChildren = (byParent[String(z.id)] || []).length > 0;
     const isCard = finalLeft.includes(z);
@@ -323,26 +397,11 @@ const CountryOverview = ({ topLevelZones, totalPOB, byParent, onSelectZone, getC
 
   return (
     <div>
-      {/* Hidden file input */}
-      <input ref={mapInputRef} type="file" accept="image/*" style={{ display:'none' }} onChange={handleMapUpload} />
-
       {/* Controls row */}
       <div style={{ display:'flex',alignItems:'center',gap:10,marginBottom:8,flexWrap:'wrap' }}>
         <span style={{ fontSize:11,color:'#6B7280' }}>
-          Hover any tile → <MoreOutlined /> to change its position
+          Live map — markers show personnel on board per zone · click a marker or tile to drill in · hover a tile → <MoreOutlined /> to reposition
         </span>
-        <Tooltip title="Replace the Nigeria map with your own image (stored locally in browser)">
-          <Button size="small" icon={<UploadOutlined />} onClick={() => mapInputRef.current?.click()}>
-            Upload Map
-          </Button>
-        </Tooltip>
-        {mapIsCustom && (
-          <Tooltip title="Revert to the default Nigeria map">
-            <Button size="small" icon={<DeleteOutlined />} danger onClick={removeCustomMap}>
-              Remove Custom Map
-            </Button>
-          </Tooltip>
-        )}
       </div>
 
       {/* ── Top row ── */}
@@ -363,31 +422,20 @@ const CountryOverview = ({ topLevelZones, totalPOB, byParent, onSelectZone, getC
           </div>
         )}
 
-        {/* Center — Nigeria map */}
+        {/* Center — live zone map (markers = live POB per zone) */}
         <div style={{
-          flex:'0 1 auto', minWidth:0, height:'100%', position:'relative',
-          display:'flex', alignItems:'center', justifyContent:'center',
+          flex:1, minWidth:0, height:'100%', position:'relative',
           borderRadius:16, overflow:'hidden',
           border:'1px solid rgba(255,255,255,0.6)',
-          boxShadow:'0 8px 32px rgba(15,23,42,0.12), inset 0 1px 0 rgba(255,255,255,0.5)',
-          background:'rgba(255,255,255,0.42)',
-          backdropFilter:'blur(18px) saturate(160%)', WebkitBackdropFilter:'blur(18px) saturate(160%)',
+          boxShadow:'0 8px 32px rgba(15,23,42,0.12)',
         }}>
-          <img
-            src={mapSrc} alt="Nigeria"
-            style={{ height:'100%', width:'auto', maxWidth:'100%', objectFit:'contain', display:'block', pointerEvents:'none' }}
-            onError={e => {
-              e.target.style.display = 'none';
-              e.target.insertAdjacentHTML('afterend', `
-                <div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;">
-                  <span style="font-size:48px">🗺️</span>
-                  <span style="font-size:13px;color:#6B7280;font-weight:600">Map not found</span>
-                  <code style="font-size:11px;color:#13c2c2;background:#1F2937;padding:3px 10px;border-radius:4px">public/image.png</code>
-                </div>`);
-            }}
+          <LiveZoneMap
+            zones={allZonesFlat}
+            getCount={gc}
+            onZoneClick={(z) => ((byParent[String(z.id)] || []).length > 0 ? onSelectZone(z) : onViewPersonnel?.(z))}
           />
           {pobOnMap && (
-            <div style={{ position:'absolute',top:10,left:'50%',transform:'translateX(-50%)',zIndex:10 }}>
+            <div style={{ position:'absolute', top:10, left:'50%', transform:'translateX(-50%)', zIndex:1000, pointerEvents:'none' }}>
               <PobCounter totalPOB={totalPOB} />
             </div>
           )}
