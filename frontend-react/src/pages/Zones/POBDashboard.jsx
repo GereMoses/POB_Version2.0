@@ -366,10 +366,11 @@ const CountryOverview = ({ topLevelZones, totalPOB, byParent, onSelectZone, getC
         {/* Center — Nigeria map */}
         <div style={{
           flex:1, minWidth:0, position:'relative',
-          borderRadius:10, overflow:'hidden',
-          border:'3px solid #92400E',
-          boxShadow:'0 6px 28px rgba(0,0,0,0.3)',
-          background:'#f0ece0',
+          borderRadius:16, overflow:'hidden',
+          border:'1px solid rgba(255,255,255,0.6)',
+          boxShadow:'0 8px 32px rgba(15,23,42,0.12), inset 0 1px 0 rgba(255,255,255,0.5)',
+          background:'rgba(255,255,255,0.42)',
+          backdropFilter:'blur(18px) saturate(160%)', WebkitBackdropFilter:'blur(18px) saturate(160%)',
         }}>
           <img
             src={mapSrc} alt="Nigeria"
@@ -427,7 +428,7 @@ const ZoneDetailView = ({ zone, subZones, onBack, onDrillDown, byParent, getCoun
   const zonePOB     = subZones.reduce((s, z) => s + gc(z), gc(zone));
 
   return (
-    <div style={{ background:'#ECEFF4',borderRadius:10,padding:12 }}>
+    <div style={{ background:'rgba(255,255,255,0.5)', backdropFilter:'blur(18px) saturate(160%)', WebkitBackdropFilter:'blur(18px) saturate(160%)', border:'1px solid rgba(255,255,255,0.6)', borderRadius:16, padding:12, boxShadow:'0 8px 32px rgba(15,23,42,0.1)' }}>
       {/* Header */}
       <div style={{ display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:10 }}>
         <Button icon={<ArrowLeftOutlined />} size="small" onClick={onBack} style={{ borderRadius:6,fontWeight:600 }}>
@@ -788,7 +789,13 @@ const POBDashboard = ({ onRefreshDash }) => {
   }[wsStatus];
 
   return (
-    <div>
+    <div style={{ position:'relative', overflow:'hidden', borderRadius:20, padding:'14px 16px',
+      background:'linear-gradient(180deg,#e7edf5 0%,#eef2f8 50%,#f3eef9 100%)' }}>
+      {/* glassy colour blobs */}
+      <div style={{ position:'absolute', width:360, height:360, top:-90, left:-50, borderRadius:'50%', filter:'blur(72px)', opacity:.5, background:'radial-gradient(circle,#22d3ee,transparent 70%)', pointerEvents:'none' }} />
+      <div style={{ position:'absolute', width:420, height:420, top:120, right:-110, borderRadius:'50%', filter:'blur(72px)', opacity:.5, background:'radial-gradient(circle,#818cf8,transparent 70%)', pointerEvents:'none' }} />
+      <div style={{ position:'absolute', width:340, height:340, bottom:-120, left:'35%', borderRadius:'50%', filter:'blur(72px)', opacity:.38, background:'radial-gradient(circle,#f472b6,transparent 70%)', pointerEvents:'none' }} />
+      <div style={{ position:'relative', zIndex:1 }}>
       {/* Header bar */}
       <div style={{ display:'flex',justifyContent:'flex-end',alignItems:'center',gap:10,marginBottom:8 }}>
         <Tooltip title={`WebSocket: ${wsStyle.label}`}>
@@ -832,6 +839,7 @@ const POBDashboard = ({ onRefreshDash }) => {
         onClose={() => setPersonnelDrawerZone(null)}
       />
 
+      </div>
       <style>{`
         @keyframes pobWsPulse {
           0%,100% { opacity:1; transform:scale(1); }

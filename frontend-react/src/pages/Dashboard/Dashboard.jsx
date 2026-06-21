@@ -398,6 +398,19 @@ export default function Dashboard() {
               </div>
             </div>
           </div>
+          {/* today flow strip — fills the tall hero with useful at-a-glance numbers */}
+          <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+            {[
+              { l: 'Today In', v: todayIns, c: '#34d399' },
+              { l: 'Today Out', v: todayOuts, c: '#60a5fa' },
+              { l: 'On Site Now', v: Math.max(todayIns - todayOuts, 0), c: '#fbbf24' },
+            ].map(s => (
+              <div key={s.l} style={{ flex: 1, background: 'rgba(255,255,255,0.08)', borderRadius: 12, padding: '9px 6px', textAlign: 'center' }}>
+                <div style={{ fontSize: 19, fontWeight: 900, color: s.c }}>{s.v}</div>
+                <div style={{ fontSize: 9, opacity: .65, letterSpacing: '.4px' }}>{s.l.toUpperCase()}</div>
+              </div>
+            ))}
+          </div>
         </div>
 
         {/* ── KPI tiles ── */}
