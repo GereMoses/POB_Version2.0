@@ -258,14 +258,12 @@ def get_dashboard(db: Session = Depends(get_db), _=Depends(get_current_user)):
         d["last_activity_time"] = last_punch.isoformat() if last_punch else None
         d["last_activity_emp"] = last_emp
 
-        # Write live count back to DB so stored value stays in sync
-        if z.current_personnel_count != live:
-            z.current_personnel_count = live
-            z.current_occupancy = live
-
         result.append(d)
 
-    db.commit()
+    # Read-only endpoint: the stored current_personnel_count is maintained by the
+    # punch path (_recalc_zone_occupancy). We intentionally do NOT write it back
+    # here — a GET must not mutate the DB (avoids lock contention with live punches
+    # and the dual-writer conflict with _recalc).
     return result
 
 
@@ -1004,7 +1002,7 @@ def push_to_biotime(
 # ── Live zone WebSocket ───────────────────────────────────────────────────────
 
 @router.websocket("/ws")
-async def zone_live_ws(websocket: WebSocket, db: Session = Depends(get_db)):
+async def zone_live_ws(websocket: WebSocket):
     """
     WebSocket endpoint for live zone occupancy.
     On connect: sends a snapshot of all zone counts.
@@ -1013,15 +1011,22 @@ async def zone_live_ws(websocket: WebSocket, db: Session = Depends(get_db)):
     """
     await zone_ws_connect(websocket)
     try:
-        # Send initial snapshot so the dashboard populates instantly
-        rows = db.execute(text(
-            "SELECT id, name, current_personnel_count FROM zones WHERE is_active = true ORDER BY name"
-        )).fetchall()
-        snapshot = [
-            {"type": "zone_snapshot", "zone_id": r.id,
-             "count": int(r.current_personnel_count or 0), "zone_name": r.name}
-            for r in rows
-        ]
+        # Use a SHORT-LIVED session for the snapshot only. Do NOT hold a pooled DB
+        # connection (Depends(get_db)) for the whole WS lifetime — with several
+        # dashboard viewers open that would exhaust the connection pool.
+        from ..core.database import SessionLocal
+        snap_db = SessionLocal()
+        try:
+            rows = snap_db.execute(text(
+                "SELECT id, name, current_personnel_count FROM zones WHERE is_active = true ORDER BY name"
+            )).fetchall()
+            snapshot = [
+                {"type": "zone_snapshot", "zone_id": r.id,
+                 "count": int(r.current_personnel_count or 0), "zone_name": r.name}
+                for r in rows
+            ]
+        finally:
+            snap_db.close()
         await websocket.send_text(json.dumps(snapshot))
 
         # Keep connection open; broadcasts arrive via broadcast_zone_update()

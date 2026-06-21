@@ -316,9 +316,18 @@ def build_options_block(terminal: IClockTerminal, pushver: str) -> str:
 def _parse_punch_time(time_str: str) -> Optional[datetime]:
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S.%f"):
         try:
-            return datetime.strptime(time_str, fmt).replace(tzinfo=timezone.utc)
+            dt = datetime.strptime(time_str, fmt).replace(tzinfo=timezone.utc)
         except (ValueError, TypeError):
             continue
+        # Reject implausible timestamps from devices with a misconfigured clock
+        # (e.g. year 2103). A future-dated punch is permanently "newest", which
+        # breaks every latest-punch query (zone occupancy, attendance) forever —
+        # better to drop it than poison the data. The device clock is corrected via
+        # DateTime= on the next heartbeat, so real punches resume normally.
+        now = datetime.now(timezone.utc)
+        if dt.year < 2015 or dt.year > now.year + 1:
+            return None
+        return dt
     return None
 
 
@@ -1180,11 +1189,23 @@ def _update_zone_personnel_count(
     is_entry = punch_state in (0, 4)
     event_type = "CLOCK_IN" if is_entry else "CLOCK_OUT"
 
+    # Where is this person currently "inside"? (their most recent tracking event)
     prev_row = db.execute(text("""
-        SELECT zone_id FROM zone_personnel_tracking
+        SELECT zone_id, event_type FROM zone_personnel_tracking
         WHERE emp_code = :emp_code ORDER BY punch_time DESC LIMIT 1
     """), {"emp_code": emp_code}).fetchone()
     previous_zone_id = prev_row.zone_id if prev_row else None
+    previously_inside = bool(prev_row) and prev_row.event_type == 'CLOCK_IN'
+
+    # Entering a different zone → auto-exit the previous one so the person is only
+    # counted in ONE place at a time. Without this CLOCK_OUT they stay 'CLOCK_IN'
+    # in the old zone and get double-counted (mirrors _handle_zone_access).
+    if is_entry and previously_inside and previous_zone_id and previous_zone_id != zone_id:
+        db.execute(text("""
+            INSERT INTO zone_personnel_tracking
+                (zone_id, emp_code, device_sn, event_type, punch_time, previous_zone_id)
+            VALUES (:zid, :ec, :sn, 'CLOCK_OUT', :pt, :zid)
+        """), {"zid": previous_zone_id, "ec": emp_code, "sn": device_sn, "pt": punch_time})
 
     db.execute(text("""
         INSERT INTO zone_personnel_tracking
