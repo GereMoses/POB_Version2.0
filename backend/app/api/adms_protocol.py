@@ -352,6 +352,16 @@ def handle_attlog(records: List[Dict], sn: str, db: Session) -> Tuple[int, int, 
     reader_purpose = (terminal.reader_purpose if terminal and terminal.reader_purpose
                       else 'ATTENDANCE')
 
+    # Reader's zone name — stamped onto personnel.current_location on check-in so the
+    # POB dashboard's location breakdown is meaningful.
+    zone_name = None
+    if terminal and getattr(terminal, "zone_id", None):
+        try:
+            _zr = db.execute(text("SELECT name FROM zones WHERE id = :z"), {"z": terminal.zone_id}).fetchone()
+            zone_name = _zr.name if _zr else None
+        except Exception:
+            zone_name = None
+
     # Check mustering mode for this device once
     acc_door = db.query(AccDoor).filter(AccDoor.terminal_sn == sn).first()
     mustering_mode = acc_door and getattr(acc_door, 'mustering_mode', False)
@@ -385,6 +395,12 @@ def handle_attlog(records: List[Dict], sn: str, db: Session) -> Tuple[int, int, 
                 logger.debug(f"Zone access {direction}: {emp_code}@{sn} zone={terminal.zone_id}")
             except Exception as e:
                 logger.error(f"Zone access error {emp_code}@{sn}: {e}")
+            # Entering a zone → person is on site. Don't flip to off-board on a zone
+            # EXIT (could be moving between zones); ATTENDANCE check-out is the off signal.
+            try:
+                _mark_onboard(emp_code, True if direction == 'ENTRY' else None, db, location=zone_name)
+            except Exception as oe:
+                logger.warning(f"Onboard status non-fatal error: {oe}")
             # Force punch direction so T&A calculation is unambiguous
             forced_state = 0 if reader_purpose == 'ACCESS_ENTRY' else 1
             try:
@@ -498,6 +514,13 @@ def handle_attlog(records: List[Dict], sn: str, db: Session) -> Tuple[int, int, 
                 _update_zone_personnel_count(emp_code, sn, punch_state, punch_time, db)
             except Exception as ze:
                 logger.warning(f"Zone tracking non-fatal error: {ze}")
+
+            # Maintain on-board status so the POB dashboard reflects reality.
+            try:
+                _onb = True if punch_state in (0, 4) else (False if punch_state in (1, 5) else None)
+                _mark_onboard(emp_code, _onb, db, location=zone_name)
+            except Exception as oe:
+                logger.warning(f"Onboard status non-fatal error: {oe}")
 
         except Exception as e:
             logger.error(f"ATTLOG save error {emp_code}@{sn}: {e}")
@@ -1223,6 +1246,40 @@ def _update_zone_personnel_count(
 
     db.commit()
     logger.debug(f"Zone {zone_id} updated after {event_type} by {emp_code}")
+
+
+def _mark_onboard(emp_code: str, onboard, db: Session, location: "Optional[str]" = None) -> None:
+    """
+    Maintain personnel.is_onboard from an attendance/access punch so the POB
+    dashboard, reports and analytics reflect who is actually on site.
+      onboard = True  → checked in / entered  → on board
+      onboard = False → checked out           → off board
+      onboard = None  → leave unchanged (break punches, zone-to-zone exits, unknown state)
+    """
+    if onboard is None:
+        return
+    try:
+        if onboard:
+            db.execute(text("""
+                UPDATE personnel SET
+                    is_onboard = TRUE, is_pob = TRUE,
+                    pob_since = COALESCE(pob_since, NOW()),
+                    current_location = COALESCE(:loc, current_location),
+                    last_seen = NOW(), updated_at = NOW()
+                WHERE (emp_code = :ec OR badge_id = :ec) AND is_active = TRUE
+            """), {"ec": emp_code, "loc": location})
+        else:
+            db.execute(text("""
+                UPDATE personnel SET
+                    is_onboard = FALSE, is_pob = FALSE, pob_since = NULL,
+                    last_seen = NOW(), updated_at = NOW()
+                WHERE (emp_code = :ec OR badge_id = :ec) AND is_active = TRUE
+            """), {"ec": emp_code})
+        db.commit()
+    except Exception as e:
+        logger.warning("onboard status update failed for %s: %s", emp_code, e)
+        db.rollback()
+
 
 # ── Core ADMS endpoint ────────────────────────────────────────────────────────
 
