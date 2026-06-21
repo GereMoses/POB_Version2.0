@@ -89,6 +89,53 @@ def build_daily_attendance(db: Session, sync_date: date) -> List[Dict[str, Any]]
     return records
 
 
+# ── Per-(employee, date) dedup so a re-run/retry cannot double-post to payroll ──
+# `table` is always a code-controlled literal ('bc_synced_records' / 'hr_synced_records'),
+# never user input, so it is safe to interpolate.
+
+def _ensure_dedup_table(db: Session, table: str) -> None:
+    db.execute(text(f"""
+        CREATE TABLE IF NOT EXISTS {table} (
+            emp_code  VARCHAR(100) NOT NULL,
+            sync_date DATE         NOT NULL,
+            sent_at   TIMESTAMPTZ  DEFAULT NOW(),
+            PRIMARY KEY (emp_code, sync_date)
+        )
+    """))
+    db.commit()
+
+
+def already_synced_codes(db: Session, table: str, sync_date: date) -> set:
+    """Return the set of emp_codes already successfully sent for this date."""
+    try:
+        _ensure_dedup_table(db, table)
+        rows = db.execute(
+            text(f"SELECT emp_code FROM {table} WHERE sync_date = :d"), {"d": sync_date}
+        ).fetchall()
+        return {r[0] for r in rows}
+    except Exception as e:
+        logger.warning("dedup read failed for %s: %s", table, e)
+        return set()
+
+
+def mark_synced(db: Session, table: str, sync_date: date, emp_codes) -> None:
+    """Record emp_codes as successfully sent for this date (idempotent upsert)."""
+    codes = [c for c in (emp_codes or []) if c]
+    if not codes:
+        return
+    try:
+        _ensure_dedup_table(db, table)
+        for ec in codes:
+            db.execute(text(
+                f"INSERT INTO {table} (emp_code, sync_date) VALUES (:e, :d) "
+                f"ON CONFLICT (emp_code, sync_date) DO NOTHING"
+            ), {"e": ec, "d": sync_date})
+        db.commit()
+    except Exception as e:
+        logger.warning("dedup write failed for %s: %s", table, e)
+        db.rollback()
+
+
 # ── Integration base-URL safety (SSRF + TLS enforcement) ──────────────────────
 
 class IntegrationUrlError(ValueError):

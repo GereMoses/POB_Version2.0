@@ -177,4 +177,9 @@ class TestBusinessCentralPayload:
         assert entries[0]["employeeNumber"] == "EMP001"
         # 600 work + 60 OT = 660 min = 11.0 h
         assert entries[0]["quantity"] == 11.0
-        assert entries[0]["idempotencyKey"] == "pob-EMP001-2026-06-06"
+        # Idempotency key is kept INTERNAL (underscore-prefixed) ...
+        assert entries[0]["_idempotency_key"] == "pob-EMP001-2026-06-06"
+        # ... and must NOT be sent to BC — its OData API rejects unknown fields (400).
+        payload = {k: v for k, v in entries[0].items() if not k.startswith("_")}
+        assert "idempotencyKey" not in payload
+        assert "_idempotency_key" not in payload

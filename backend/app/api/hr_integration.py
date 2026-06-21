@@ -52,6 +52,8 @@ class ConfigIn(BaseModel):
 
 class SyncIn(BaseModel):
     sync_date: Optional[str] = None   # YYYY-MM-DD, defaults to yesterday
+    force: bool = False               # re-send even if already sent (admin correction)
+    allow_today: bool = False         # permit syncing a not-yet-finalized day
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -190,7 +192,8 @@ async def manual_sync(
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid date format — use YYYY-MM-DD")
 
-    result = await push_attendance(db, sync_date=sync_date, triggered_by=current_user.email)
+    result = await push_attendance(db, sync_date=sync_date, triggered_by=current_user.email,
+                                   force=body.force, allow_today=body.allow_today)
     return result
 
 

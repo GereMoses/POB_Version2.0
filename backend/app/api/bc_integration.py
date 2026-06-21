@@ -52,6 +52,8 @@ class BCConfigIn(BaseModel):
 
 class SyncIn(BaseModel):
     sync_date: Optional[str] = None
+    force: bool = False         # re-send even if already sent (admin correction)
+    allow_today: bool = False   # permit syncing a not-yet-finalized day
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -192,7 +194,8 @@ async def manual_sync(
             sync_date = date.fromisoformat(body.sync_date)
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid date — use YYYY-MM-DD")
-    return await push_attendance(db, sync_date=sync_date, triggered_by=current_user.email)
+    return await push_attendance(db, sync_date=sync_date, triggered_by=current_user.email,
+                                 force=body.force, allow_today=body.allow_today)
 
 
 # ── Sync history ──────────────────────────────────────────────────────────────
@@ -350,5 +353,6 @@ async def trigger_today_sync(
     cfg = get_bc_config(db)
     if not cfg or not cfg.get("is_enabled"):
         raise HTTPException(status_code=400, detail="BC integration not configured or disabled")
-    result = await push_attendance(db, sync_date=date.today(), triggered_by=current_user.email)
+    result = await push_attendance(db, sync_date=date.today(), triggered_by=current_user.email,
+                                   allow_today=True)
     return result

@@ -241,7 +241,9 @@ def _build_time_entries(db: Session, sync_date: date) -> List[Dict]:
             "date":            str(c["att_date"]),
             "quantity":        hours,
             "status":          "Open",
-            "idempotencyKey":  c["idempotency_key"],
+            # Internal only (underscore-prefixed → stripped before POST). Business Central's
+            # OData API has no idempotencyKey property and returns 400 for unknown fields.
+            "_idempotency_key": c["idempotency_key"],
             "_clock_in":       c["check_in"].isoformat() if c["check_in"] else None,
             "_clock_out":      c["check_out"].isoformat() if c["check_out"] else None,
         })
@@ -252,9 +254,16 @@ async def push_attendance(
     db: Session,
     sync_date: Optional[date] = None,
     triggered_by: str = "scheduler",
+    force: bool = False,
+    allow_today: bool = False,
 ) -> Dict[str, Any]:
     """
     Build time entries for sync_date (defaults to yesterday) and POST to BC.
+
+    Idempotency: each (employee, date) is posted at most once — already-sent records are
+    skipped so a re-run/retry/manual+scheduler overlap cannot double-post to finance.
+      • force=True       — re-send even if already sent (admin correction; may duplicate).
+      • allow_today=True — permit syncing a not-yet-finalized day (today/future).
     """
     if sync_date is None:
         sync_date = date.today() - timedelta(days=1)
@@ -287,6 +296,13 @@ async def push_attendance(
         _log_sync(db, result)
         return result
 
+    # Don't post a not-yet-finalized day (today/future) to finance unless explicitly allowed.
+    if not allow_today and not force and sync_date >= date.today():
+        result["status"]  = "skipped"
+        result["message"] = f"{sync_date} is not finalized yet — payroll syncs after the day closes"
+        _log_sync(db, result)
+        return result
+
     entries = _build_time_entries(db, sync_date)
     result["records_built"] = len(entries)
 
@@ -295,6 +311,18 @@ async def push_attendance(
         result["message"] = f"No attendance records found for {sync_date}"
         _log_sync(db, result)
         return result
+
+    # Idempotency: drop employee-days already sent for this date (unless force re-send).
+    if not force:
+        from .attendance_export import already_synced_codes
+        done = already_synced_codes(db, "bc_synced_records", sync_date)
+        if done:
+            entries = [e for e in entries if e["employeeNumber"] not in done]
+        if not entries:
+            result["status"]  = "success"
+            result["message"] = f"All records for {sync_date} already synced — nothing new to send"
+            _log_sync(db, result)
+            return result
 
     token, err = await _get_token(cfg)
     if err:
@@ -306,6 +334,7 @@ async def push_attendance(
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
     sent = failed = 0
+    sent_codes = []
     client = await _get_http_client()
     for entry in entries:
         # Strip internal fields before sending
@@ -314,6 +343,7 @@ async def push_attendance(
             resp = await client.post(url, json=payload, headers=headers)
             if resp.status_code in (200, 201, 204):
                 sent += 1
+                sent_codes.append(entry["employeeNumber"])
             else:
                 logger.warning(
                     "BC rejected entry for %s: HTTP %s — %s",
@@ -323,6 +353,11 @@ async def push_attendance(
         except httpx.RequestError as e:
             logger.error("BC request error for %s: %s", entry.get("employeeNumber"), e)
             failed += 1
+
+    # Record successfully-sent employee-days so a re-run cannot double-post them.
+    if sent_codes:
+        from .attendance_export import mark_synced
+        mark_synced(db, "bc_synced_records", sync_date, sent_codes)
 
     result["records_sent"]   = sent
     result["records_failed"] = failed
