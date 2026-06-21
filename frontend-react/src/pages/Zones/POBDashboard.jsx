@@ -68,30 +68,64 @@ const FitToZones = ({ coords }) => {
   return null;
 };
 
+/* Free basemaps — no API key required */
+const BASEMAPS = {
+  light:     { label: 'Light',     url: 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', sub: ['a', 'b', 'c', 'd'] },
+  street:    { label: 'Street',    url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',              sub: ['a', 'b', 'c'] },
+  satellite: { label: 'Satellite', url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', sub: [] },
+};
+
 const LiveZoneMap = ({ zones, getCount, onZoneClick }) => {
+  const [bm, setBm] = useState(() => localStorage.getItem('pob-basemap') || 'light');
   const pts = zones.filter(z => !isNaN(parseFloat(z.latitude)) && !isNaN(parseFloat(z.longitude)));
   const coords = pts.map(z => [parseFloat(z.latitude), parseFloat(z.longitude)]);
   const center = coords.length ? coords[0] : [9.08, 8.68]; // Nigeria fallback
+  const tile = BASEMAPS[bm] || BASEMAPS.light;
+  const pick = (k) => { setBm(k); localStorage.setItem('pob-basemap', k); };
+
   return (
-    <MapContainer center={center} zoom={11} style={{ width: '100%', height: '100%' }}
-      scrollWheelZoom attributionControl={false} preferCanvas>
-      <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" maxZoom={19} />
-      <FitToZones coords={coords} />
-      {pts.map(z => {
-        const c = getCount(z);
-        return (
-          <Marker key={z.id} position={[parseFloat(z.latitude), parseFloat(z.longitude)]}
-            icon={_miniIcon(z, c)} eventHandlers={{ click: () => onZoneClick?.(z) }}>
-            <Popup>
-              <div style={{ fontWeight: 700, fontSize: 13 }}>{z.name}</div>
-              <div style={{ fontSize: 12, color: '#6B7280', marginTop: 2 }}>
-                {(z.zone_type || '').replace('_', ' ')} · <b style={{ color: '#111827' }}>{c}</b> on board
-              </div>
-            </Popup>
-          </Marker>
-        );
-      })}
-    </MapContainer>
+    <div style={{ position: 'relative', width: '100%', height: '100%' }}>
+      <MapContainer center={center} zoom={11} style={{ width: '100%', height: '100%' }}
+        scrollWheelZoom attributionControl={false} preferCanvas>
+        <TileLayer key={bm} url={tile.url} subdomains={tile.sub} maxZoom={19} />
+        <FitToZones coords={coords} />
+        {pts.map(z => {
+          const c = getCount(z);
+          return (
+            <Marker key={z.id} position={[parseFloat(z.latitude), parseFloat(z.longitude)]}
+              icon={_miniIcon(z, c)} eventHandlers={{ click: () => onZoneClick?.(z) }}>
+              <Popup>
+                <div style={{ fontWeight: 700, fontSize: 13 }}>{z.name}</div>
+                <div style={{ fontSize: 12, color: '#6B7280', marginTop: 2 }}>
+                  {(z.zone_type || '').replace('_', ' ')} · <b style={{ color: '#111827' }}>{c}</b> on board
+                </div>
+              </Popup>
+            </Marker>
+          );
+        })}
+      </MapContainer>
+
+      {/* Basemap switcher */}
+      <div style={{
+        position: 'absolute', top: 10, right: 10, zIndex: 1000,
+        display: 'flex', gap: 3, padding: 3, borderRadius: 10,
+        background: 'rgba(255,255,255,0.85)', backdropFilter: 'blur(8px)', WebkitBackdropFilter: 'blur(8px)',
+        boxShadow: '0 4px 16px rgba(15,23,42,0.18)', border: '1px solid rgba(255,255,255,0.7)',
+      }}>
+        {Object.entries(BASEMAPS).map(([k, v]) => (
+          <button key={k} onClick={() => pick(k)}
+            style={{
+              border: 'none', cursor: 'pointer', borderRadius: 7, padding: '5px 11px',
+              fontSize: 11, fontWeight: 700, lineHeight: 1,
+              background: bm === k ? '#1a3a5c' : 'transparent',
+              color: bm === k ? '#fff' : '#475569',
+              transition: 'background .15s',
+            }}>
+            {v.label}
+          </button>
+        ))}
+      </div>
+    </div>
   );
 };
 
