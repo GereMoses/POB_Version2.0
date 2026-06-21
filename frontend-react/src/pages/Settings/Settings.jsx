@@ -2434,10 +2434,10 @@ const HRIntegrationTab = () => {
     finally { setTesting(false); }
   };
 
-  const handleSync = async (syncDate) => {
+  const handleSync = async (syncDate, force = false) => {
     setSyncing(true);
     try {
-      const data = await apiService.post('/api/v1/hr-integration/sync', { sync_date: syncDate || null });
+      const data = await apiService.post('/api/v1/hr-integration/sync', { sync_date: syncDate || null, force });
       const level = data.status === 'success' ? 'success' : data.status === 'partial' ? 'warning' : 'error';
       msg[level](`${data.message}`);
       queryClient.invalidateQueries({ queryKey: ['hr-history'] });
@@ -2503,9 +2503,19 @@ const HRIntegrationTab = () => {
             : 'No syncs have run yet'}
           style={{ marginBottom: 20 }}
           action={
-            <Button size="small" loading={syncing} onClick={() => handleSync(null)}>
-              Sync Yesterday
-            </Button>
+            <Space>
+              <Button size="small" loading={syncing} onClick={() => handleSync(null)}>
+                Sync Yesterday
+              </Button>
+              <Popconfirm
+                title="Force re-sync?"
+                description="Re-sends records even if already sent — may create duplicates in SeamlessHR. Use only to fix a failed/partial sync."
+                okText="Force re-sync" okButtonProps={{ danger: true }}
+                onConfirm={() => handleSync(null, true)}
+              >
+                <Button size="small" danger ghost loading={syncing}>Force re-sync</Button>
+              </Popconfirm>
+            </Space>
           }
         />
       )}
@@ -2784,10 +2794,10 @@ const BCIntegrationTab = () => {
     finally { setSaving(false); }
   };
 
-  const handleSync = async (syncDate) => {
+  const handleSync = async (syncDate, force = false) => {
     setSyncing(true);
     try {
-      const data = await apiService.post('/api/v1/bc-integration/sync', { sync_date: syncDate || null });
+      const data = await apiService.post('/api/v1/bc-integration/sync', { sync_date: syncDate || null, force });
       const level = data.status === 'success' ? 'success' : data.status === 'partial' ? 'warning' : 'error';
       msg[level](data.message);
       queryClient.invalidateQueries({ queryKey: ['bc-history'] });
@@ -2842,7 +2852,19 @@ const BCIntegrationTab = () => {
             ? `Last sync: ${status.last_sync.status?.toUpperCase()} · ${status.last_sync.records_sent} entries sent · ${dayjs(status.last_sync.created_at).fromNow()}`
             : 'No syncs have run yet'}
           style={{ marginBottom: 20 }}
-          action={<Button size="small" loading={syncing} disabled={syncing} onClick={() => handleSync(null)}>Sync Yesterday</Button>}
+          action={
+            <Space>
+              <Button size="small" loading={syncing} disabled={syncing} onClick={() => handleSync(null)}>Sync Yesterday</Button>
+              <Popconfirm
+                title="Force re-sync?"
+                description="Re-sends entries even if already sent — may create duplicates in Business Central. Use only to fix a failed/partial sync."
+                okText="Force re-sync" okButtonProps={{ danger: true }}
+                onConfirm={() => handleSync(null, true)}
+              >
+                <Button size="small" danger ghost loading={syncing} disabled={syncing}>Force re-sync</Button>
+              </Popconfirm>
+            </Space>
+          }
         />
       )}
       {!status.configured && (
