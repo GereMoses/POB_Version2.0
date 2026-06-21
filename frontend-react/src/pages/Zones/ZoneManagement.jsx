@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Card, Table, Button, Space, Tag, Modal, Form, Input, InputNumber, Select, Dropdown,
-  Popconfirm, Row, Col, Tabs, Progress,
+  Popconfirm, Row, Col, Tabs, Progress, Segmented,
   Drawer, Descriptions, Alert, Empty, Spin, App, Tooltip, Divider, Badge, DatePicker,
 } from 'antd';
 import {
@@ -2548,6 +2548,7 @@ const ZoneManagement = () => {
   const [statusFilter,     setStatusFilter]     = useState(null);
   const [hazardFilter,     setHazardFilter]     = useState(null);
   const [sortBy,           setSortBy]           = useState('pob_desc');
+  const [zoneView,         setZoneView]         = useState('cards');
   const [selectedRowKeys,  setSelectedRowKeys]  = useState([]);
   const [wsStatus,         setWsStatus]         = useState('connecting');
   const wsRef = useRef(null);
@@ -2918,8 +2919,20 @@ const ZoneManagement = () => {
             },
             {
               key: 'cards',
-              label: <Space size={5}><GlobalOutlined />Zone Cards</Space>,
+              label: <Space size={5}><GlobalOutlined />Zones</Space>,
               children: (
+                <div>
+                  <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
+                    <Segmented
+                      value={zoneView}
+                      onChange={setZoneView}
+                      options={[
+                        { label: 'Cards', value: 'cards', icon: <GlobalOutlined /> },
+                        { label: 'Table', value: 'table', icon: <DashboardOutlined /> },
+                      ]}
+                    />
+                  </div>
+                  <div style={{ display: zoneView === 'cards' ? 'block' : 'none' }}>
                 <Spin spinning={dashLoading}>
                   {/* Filter toolbar */}
                   <div style={{ marginBottom: 14, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -2990,12 +3003,8 @@ const ZoneManagement = () => {
                     </Row>
                   )}
                 </Spin>
-              ),
-            },
-            {
-              key: 'list',
-              label: <Space size={5}><DashboardOutlined />Zone List</Space>,
-              children: (
+                  </div>
+                  <div style={{ display: zoneView === 'table' ? 'block' : 'none' }}>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 0, background: 'white', borderRadius: 14, border: '1px solid #E5E7EB', overflow: 'hidden', boxShadow: '0 2px 12px rgba(0,0,0,0.06)' }}>
 
                   {/* ── Toolbar ── */}
@@ -3395,6 +3404,8 @@ const ZoneManagement = () => {
                       },
                     ]}
                   />
+                </div>
+                  </div>
                 </div>
               ),
             },
