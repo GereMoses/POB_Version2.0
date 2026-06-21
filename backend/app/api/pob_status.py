@@ -316,7 +316,11 @@ async def get_attendance_trend(
             SELECT
               punch_time::date                                      AS day,
               COUNT(*)                                              AS total,
-              COUNT(*) FILTER (WHERE punch_state = 0)              AS check_ins,
+              -- 255 = auto-detect / undifferentiated punch; the rest of the system
+              -- (attendance.py, ai/tools.py) treats it as a check-in/presence event,
+              -- so count it here too — otherwise days with only auto-detect punches
+              -- show a flat zero line despite real activity.
+              COUNT(*) FILTER (WHERE punch_state IN (0, 255))      AS check_ins,
               COUNT(*) FILTER (WHERE punch_state = 1)              AS check_outs
             FROM iclock_transaction
             WHERE punch_time::date >= :since
