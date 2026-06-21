@@ -347,13 +347,13 @@ const CountryOverview = ({ topLevelZones, totalPOB, byParent, onSelectZone, getC
 
       {/* ── Top row ── */}
       {topZones.length > 0 && (
-        <div style={{ display:'flex',gap:8,marginBottom:8,flexWrap:'wrap',alignItems:'flex-start' }}>
+        <div style={{ display:'flex',gap:8,marginBottom:8,flexWrap:'wrap',alignItems:'flex-start',justifyContent:'center' }}>
           {topZones.map(renderTile)}
         </div>
       )}
 
       {/* ── Middle: left column | map | right column ── */}
-      <div style={{ display:'flex', gap:10, height: containerH }}>
+      <div style={{ display:'flex', gap:10, height: containerH, justifyContent:'center' }}>
 
         {/* Left column */}
         {finalLeft.length > 0 && (
@@ -365,7 +365,8 @@ const CountryOverview = ({ topLevelZones, totalPOB, byParent, onSelectZone, getC
 
         {/* Center — Nigeria map */}
         <div style={{
-          flex:1, minWidth:0, position:'relative',
+          flex:'0 1 auto', minWidth:0, height:'100%', position:'relative',
+          display:'flex', alignItems:'center', justifyContent:'center',
           borderRadius:16, overflow:'hidden',
           border:'1px solid rgba(255,255,255,0.6)',
           boxShadow:'0 8px 32px rgba(15,23,42,0.12), inset 0 1px 0 rgba(255,255,255,0.5)',
@@ -374,7 +375,7 @@ const CountryOverview = ({ topLevelZones, totalPOB, byParent, onSelectZone, getC
         }}>
           <img
             src={mapSrc} alt="Nigeria"
-            style={{ position:'absolute',inset:0,width:'100%',height:'100%',objectFit:'contain',display:'block',pointerEvents:'none' }}
+            style={{ height:'100%', width:'auto', maxWidth:'100%', objectFit:'contain', display:'block', pointerEvents:'none' }}
             onError={e => {
               e.target.style.display = 'none';
               e.target.insertAdjacentHTML('afterend', `
@@ -403,7 +404,7 @@ const CountryOverview = ({ topLevelZones, totalPOB, byParent, onSelectZone, getC
 
       {/* ── Bottom row ── */}
       {bottomZones.length > 0 && (
-        <div style={{ display:'flex',gap:8,marginTop:8,flexWrap:'wrap',alignItems:'flex-start' }}>
+        <div style={{ display:'flex',gap:8,marginTop:8,flexWrap:'wrap',alignItems:'flex-start',justifyContent:'center' }}>
           {bottomZones.map(renderTile)}
         </div>
       )}
