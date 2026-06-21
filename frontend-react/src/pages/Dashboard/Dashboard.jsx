@@ -25,8 +25,11 @@ if (!document.getElementById(CSS_ID)) {
     .apex-live { animation: apex-pulse 1.8s ease-out infinite; }
 
     .apex-bento { display:grid; grid-template-columns:repeat(12,1fr); gap:14px; }
-    .apex-tile { background:#fff; border-radius:20px; padding:18px; border:1px solid rgba(15,23,42,.05);
-      box-shadow:0 6px 24px rgba(15,23,42,.06); position:relative; overflow:hidden;
+    .apex-tile { background:rgba(255,255,255,.58); border-radius:22px; padding:18px;
+      border:1px solid rgba(255,255,255,.65);
+      -webkit-backdrop-filter:blur(20px) saturate(165%); backdrop-filter:blur(20px) saturate(165%);
+      box-shadow:0 8px 32px rgba(15,23,42,.10), inset 0 1px 0 rgba(255,255,255,.55);
+      position:relative; overflow:hidden;
       transition:transform .2s ease, box-shadow .2s ease; display:flex; flex-direction:column; }
     .apex-tile.click { cursor:pointer; }
     .apex-tile.click:hover { transform:translateY(-3px); box-shadow:0 12px 30px rgba(15,23,42,.12); }
@@ -40,12 +43,20 @@ if (!document.getElementById(CSS_ID)) {
     .t-comp   { grid-column:span 4; }
     .t-feed   { grid-column:span 8; }
     .t-emerg  { grid-column:span 4; }
+    .t-loc    { grid-column:span 4; }
+    .t-zone   { grid-column:span 4; }
+    .t-net    { grid-column:span 4; }
+
+    .apex-blob { position:absolute; border-radius:50%; filter:blur(72px); opacity:.5; pointer-events:none; z-index:0; }
+    .apex-blob-1 { width:380px; height:380px; top:-90px; left:-50px; background:radial-gradient(circle,#22d3ee,transparent 70%); }
+    .apex-blob-2 { width:440px; height:440px; top:130px; right:-110px; background:radial-gradient(circle,#818cf8,transparent 70%); }
+    .apex-blob-3 { width:360px; height:360px; bottom:-130px; left:32%; background:radial-gradient(circle,#f472b6,transparent 70%); opacity:.38; }
 
     @media (max-width:1200px){
       .apex-bento{ grid-template-columns:repeat(8,1fr); }
       .t-hero{grid-column:span 4;} .t-kpi{grid-column:span 2;}
       .t-trend,.t-24h,.t-feed{grid-column:span 8;}
-      .t-methods,.t-dev,.t-comp,.t-emerg{grid-column:span 4;}
+      .t-methods,.t-dev,.t-comp,.t-emerg,.t-loc,.t-zone,.t-net{grid-column:span 4;}
     }
     @media (max-width:760px){
       .apex-bento{ grid-template-columns:1fr; }
@@ -88,6 +99,7 @@ const PUNCH_META = {
   255:{ label: 'Punch',    color: '#94a3b8', icon: <ThunderboltOutlined /> },
 };
 const punchMeta = s => PUNCH_META[s] ?? PUNCH_META[255];
+const ZONE_BAR_COLORS = ['#0ea5e9', '#22c55e', '#f59e0b', '#8b5cf6', '#ec4899', '#14b8a6'];
 
 function relativeTime(iso) {
   if (!iso) return '—';
@@ -182,6 +194,10 @@ export default function Dashboard() {
     queryKey: ['dash-mtd'], queryFn: () => apiService.get('/api/mtd/dashboard/compliance/'),
     refetchInterval: 5 * 60_000, refetchOnWindowFocus: false,
   });
+  const { data: zonesRaw } = useQuery({
+    queryKey: ['dash-zones'], queryFn: () => apiService.get('/api/v1/zones/dashboard'),
+    refetchInterval: POLL, refetchOnWindowFocus: false,
+  });
 
   const [alertDismissed, setAlertDismissed] = useState(false);
 
@@ -274,6 +290,30 @@ export default function Dashboard() {
     ];
   }, [mtdData]);
 
+  // Personnel by location
+  const byLocation = pob.by_location ?? {};
+  const locationData = Object.entries(byLocation)
+    .map(([name, value]) => ({ name, value: Number(value) || 0 }))
+    .filter(d => d.value > 0).sort((a, b) => b.value - a.value).slice(0, 6);
+
+  // Zone occupancy (live count per zone)
+  const zoneList = Array.isArray(zonesRaw) ? zonesRaw : (zonesRaw?.data ?? []);
+  const zoneData = zoneList
+    .map(z => ({ name: z.name, value: z.current_personnel_count ?? z.current_occupancy ?? 0 }))
+    .filter(d => d.value > 0).sort((a, b) => b.value - a.value).slice(0, 6);
+
+  // Cumulative net on-site through the day (entries − exits)
+  const netSeries = useMemo(() => {
+    const byHour = {};
+    todayTx.forEach(t => {
+      const h = new Date(t.punch_time).getHours();
+      byHour[h] = (byHour[h] || 0) + (t.punch_state === 1 ? -1 : 1);
+    });
+    let cum = 0; const r = []; const nowH = new Date().getHours();
+    for (let h = 0; h <= nowH; h++) { cum += (byHour[h] || 0); r.push({ time: `${String(h).padStart(2, '0')}h`, net: Math.max(cum, 0) }); }
+    return r;
+  }, [tx]);
+
   const totalPob = offCount + onCount + trCount;
   const offlineNames = offline.map(d => (d.alias || d.sn || '').trim()).filter(Boolean).join(', ');
   const refresh = () => { rPob(); rDev(); rTx(); };
@@ -281,7 +321,13 @@ export default function Dashboard() {
   const heroCount = useCountUp(totalPob);
 
   return (
-    <div style={{ background: 'linear-gradient(180deg,#eef2f7 0%,#f4f7fb 100%)', minHeight: '100vh', padding: '18px 22px' }}>
+    <div style={{ position: 'relative', overflow: 'hidden', minHeight: '100vh', padding: '18px 22px',
+      background: 'linear-gradient(180deg,#e7edf5 0%,#eef2f8 45%,#f3eef9 100%)' }}>
+      {/* decorative colour blobs — give the frosted-glass tiles something to blur */}
+      <div className="apex-blob apex-blob-1" />
+      <div className="apex-blob apex-blob-2" />
+      <div className="apex-blob apex-blob-3" />
+      <div style={{ position: 'relative', zIndex: 1 }}>
       {/* offline banner */}
       {!devLoading && offline.length > 0 && !alertDismissed && (
         <Alert type="warning" showIcon icon={<WarningOutlined />} closable
@@ -572,6 +618,69 @@ export default function Dashboard() {
             </div>
           </div>
         </div>
+
+        {/* ── Personnel by Location ── */}
+        <div className="apex-tile t-loc">
+          <TileHead title="Personnel by Location" sub="Distribution across sites" navigate={navigate} path="/personnel" />
+          <div style={{ flex: 1, minHeight: 200 }}>
+            {locationData.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No data" style={{ marginTop: 48 }} /> : (
+              <ResponsiveContainer width="100%" height={Math.max(200, locationData.length * 34)}>
+                <BarChart data={locationData} layout="vertical" margin={{ top: 4, right: 18, left: 6, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#eef2f7" horizontal={false} />
+                  <XAxis type="number" tick={{ fontSize: 10, fill: '#94a3b8' }} axisLine={false} tickLine={false} allowDecimals={false} />
+                  <YAxis type="category" dataKey="name" tick={{ fontSize: 11, fill: '#475569' }} axisLine={false} tickLine={false} width={94} />
+                  <Tooltip {...chartTooltip} />
+                  <Bar dataKey="value" fill="#6366f1" radius={[0, 6, 6, 0]} maxBarSize={18} />
+                </BarChart>
+              </ResponsiveContainer>
+            )}
+          </div>
+        </div>
+
+        {/* ── Zone Occupancy ── */}
+        <div className="apex-tile t-zone click" onClick={() => navigate('/zones')}>
+          <TileHead title="Zone Occupancy" sub="Live headcount per zone" navigate={navigate} path="/zones" />
+          <div style={{ flex: 1, minHeight: 200 }}>
+            {zoneData.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No one in a zone yet" style={{ marginTop: 48 }} /> : (
+              <ResponsiveContainer width="100%" height={Math.max(200, zoneData.length * 34)}>
+                <BarChart data={zoneData} layout="vertical" margin={{ top: 4, right: 18, left: 6, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#eef2f7" horizontal={false} />
+                  <XAxis type="number" tick={{ fontSize: 10, fill: '#94a3b8' }} axisLine={false} tickLine={false} allowDecimals={false} />
+                  <YAxis type="category" dataKey="name" tick={{ fontSize: 11, fill: '#475569' }} axisLine={false} tickLine={false} width={94} />
+                  <Tooltip {...chartTooltip} />
+                  <Bar dataKey="value" radius={[0, 6, 6, 0]} maxBarSize={18}>
+                    {zoneData.map((d, i) => <Cell key={i} fill={ZONE_BAR_COLORS[i % ZONE_BAR_COLORS.length]} />)}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            )}
+          </div>
+        </div>
+
+        {/* ── Net On-Site Today ── */}
+        <div className="apex-tile t-net">
+          <TileHead title="Net On-Site Today" sub="Cumulative entries − exits" />
+          <div style={{ flex: 1, minHeight: 200 }}>
+            {netSeries.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No activity yet today" style={{ marginTop: 48 }} /> : (
+              <ResponsiveContainer width="100%" height={210}>
+                <AreaChart data={netSeries} margin={{ top: 6, right: 8, left: -18, bottom: 0 }}>
+                  <defs>
+                    <linearGradient id="gNet" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor="#6366f1" stopOpacity={0.35} />
+                      <stop offset="100%" stopColor="#6366f1" stopOpacity={0} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#eef2f7" vertical={false} />
+                  <XAxis dataKey="time" tick={{ fontSize: 10, fill: '#94a3b8' }} axisLine={false} tickLine={false} minTickGap={20} />
+                  <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }} axisLine={false} tickLine={false} width={28} allowDecimals={false} />
+                  <Tooltip {...chartTooltip} />
+                  <Area type="monotone" dataKey="net" name="On site" stroke="#6366f1" strokeWidth={2.5} fill="url(#gNet)" />
+                </AreaChart>
+              </ResponsiveContainer>
+            )}
+          </div>
+        </div>
+      </div>
       </div>
     </div>
   );
