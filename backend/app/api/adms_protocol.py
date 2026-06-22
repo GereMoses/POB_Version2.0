@@ -1187,6 +1187,13 @@ def _recalc_zone_occupancy(zone_id: int, db: Session) -> int:
         UPDATE zones SET current_occupancy = :cnt, current_personnel_count = :cnt,
             updated_at = NOW() WHERE id = :zid
     """), {"cnt": cnt, "zid": zone_id})
+    # Push the new count to the POB dashboard live, from any context (ADMS push,
+    # direct poll, live-capture, reset) — so it updates without a refresh.
+    try:
+        from ..core.websocket import schedule_zone_broadcast
+        schedule_zone_broadcast(zone_id, cnt)
+    except Exception:
+        pass
     return cnt
 
 

@@ -6,6 +6,7 @@ Basic WebSocket connection management for real-time features
 import asyncio
 import json
 import logging
+import os
 from typing import Dict, List, Optional
 from fastapi import WebSocket, WebSocketDisconnect
 
@@ -162,3 +163,86 @@ async def broadcast_zone_update(zone_id: int, count: int, zone_name: str = "") -
             dead.append(ws)
     for ws in dead:
         zone_ws_disconnect(ws)
+
+
+# Main event loop, captured at startup, so zone broadcasts can be fired from any
+# context — request handlers, background asyncio tasks, or threadpool worker threads.
+_main_loop = None
+
+
+def set_main_loop(loop) -> None:
+    global _main_loop
+    _main_loop = loop
+
+
+# Redis pub/sub backplane — the API runs multiple uvicorn workers, each with its own
+# in-process WS connection list. A punch handled by one worker must reach a dashboard
+# connected to a different worker, so updates are published to Redis and every worker
+# relays them to its own local WS clients.
+_ZONE_CHANNEL = "apex:zone_updates"
+_pub_redis = None
+
+
+def _publisher():
+    global _pub_redis
+    if _pub_redis is None:
+        import redis as _redis
+        _pub_redis = _redis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"))
+    return _pub_redis
+
+
+def _local_zone_broadcast(zone_id: int, count: int, zone_name: str = "") -> None:
+    """Broadcast to THIS worker's local WS clients, from any context."""
+    coro = broadcast_zone_update(zone_id, count, zone_name)
+    try:
+        asyncio.get_running_loop().create_task(coro)
+        return
+    except RuntimeError:
+        pass  # not on an event loop (threadpool worker) — use the captured main loop
+    if _main_loop is not None and _main_loop.is_running():
+        try:
+            asyncio.run_coroutine_threadsafe(coro, _main_loop)
+            return
+        except Exception:
+            pass
+    coro.close()  # no loop available — avoid 'coroutine was never awaited'
+
+
+def schedule_zone_broadcast(zone_id: int, count: int, zone_name: str = "") -> None:
+    """
+    Fire a live zone-occupancy update from ANY context. Publishes to Redis so EVERY
+    worker relays it to its local dashboards; falls back to a local-only broadcast if
+    Redis is unavailable. Called by the central occupancy recalc so every path
+    (ADMS push, direct poll, live-capture, reset) pushes in real time without refresh.
+    """
+    try:
+        _publisher().publish(_ZONE_CHANNEL, json.dumps(
+            {"zone_id": zone_id, "count": count, "zone_name": zone_name}))
+        return
+    except Exception as e:
+        logger.warning("zone broadcast publish failed (%s) — local fallback", e)
+    _local_zone_broadcast(zone_id, count, zone_name)
+
+
+async def zone_pubsub_listener() -> None:
+    """Per-worker background task: relay Redis zone updates to this worker's WS clients."""
+    import redis.asyncio as aioredis
+    while True:
+        try:
+            r = aioredis.from_url(os.getenv("REDIS_URL", "redis://redis:6379/0"))
+            ps = r.pubsub()
+            await ps.subscribe(_ZONE_CHANNEL)
+            logger.info("Zone pub/sub listener subscribed to %s", _ZONE_CHANNEL)
+            async for m in ps.listen():
+                if m.get("type") != "message":
+                    continue
+                try:
+                    d = json.loads(m["data"])
+                    await broadcast_zone_update(int(d["zone_id"]), int(d["count"]), d.get("zone_name", ""))
+                except Exception:
+                    pass
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.warning("zone pub/sub listener error: %s — retry in 5s", e)
+            await asyncio.sleep(5)

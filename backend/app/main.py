@@ -837,6 +837,18 @@ async def startup_event():
     """Application startup event"""
     logger.info(f"Starting {settings.PROJECT_NAME} v{settings.VERSION}")
 
+    # Capture the main event loop so background tasks/threads can push live
+    # zone-occupancy updates to the POB dashboard from any context. Also start the
+    # zone pub/sub listener on EVERY worker (not leader-only) so each worker relays
+    # Redis zone updates to its own WS clients — broadcasts are otherwise per-process.
+    try:
+        from .core.websocket import set_main_loop, zone_pubsub_listener
+        set_main_loop(asyncio.get_running_loop())
+        _background_tasks.append(asyncio.create_task(zone_pubsub_listener()))
+        logger.info("✅ Zone pub/sub listener started (all workers)")
+    except Exception as _e:
+        logger.warning("Could not start zone pub/sub listener: %s", _e)
+
     # Test database connection (run sync check off the event loop)
     if await asyncio.to_thread(test_db_connection):
         logger.info("✅ Database connection successful")
