@@ -94,11 +94,14 @@ def _zkteco_status(dept: Department) -> str:
 
 
 def _to_dict(dept: Department, db: Session) -> dict:
-    personnel_count = (
-        db.query(DepartmentPersonnel)
-        .filter(DepartmentPersonnel.department_id == dept.id, DepartmentPersonnel.status == "active")
-        .count()
-    )
+    # Count active personnel assigned to this department via personnel.department_id —
+    # the FK that is actually set when an employee is created/assigned. The legacy
+    # DepartmentPersonnel association table is no longer populated by that flow, so
+    # counting it returned 0 even though employees were assigned.
+    from sqlalchemy import text as _sql_text
+    personnel_count = db.execute(_sql_text(
+        "SELECT COUNT(*) FROM personnel WHERE department_id = :did AND is_active = TRUE"
+    ), {"did": dept.id}).scalar() or 0
     sub_dept_count = (
         db.query(Department)
         .filter(Department.parent_id == dept.id, Department.is_active == True)
@@ -203,11 +206,10 @@ async def department_summary(
         total_budget += float(d.budget_allocated or 0)
         used_budget  += float(d.budget_used or 0)
 
-    total_personnel = (
-        db.query(DepartmentPersonnel)
-        .filter(DepartmentPersonnel.status == "active")
-        .count()
-    )
+    from sqlalchemy import text as _sql_text
+    total_personnel = db.execute(_sql_text(
+        "SELECT COUNT(*) FROM personnel WHERE department_id IS NOT NULL AND is_active = TRUE"
+    )).scalar() or 0
 
     return {
         "total_departments":      len(depts),
@@ -395,11 +397,10 @@ async def delete_department(
     children = db.query(Department).filter(Department.parent_id == department_id).count()
     if children:
         raise HTTPException(status_code=400, detail=f"Cannot delete department with {children} sub-department(s)")
-    active_personnel = (
-        db.query(DepartmentPersonnel)
-        .filter(DepartmentPersonnel.department_id == department_id, DepartmentPersonnel.status == "active")
-        .count()
-    )
+    from sqlalchemy import text as _sql_text
+    active_personnel = db.execute(_sql_text(
+        "SELECT COUNT(*) FROM personnel WHERE department_id = :did AND is_active = TRUE"
+    ), {"did": department_id}).scalar() or 0
     if active_personnel:
         raise HTTPException(status_code=400, detail=f"Cannot delete department with {active_personnel} active personnel assignment(s)")
     dept.is_active = False
@@ -421,29 +422,34 @@ async def get_department_personnel(
     if not dept:
         raise HTTPException(status_code=404, detail="Department not found")
 
-    q = db.query(DepartmentPersonnel).filter(DepartmentPersonnel.department_id == department_id)
-    if status:
-        q = q.filter(DepartmentPersonnel.status == status)
-    assignments = q.all()
+    # Personnel are linked to a department via personnel.department_id (set on
+    # create/assign), not the legacy DepartmentPersonnel association table.
+    from sqlalchemy import text as _sql_text
+    active_only = (status or "").lower() == "active"
+    rows = db.execute(_sql_text(
+        "SELECT id, emp_code, first_name, last_name, personnel_type, company, role, position, is_active "
+        "FROM personnel WHERE department_id = :did "
+        + ("AND is_active = TRUE " if active_only else "")
+        + "ORDER BY first_name, last_name"
+    ), {"did": department_id}).fetchall()
 
-    result = []
-    for a in assignments:
-        p = db.query(Personnel).filter(Personnel.id == a.personnel_id).first()
-        result.append({
-            "id":           a.id,
-            "personnel_id": a.personnel_id,
-            "personnel_name": f"{getattr(p,'first_name','')} {getattr(p,'last_name','')}".strip() if p else "",
-            "emp_code":     getattr(p, "emp_code", None),
-            "personnel_type": getattr(p, "personnel_type", None),
-            "company":      getattr(p, "company", None),
-            "role":         a.role,
-            "position":     a.position,
-            "is_primary":   a.is_primary,
-            "is_manager":   a.is_manager,
-            "status":       a.status,
-            "assigned_at":  a.assigned_at.isoformat() if a.assigned_at else None,
-        })
-    return result
+    return [
+        {
+            "id":             p.id,
+            "personnel_id":   p.id,
+            "personnel_name": f"{p.first_name or ''} {p.last_name or ''}".strip() or p.emp_code,
+            "emp_code":       p.emp_code,
+            "personnel_type": p.personnel_type,
+            "company":        p.company,
+            "role":           p.role,
+            "position":       p.position,
+            "is_primary":     False,
+            "is_manager":     False,
+            "status":         "active" if p.is_active else "inactive",
+            "assigned_at":    None,
+        }
+        for p in rows
+    ]
 
 
 @router.post("/{department_id}/assign-personnel", status_code=201)
