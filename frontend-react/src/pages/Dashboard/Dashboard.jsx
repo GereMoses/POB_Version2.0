@@ -203,7 +203,8 @@ export default function Dashboard() {
 
   // ── transforms ──
   const pob = pobRaw ?? {};
-  const devices = Array.isArray(devRaw) ? devRaw : [];
+  // /api/device/terminals/ returns { data: [...], total } — not a bare array.
+  const devices = Array.isArray(devRaw) ? devRaw : (devRaw?.data ?? []);
   const tx = txRaw?.data ?? [];
   const totalPersonnel = persRaw?.count ?? pob.total_personnel ?? 0;
   const online = devices.filter(d => d.state === 1 || d.status === 'online');
