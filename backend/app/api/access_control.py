@@ -705,23 +705,31 @@ async def get_events(
 
 
 @router.websocket("/events/ws")
-async def websocket_events(websocket: WebSocket, db: Session = Depends(get_db)):
+async def websocket_events(websocket: WebSocket):
     await websocket.accept()
+    # Use a SHORT-LIVED session per poll — never hold a pooled DB connection (and an
+    # open transaction) for the whole WS lifetime, which exhausts the pool and leaves
+    # "idle in transaction" connections when several clients are connected.
+    from ..core.database import SessionLocal
     try:
         while True:
             try:
                 await asyncio.wait_for(websocket.receive_text(), timeout=30)
             except asyncio.TimeoutError:
                 pass
-            rows = db.execute(text("""
-                SELECT e.*, d.name AS door_name,
-                       COALESCE(e.photo_url, pe.photo) AS employee_photo
-                FROM acc_event e
-                LEFT JOIN acc_door d ON d.id = e.door_id
-                LEFT JOIN personnel_employee pe ON pe.emp_code = e.emp_code
-                ORDER BY e.event_time DESC LIMIT 20
-            """)).fetchall()
-            data = _rows(rows)
+            _db = SessionLocal()
+            try:
+                rows = _db.execute(text("""
+                    SELECT e.*, d.name AS door_name,
+                           COALESCE(e.photo_url, pe.photo) AS employee_photo
+                    FROM acc_event e
+                    LEFT JOIN acc_door d ON d.id = e.door_id
+                    LEFT JOIN personnel_employee pe ON pe.emp_code = e.emp_code
+                    ORDER BY e.event_time DESC LIMIT 20
+                """)).fetchall()
+                data = _rows(rows)
+            finally:
+                _db.close()
             for item in data:
                 for k, v in item.items():
                     if isinstance(v, datetime):
@@ -729,6 +737,8 @@ async def websocket_events(websocket: WebSocket, db: Session = Depends(get_db)):
             await websocket.send_text(json.dumps(data))
             await asyncio.sleep(2)
     except WebSocketDisconnect:
+        pass
+    except Exception:
         pass
 
 
