@@ -402,6 +402,42 @@ async def get_terminals(
             detail="Failed to fetch terminals"
         )
 
+def _sync_device_row(db: Session, sn: str, *, connection_mode: Optional[str] = None,
+                     ip_address: Optional[str] = None, zone_id: Optional[int] = None,
+                     name: Optional[str] = None) -> None:
+    """
+    Create or update the `devices` row that the ZKTeco background services
+    (poller, live_capture, heartbeat) read, so a change made in the UI to a
+    terminal ALWAYS controls real behaviour and stays in sync with the database.
+
+    Crucially this sets `auto_poll` from the connection mode: direct/both readers
+    must be polled, adms readers are push-only. Without it, switching a reader to
+    'direct' in the UI updated iclock_terminal but the services never started
+    polling (auto_poll stayed False from ADMS registration), so 'direct' silently
+    did nothing. It also CREATES the devices row when missing, so manually-added
+    or ADMS-only readers can be switched to direct and immediately start working.
+    """
+    mode = (connection_mode or 'adms').strip().lower()
+    if mode not in ('adms', 'direct', 'both'):
+        mode = 'adms'
+    dev = db.query(Device).filter(Device.serial_number == sn).first()
+    if dev is None:
+        dev = Device(serial_number=sn, status=DeviceStatus.OFFLINE, poll_interval_sec=300)
+        db.add(dev)
+    dev.connection_mode = mode
+    dev.auto_poll = mode in ('direct', 'both')
+    if name:
+        dev.name = name
+    elif not dev.name:
+        dev.name = f"Terminal-{sn}"
+    if ip_address is not None:
+        dev.ip_address = ip_address
+    if not dev.port:
+        dev.port = 4370
+    if zone_id is not None:
+        dev.zone_id = zone_id
+
+
 @router.post("/api/device/terminals/", response_model=DeviceResponse)
 async def create_terminal(
     terminal_data: DeviceCreate,
@@ -449,7 +485,17 @@ async def create_terminal(
         db.add(new_terminal)
         db.commit()
         db.refresh(new_terminal)
-        
+
+        # Create the matching `devices` row so the polling/heartbeat/live-capture
+        # services actually see this reader (they read from `devices`). Without it
+        # a manually-added direct reader would never be polled or come online.
+        _sync_device_row(db, new_terminal.sn,
+                         connection_mode=new_terminal.connection_mode,
+                         ip_address=new_terminal.ip_address,
+                         zone_id=new_terminal.zone_id,
+                         name=new_terminal.alias)
+        db.commit()
+
         # Convert to response format
         device_status = get_device_status(new_terminal.last_activity, getattr(new_terminal, "state", None))
         
@@ -577,22 +623,19 @@ async def update_terminal(
 
         terminal.updated_at = datetime.utcnow()
 
-        # Keep the `devices` row in sync with the terminal. The heartbeat and
-        # live_capture services read connection_mode/ip_address from `devices`,
-        # not `iclock_terminal`, so without this an admin's UI change (e.g.
-        # switching a remote reader to ADMS) silently never takes effect and the
-        # device keeps getting TCP-probed on an unreachable LAN IP. Only mirror
-        # the fields the admin actually changed so we never clobber other data.
-        device = db.query(Device).filter(Device.serial_number == terminal.sn).first()
-        if device:
-            if 'connection_mode' in update_data and update_data['connection_mode']:
-                device.connection_mode = update_data['connection_mode']
-            if 'ip_address' in update_data:
-                device.ip_address = update_data['ip_address']
-            if 'zone_id' in update_data:
-                device.zone_id = update_data['zone_id']
-            if 'alias' in update_data and update_data['alias']:
-                device.name = update_data['alias']
+        # Keep the `devices` row (the services' source of truth) fully in sync with
+        # the terminal — creating it if missing and, critically, setting auto_poll
+        # from the connection mode so switching to 'direct' in the UI actually
+        # starts polling (and 'adms' stops it). The heartbeat/poller/live_capture
+        # read connection_mode + auto_poll from `devices`, not iclock_terminal.
+        if any(f in update_data for f in ('connection_mode', 'ip_address', 'zone_id', 'alias')):
+            _sync_device_row(
+                db, terminal.sn,
+                connection_mode=update_data.get('connection_mode') or terminal.connection_mode,
+                ip_address=update_data['ip_address'] if 'ip_address' in update_data else None,
+                zone_id=update_data['zone_id'] if 'zone_id' in update_data else None,
+                name=update_data.get('alias') or None,
+            )
 
         db.commit()
         db.refresh(terminal)
