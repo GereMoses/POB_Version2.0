@@ -82,8 +82,14 @@ services:
 
   # ── DB Init (runs once on first deploy, then exits) ─────────────────────────
   db-init:
-    image: postgres:15-alpine
+    # Runs on the BACKEND image so it has psql + python + the app code: it applies
+    # the complete schema and seeds the global admin user in one step.
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: pob_backend:latest
     container_name: pob_db_init
+    working_dir: /app
     env_file: .env.prod
     environment:
       DATABASE_HOST: postgres
@@ -91,10 +97,11 @@ services:
       DATABASE_NAME: ${DATABASE_NAME}
       DATABASE_USER: ${DATABASE_USER}
       DATABASE_PASSWORD: ${DATABASE_PASSWORD}
+      DATABASE_URL: postgresql://${DATABASE_USER}:${DATABASE_PASSWORD}@postgres:5432/${DATABASE_NAME}
+      GLOBAL_ADMIN_USERNAME: ${GLOBAL_ADMIN_USERNAME:-globaladmin}
     volumes:
       - ./docker/db-init.sh:/db-init.sh:ro
-      - ./database/init/complete_database_setup.sql:/migrations/complete_database_setup.sql:ro
-      - ./database/init/fix_zones_final.sql:/migrations/fix_zones_final.sql:ro
+      - ./database/init/complete_schema.sql:/migrations/complete_schema.sql:ro
     entrypoint: ["/bin/bash", "/db-init.sh"]
     depends_on:
       postgres:

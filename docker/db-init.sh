@@ -1,24 +1,37 @@
 #!/bin/bash
-# Database initializer — runs once on first deploy.
-# Waits for PostgreSQL to be ready, then applies schema migrations.
-# Safe to run on a database that already has the schema (all statements are idempotent).
-
+# Database initializer — runs once on first deploy (and harmlessly on redeploys).
+# Runs inside the BACKEND image, which has psql, python and the app code.
+#   1. Waits for PostgreSQL.
+#   2. Applies the COMPLETE schema (all enum types + tables) if not already present.
+#   3. Seeds the global admin user so the system is immediately loginable.
 set -e
 
-echo "Waiting for PostgreSQL..."
-until pg_isready -h "$DATABASE_HOST" -p "${DATABASE_PORT:-5432}" -U "$DATABASE_USER" -d "$DATABASE_NAME" -q; do
+HOST="${DATABASE_HOST:-postgres}"
+PORT="${DATABASE_PORT:-5432}"
+
+echo "Waiting for PostgreSQL at ${HOST}:${PORT}..."
+until pg_isready -h "$HOST" -p "$PORT" -U "$DATABASE_USER" -d "$DATABASE_NAME" -q; do
   sleep 2
 done
 echo "PostgreSQL is ready."
 
-PSQL="psql postgresql://${DATABASE_USER}:${DATABASE_PASSWORD}@${DATABASE_HOST}:${DATABASE_PORT:-5432}/${DATABASE_NAME}"
+export PGPASSWORD="$DATABASE_PASSWORD"
+PSQL="psql -h $HOST -p $PORT -U $DATABASE_USER -d $DATABASE_NAME"
 
-echo "Applying database schema..."
+# ── 1. Schema ────────────────────────────────────────────────────────────────
+# The complete schema (48 enum types + every table, index, FK, sequence) is a
+# pg_dump --schema-only of the validated system. pg_dump output is not idempotent,
+# so apply it only when the database is still empty (auth_user absent).
+if [ "$($PSQL -tAc "SELECT to_regclass('public.auth_user')" 2>/dev/null | tr -d '[:space:]')" = "auth_user" ]; then
+  echo "Schema already present — skipping schema load."
+else
+  echo "Applying complete schema..."
+  $PSQL -v ON_ERROR_STOP=1 -f /migrations/complete_schema.sql
+  echo "  ✓ Complete schema applied"
+fi
 
-# Apply the complete base schema (idempotent — uses CREATE IF NOT EXISTS / DO blocks)
-$PSQL -f /migrations/complete_database_setup.sql && echo "  ✓ Base schema applied"
-
-# Apply zone fixes (idempotent)
-$PSQL -f /migrations/fix_zones_final.sql && echo "  ✓ Zone schema applied"
+# ── 2. Seed initial data (idempotent — creates global admin only if missing) ──
+echo "Seeding initial data..."
+cd /app && python /app/seed_initial.py
 
 echo "Database initialization complete."
