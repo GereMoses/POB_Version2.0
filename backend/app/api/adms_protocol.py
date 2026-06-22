@@ -770,6 +770,14 @@ _DOCKER_GATEWAY_IPS: frozenset = frozenset({
     '172.18.0.1',     # Docker custom bridge (common)
     '172.19.0.1',
     '172.20.0.1',
+    # Loopback / invalid — never a real device IP; ignore so local requests
+    # (health checks, internal tests, a misconfigured reader) can't overwrite a
+    # device's real IP and break direct polling.
+    '127.0.0.1',
+    '::1',
+    'localhost',
+    '0.0.0.0',
+    '',
 })
 
 
@@ -2292,16 +2300,38 @@ async def get_time_drift(db: Session = Depends(get_db)):
     server_now = datetime.now()
     devices    = []
 
+    # Probe all direct-IP device clocks CONCURRENTLY (with a per-probe timeout) so a
+    # slow/unreachable reader can't make this endpoint take the sum of all probes —
+    # the Devices page calls it, and sequential probes were taking ~11s.
+    async def _probe_clock(row):
+        try:
+            return await asyncio.wait_for(
+                zkteco_direct.get_time(ip=row.ip_address, port=row.port or 4370),
+                timeout=5,
+            )
+        except asyncio.TimeoutError:
+            return {"success": False, "error": "timeout"}
+        except Exception as exc:
+            return {"success": False, "error": str(exc) or "unreachable"}
+
+    _direct_rows = [r for r in terminals
+                    if r.ip_address and (r.connection_mode or '').lower() in ('direct', 'both')]
+    _probe_results: dict = {}
+    if _direct_rows:
+        _res = await asyncio.gather(*[_probe_clock(r) for r in _direct_rows], return_exceptions=True)
+        for _r, _pr in zip(_direct_rows, _res):
+            _probe_results[_r.sn] = _pr if isinstance(_pr, dict) else {"success": False, "error": str(_pr)}
+
     for r in terminals:
         drift       = None
         method      = "none"
         detail      = None
         is_direct   = r.ip_address and (r.connection_mode or '').lower() in ('direct', 'both')
 
-        # ── Direct-IP devices: live clock query ──────────────────────────
+        # ── Direct-IP devices: live clock query (probed concurrently above) ──
         if is_direct:
             try:
-                res = await zkteco_direct.get_time(ip=r.ip_address, port=r.port or 4370)
+                res = _probe_results.get(r.sn) or {"success": False, "error": "unreachable"}
                 if res.get('success') and res.get('device_time'):
                     raw = str(res['device_time'])[:19]
                     device_dt = None
