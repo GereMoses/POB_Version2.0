@@ -73,3 +73,7 @@ backend/media/
 *.temp
 *.bak
 *.orig
+
+# Python compiled
+*.pyc
+*.pyo
