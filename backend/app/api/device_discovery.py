@@ -160,6 +160,10 @@ async def approve_pending_device(
         "UPDATE iclock_terminal SET state = 1 WHERE sn = :sn"
     ), {"sn": sn})
 
+    # Approving a device through the UI clears any prior deletion suppression.
+    from .adms_protocol import unsuppress_device
+    unsuppress_device(db, sn)
+
     # Upsert matching devices row
     friendly_name = (body.name or "").strip() or terminal.alias or terminal.device_name or f"ZKTeco-{sn}"
     existing_device = db.execute(text(

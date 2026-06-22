@@ -494,6 +494,9 @@ async def create_terminal(
                          ip_address=new_terminal.ip_address,
                          zone_id=new_terminal.zone_id,
                          name=new_terminal.alias)
+        # Re-adding a reader through the UI clears any prior deletion suppression.
+        from .adms_protocol import unsuppress_device
+        unsuppress_device(db, new_terminal.sn)
         db.commit()
 
         # Convert to response format
@@ -756,6 +759,12 @@ async def delete_terminal(
             db.rollback()
 
         db.delete(terminal)
+
+        # Remember the deletion so the LAN scanner / ADMS auto-register don't
+        # silently re-add this reader while it's still powered on and reachable.
+        from .adms_protocol import suppress_device
+        suppress_device(db, sn)
+
         db.commit()
 
         return {"message": f"Terminal {sn} deleted successfully"}

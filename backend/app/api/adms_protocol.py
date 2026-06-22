@@ -781,6 +781,63 @@ _DOCKER_GATEWAY_IPS: frozenset = frozenset({
 })
 
 
+# ── Device deletion suppression ──────────────────────────────────────────────
+# When an admin DELETES a reader in the UI, remember its SN so the LAN scanner and
+# ADMS auto-registration do not silently re-add it — UI deletes must "stick".
+# Re-adding the reader through the UI (create/approve) clears the suppression.
+
+def _ensure_suppression_table(db: Session) -> None:
+    db.execute(text("""
+        CREATE TABLE IF NOT EXISTS device_suppressed (
+            sn TEXT PRIMARY KEY,
+            suppressed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+    """))
+
+
+# These helpers use their OWN short-lived session so a failure here can never
+# roll back the caller's transaction (e.g. the terminal delete/create). The
+# `db` parameter is accepted for call-site convenience but intentionally unused.
+
+def is_device_suppressed(_db: Session, sn: str) -> bool:
+    from ..core.database import SessionLocal
+    s = SessionLocal()
+    try:
+        return s.execute(text("SELECT 1 FROM device_suppressed WHERE sn = :sn"),
+                         {"sn": sn}).fetchone() is not None
+    except Exception:
+        return False
+    finally:
+        s.close()
+
+
+def suppress_device(_db: Session, sn: str) -> None:
+    from ..core.database import SessionLocal
+    s = SessionLocal()
+    try:
+        s.execute(text("INSERT INTO device_suppressed (sn) VALUES (:sn) "
+                       "ON CONFLICT (sn) DO NOTHING"), {"sn": sn})
+        s.commit()
+    except Exception as e:
+        s.rollback()
+        logger.warning("suppress_device(%s) failed: %s", sn, e)
+    finally:
+        s.close()
+
+
+def unsuppress_device(_db: Session, sn: str) -> None:
+    from ..core.database import SessionLocal
+    s = SessionLocal()
+    try:
+        s.execute(text("DELETE FROM device_suppressed WHERE sn = :sn"), {"sn": sn})
+        s.commit()
+    except Exception as e:
+        s.rollback()
+        logger.warning("unsuppress_device(%s) failed: %s", sn, e)
+    finally:
+        s.close()
+
+
 def upsert_terminal(
     sn: str, client_ip: str, device_info: Dict[str, Any],
     pushver: str, db: Session
@@ -868,6 +925,11 @@ def upsert_terminal(
     # New device
     if not settings.ZKTECO_AUTO_REGISTER_DEVICES:
         logger.info(f"New device {sn} rejected — auto-registration disabled")
+        return None
+
+    # Respect UI deletions — don't auto-re-add a reader the admin deleted.
+    if is_device_suppressed(db, sn):
+        logger.info(f"New device {sn} ignored — suppressed (deleted in UI)")
         return None
 
     # For new devices, prefer the device-reported IP over a Docker gateway address

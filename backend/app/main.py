@@ -863,6 +863,19 @@ async def startup_event():
                 _idx_db.close()
         except Exception as _ie:
             logger.warning("Index creation skipped: %s", _ie)
+
+        # Ensure the device-deletion suppression table exists (sticky UI deletes)
+        try:
+            from .api.adms_protocol import _ensure_suppression_table
+            from .core.database import SessionLocal as _SL2
+            _sup_db = _SL2()
+            try:
+                _ensure_suppression_table(_sup_db)
+                _sup_db.commit()
+            finally:
+                _sup_db.close()
+        except Exception as _se:
+            logger.warning("Suppression table init skipped: %s", _se)
     else:
         logger.error("❌ Database connection failed")
 

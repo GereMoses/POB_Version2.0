@@ -586,6 +586,13 @@ def _db_register_new_device(ip: str, sn: str, now: datetime) -> None:
                 db.commit()
             return
 
+        # Respect UI deletions — don't re-add a reader the admin deleted, even if
+        # it is still powered on and reachable on the LAN.
+        from ...api.adms_protocol import is_device_suppressed
+        if is_device_suppressed(db, sn):
+            logger.info("Auto-discovery: %s suppressed (deleted in UI) — not re-adding", sn)
+            return
+
         device = Device(
             name             = f"ZKTeco-{ip}",
             serial_number    = sn,
