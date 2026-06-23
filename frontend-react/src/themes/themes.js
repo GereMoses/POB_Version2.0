@@ -46,42 +46,7 @@ export const THEMES = [
     },
   },
 
-  /* ── 2. Dark Mode ────────────────────────────────────── */
-  {
-    key:  'dark',
-    name: 'Dark Mode',
-    preview: ['#141414', '#1677ff', '#1f1f1f', '#0a0a0a'],
-    algorithmKey: 'dark',
-    colors: {
-      ...LAYOUT,
-      sidebarBg:           '#0d0d0d',
-      sidebarBgHover:      'rgba(255,255,255,0.06)',
-      sidebarActive:       'rgba(22,119,255,0.18)',
-      sidebarActiveBorder: '#1677ff',
-      sidebarText:         '#8c8c8c',
-      sidebarTextActive:   '#FFFFFF',
-      sidebarGroupLabel:   '#434343',
-      topbarBg:            '#141414',
-      topbarBorder:        '#303030',
-      contentBg:           '#0a0a0a',
-      accentBlue:          '#1677ff',
-      accentBlueDark:      '#0958d9',
-      topbarIconColor:     '#8c8c8c',
-      topbarTextColor:     '#d9d9d9',
-      topbarMutedColor:    '#595959',
-      menuHoverBg:         '#1f1f1f',
-    },
-    antdToken: {
-      colorPrimary:  '#1677ff',
-      colorSuccess:  '#49aa19',
-      colorWarning:  '#d89614',
-      colorError:    '#dc4446',
-      colorInfo:     '#1677ff',
-      borderRadius:  6,
-    },
-  },
-
-  /* ── 3. Forest Green ─────────────────────────────────── */
+  /* ── 2. Forest Green ─────────────────────────────────── */
   {
     key:  'forest',
     name: 'Forest Green',
@@ -116,7 +81,7 @@ export const THEMES = [
     },
   },
 
-  /* ── 4. Midnight Purple ──────────────────────────────── */
+  /* ── 3. Midnight Purple ──────────────────────────────── */
   {
     key:  'midnight',
     name: 'Midnight Purple',
@@ -151,7 +116,7 @@ export const THEMES = [
     },
   },
 
-  /* ── 5. Sunset Orange ────────────────────────────────── */
+  /* ── 4. Sunset Orange ────────────────────────────────── */
   {
     key:  'sunset',
     name: 'Sunset',
@@ -186,7 +151,7 @@ export const THEMES = [
     },
   },
 
-  /* ── 6. Slate (Corporate) ────────────────────────────── */
+  /* ── 5. Slate (Corporate) ────────────────────────────── */
   {
     key:  'slate',
     name: 'Slate',
