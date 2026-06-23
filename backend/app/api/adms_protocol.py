@@ -1877,8 +1877,14 @@ async def cmd_push_users(body: PushUsersRequest, db: Session = Depends(get_db)):
 
     pushver = (terminal.pushver or "").strip()
 
-    if pushver.startswith("2"):
-        # ADMS DATA UPDATE USERINFO (v2.x firmware)
+    # An ADMS-mode reader is reachable ONLY via the command queue — the server can't
+    # open a direct ZKLib TCP connection to a NAT'd/remote reader (it would fail with
+    # "Broken pipe"). So always use the ADMS command path for adms readers, even if
+    # the reported PushVer is missing/1.x.
+    use_adms = pushver.startswith("2") or (terminal.connection_mode or "").lower() == "adms"
+
+    if use_adms:
+        # ADMS DATA UPDATE USERINFO (v2.x / adms-mode)
         q = db.query(PersonnelEmployee)
         if body.emp_codes:
             q = q.filter(PersonnelEmployee.emp_code.in_(body.emp_codes))
