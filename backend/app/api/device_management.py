@@ -1235,26 +1235,17 @@ async def sync_all_users_to_device(
             Device.serial_number == sn,
             Device.connection_mode == 'adms',
         ).first()
-        is_remote_adms = bool(adms_device) and (
-            not terminal_ip or terminal_ip in _DOCKER_GATEWAY_IPS
-        )
+        is_adms = bool(adms_device)
 
-        if not pushver.startswith("2") and is_remote_adms:
-            # Remote PushVer 1.x ADMS device: ZKLib is not reachable and
-            # DATA UPDATE USERINFO is not supported by this firmware version.
-            # Users must be enrolled directly on the device.
-            return {
-                "message": (
-                    f"Device {sn} uses PushVer 1.x over ADMS (remote). "
-                    "Remote user push is not supported for this firmware version — "
-                    "please enroll employees directly on the reader."
-                ),
-                "synced": 0,
-                "method": "not_supported",
-            }
-
-        if not pushver.startswith("2") and terminal_ip:
-            # PushVer 1.x with a reachable LAN IP — background ZKLib push
+        # An ADMS reader is reachable ONLY through the command queue — never ZKLib,
+        # regardless of the PushVer it reported. (The stored ip_address is the
+        # reader's own remote LAN IP, unreachable from here, so a ZKLib attempt just
+        # hangs/fails in the background and nothing syncs.) cmd_push_users uses the
+        # same rule, and this reader has confirmed it accepts DATA UPDATE USERINFO
+        # (Return=0) even though its pushver reads as 1.x. So: ADMS → queue.
+        if not is_adms and not pushver.startswith("2") and terminal_ip:
+            # Genuine direct/legacy PushVer 1.x reader on a reachable LAN IP —
+            # background ZKLib push
             from ..services.zkteco.direct_connection import _make_zk
             from zk import const as zk_const
             employees_snapshot = list(rows)
@@ -1302,7 +1293,8 @@ async def sync_all_users_to_device(
                 "status": "started",
             }
 
-        # Queue DATA UPDATE USERINFO commands (PushVer 2.x)
+        # Queue DATA UPDATE USERINFO commands (ADMS readers, or any PushVer 2.x).
+        # Reader applies them on its next /iclock/getrequest poll.
         count = 0
         for row in rows:
             queue_command(db, sn, _build_adms_userinfo_cmd(row), current_user.id)
