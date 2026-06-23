@@ -28,5 +28,9 @@ EXPOSE 8000
 # Health check
 HEALTHCHECK --interval=30s --timeout=30s --start-period=30s --retries=3 CMD curl -f http://localhost:8000/health || exit 1
 
-# Production: no --reload, explicit host binding
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Production: no --reload, explicit host binding.
+# --proxy-headers + --forwarded-allow-ips lets uvicorn trust nginx's
+# X-Forwarded-Proto so request.url.scheme is https behind TLS — otherwise
+# FastAPI trailing-slash 307 redirects point to http:// and the browser blocks
+# them as mixed content.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*"]
