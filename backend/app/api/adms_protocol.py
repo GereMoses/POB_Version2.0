@@ -149,7 +149,35 @@ def _valid_sn(sn: str) -> bool:
 
 # ── Body parser ──────────────────────────────────────────────────────────────
 
-def parse_adms_body(body: str) -> List[Tuple[str, Dict[str, str]]]:
+# Map the ZKTeco `table=` query value AND OPERLOG line prefixes to our record
+# types. Real readers signal attendance with `table=ATTLOG` and user/biometric
+# edits with `table=OPERLOG`, whose rows are prefixed USER / FP / FACE / BIODATA.
+_TYPE_ALIASES = {
+    "ATTLOG": "ATTLOG", "ATTPHOTO": "ATTPHOTO",
+    "OPERLOG": "OPERLOG", "OPLOG": "OPERLOG",
+    "USER": "USERINFO", "USERINFO": "USERINFO",
+    "FP": "FINGERTMP", "FINGERTMP": "FINGERTMP",
+    "FACE": "FACETMP", "FACETMP": "FACETMP", "FACEV2": "FACETMP",
+    "BIODATA": "BIODATA", "BIOPHOTO": "ATTPHOTO",
+}
+
+
+def _parse_positional_attlog(parts: List[str]) -> Dict[str, str]:
+    """Canonical ZKTeco ATTLOG row (no keys), tab-separated positional fields:
+        PIN  Time  Status  VerifyType  WorkCode  Reserved…
+    This is what BioTime receives — the type comes from the `table=ATTLOG` query
+    param, not the body, so there is nothing to key on inside the row."""
+    vals = [p.strip() for p in parts]
+    if len(vals) < 2 or not vals[0] or not vals[1]:
+        return {}
+    fields = {"PIN": vals[0], "Time": vals[1]}
+    if len(vals) > 2 and vals[2] != "": fields["Status"]   = vals[2]
+    if len(vals) > 3 and vals[3] != "": fields["Verify"]   = vals[3]
+    if len(vals) > 4 and vals[4] != "": fields["WorkCode"] = vals[4]
+    return fields
+
+
+def parse_adms_body(body: str, table_hint: Optional[str] = None) -> List[Tuple[str, Dict[str, str]]]:
     """
     Parse an ADMS POST body and return a list of (record_type, field_dict) tuples.
 
@@ -174,6 +202,36 @@ def parse_adms_body(body: str) -> List[Tuple[str, Dict[str, str]]]:
 
     KNOWN_TYPES = {"ATTLOG", "OPERLOG", "USERINFO", "FINGERTMP", "FACETMP",
                    "ATTPHOTO", "ENROLL_FP", "FACE", "BIODATA"}
+
+    # ── Canonical path: the URL's `table=` tells us the record type ──────────────
+    # This is how BioTime/ZKTeco firmware actually work. When present, trust it:
+    #   table=ATTLOG  → positional rows  PIN⇥Time⇥Status⇥Verify⇥WorkCode
+    #   table=OPERLOG → rows prefixed USER / FP / FACE / BIODATA (key=value)
+    # Rows may still carry their own type prefix (some firmware double-tags); we
+    # honour that first, then fall back to the table type from the URL.
+    table = _TYPE_ALIASES.get((table_hint or "").strip().upper(), (table_hint or "").strip().upper())
+    if table:
+        recs: List[Tuple[str, Dict[str, str]]] = []
+        for line in lines:
+            head = line.split(None, 1)                         # split on first whitespace
+            tag  = _TYPE_ALIASES.get(head[0].strip().upper()) if head else None
+            if tag and len(head) > 1 and '=' in head[1]:
+                fields = _parse_tab_fields(head[1].split('\t'))
+                if fields:
+                    recs.append((tag, fields))
+                    continue
+            if '=' in line:                                    # key=value row under this table
+                fields = _parse_tab_fields(line.split('\t'))
+                if fields:
+                    recs.append((table, fields))
+            elif table == "ATTLOG":                            # positional punch row
+                fields = _parse_positional_attlog(line.split('\t'))
+                if fields:
+                    recs.append(("ATTLOG", fields))
+            # else: positional non-ATTLOG payload (e.g. photo blob) — skip
+        if recs:
+            return recs
+        # table given but nothing parsed → fall through to the heuristics below
 
     # Detect Format A (legacy key=value): no tab chars, contains '='
     if '\t' not in body and '=' in body:
@@ -1387,6 +1445,11 @@ async def _handle_cdata(request: Request, db: Session) -> PlainTextResponse:
     sn      = request.query_params.get('SN', '')
     options = request.query_params.get('options', '')
     pushver = request.query_params.get('pushver', '1.0')
+    # ZKTeco signals the record type via the `table=` query param (ATTLOG, OPERLOG,
+    # ATTPHOTO, …). Some firmware uses `tablename` / `Table`. BioTime relies on this.
+    table   = (request.query_params.get('table')
+               or request.query_params.get('tablename')
+               or request.query_params.get('Table') or '')
 
     if not _valid_sn(sn):
         logger.warning(f"ADMS bad SN {sn!r} from {_real_client_ip(request)}")
@@ -1417,8 +1480,14 @@ async def _handle_cdata(request: Request, db: Session) -> PlainTextResponse:
     body_str   = body_bytes.decode('utf-8', errors='replace') if body_bytes else ""
 
     if body_str.strip():
-        parsed_records = parse_adms_body(body_str)
-        logger.info(f"ADMS {sn}: {len(parsed_records)} records in body")
+        parsed_records = parse_adms_body(body_str, table_hint=table)
+        logger.info(f"ADMS {sn}: table={table or '-'} {len(parsed_records)} records in body")
+        # If a non-empty POST parsed to nothing, the firmware is using a wire
+        # dialect we don't recognise — log the raw head so we can add support.
+        if not parsed_records:
+            logger.warning(
+                "ADMS %s: NON-EMPTY body parsed to 0 records (table=%r) — raw[:300]=%r",
+                sn, table, body_str[:300])
 
         # Group by record type for batch processing
         by_type: Dict[str, List[Dict]] = {}
