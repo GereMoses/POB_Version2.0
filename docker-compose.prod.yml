@@ -227,6 +227,7 @@ services:
     volumes:
       - ./nginx/conf.d:/etc/nginx/conf.d:ro
       - ./nginx/certs:/etc/nginx/certs:ro
+      - ./nginx/certbot-webroot:/var/www/certbot:ro
       - uploads_data:/var/www/uploads:ro
       - media_data:/var/www/media:ro
       - nginx_logs:/var/log/nginx
