@@ -299,8 +299,16 @@ def build_options_block(terminal: IClockTerminal, pushver: str) -> str:
         f"UserStamp={user_stamp}",
         "ErrorDelay=30",
         f"Delay={delay}",
-        "TransTimes=00:00;14:05",
+        "TransTimes=00:00;23:59",
         "TransInterval=1",
+        # TransFlag selects WHICH record types the reader uploads. Without it (or
+        # with 0s) the reader never transmits attendance — punches stay on-device.
+        # 10 ones = upload everything (attlog, oplog, attphoto, bio, etc.).
+        "TransFlag=1111111111",
+        # Realtime=1 → push each event the moment it happens (not just on the
+        # TransInterval/TransTimes schedule). Required for live attendance/zone feeds.
+        "Realtime=1",
+        "Encrypt=0",
         "TimeZone=0",
         f"DateTime={server_time}",
     ]
