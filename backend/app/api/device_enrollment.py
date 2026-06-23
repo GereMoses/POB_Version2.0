@@ -42,6 +42,16 @@ def _queue_cmd(db: Session, sn: str, cmd: str) -> int:
     return result.fetchone()[0]
 
 
+def _is_adms_reader(terminal, device) -> bool:
+    """True when the reader is push-mode (cloud/NAT) — the server CANNOT open a
+    direct ZKLib TCP socket to it, so direct pull/enroll would fail with Broken
+    pipe. Such readers must be driven through the ADMS command queue instead."""
+    mode = (getattr(device, "connection_mode", None)
+            or getattr(terminal, "connection_mode", None)
+            or "adms").strip().lower()
+    return mode not in ("direct", "both")
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # ENROLLMENT STATUS
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -265,25 +275,57 @@ async def get_enrollment_report(
 async def enable_enrollment_mode(
     sn: str = Query(..., description="Device serial number"),
     emp_code: Optional[str] = Query(None, description="Pre-select employee on device"),
+    finger_id: int = Query(0, description="Finger slot 0-9 to enroll (ignored for face)"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """
-    Send ENABLE ENROLL command to device — opens the enrollment UI on the device screen.
-    Optionally pre-select an employee so their templates are captured automatically.
+    Remote (ADMS) enrollment trigger — works for cloud/NAT readers that the server
+    cannot reach over TCP. Queues commands the reader fetches on its next poll:
+
+      1. DATA UPDATE USERINFO — make sure the employee exists on the reader.
+      2. ENROLL_FP            — open the fingerprint-enrollment screen for that PIN.
+
+    The employee then scans on the reader; the captured template is pushed back to
+    the server automatically via /iclock/cdata (handle_fingertmp) — no pull needed.
+
+    Uses the ZKTeco PUSH protocol command format (tab-separated, ENROLL_FP — NOT the
+    ZKLib "ENROLL FP" form, which push readers reject as UNKNOWN CMD).
     """
     terminal = db.query(IClockTerminal).filter(IClockTerminal.sn == sn).first()
     if not terminal:
         raise HTTPException(status_code=404, detail="Device not found")
 
-    cmd = f"ENROLL FP PIN={emp_code}" if emp_code else "ENROLL FP"
-    cmd_id = _queue_cmd(db, sn, cmd)
+    queued = []
+
+    if emp_code:
+        # Ensure the user exists on the reader first (idempotent — harmless if already there).
+        person = db.query(Personnel).filter(Personnel.emp_code == emp_code).first()
+        name = ((person.full_name if person else None)
+                or (f"{person.first_name or ''} {person.last_name or ''}".strip() if person else None)
+                or emp_code)[:24]
+        card = (str(person.card_number) if person and person.card_number else "")
+        userinfo = (f"DATA UPDATE USERINFO PIN={emp_code}\t"
+                    f"Name={name}\tPri=0\tPasswd=\tCard={card}\tGrp=1\tTZ=0")
+        queued.append(_queue_cmd(db, sn, userinfo))
+
+        # Open the enrollment screen for this PIN / finger.
+        enroll = (f"ENROLL_FP PIN={emp_code}\tFID={finger_id}\tRETRY=3\tOVERWRITE=1")
+        cmd_id = _queue_cmd(db, sn, enroll)
+        queued.append(cmd_id)
+    else:
+        cmd_id = _queue_cmd(db, sn, "ENROLL_FP")
+        queued.append(cmd_id)
 
     return {"success": True, "data": {
         "command_id": cmd_id,
+        "command_ids": queued,
         "sn": sn,
         "emp_code": emp_code,
-        "message": f"Enrollment mode command queued for {terminal.alias or sn}"
+        "finger_id": finger_id,
+        "message": (f"Enrollment queued for {terminal.alias or sn}. Go to the reader — it will "
+                    f"open the enrollment screen for this employee; the scanned template syncs "
+                    f"back automatically."),
     }}
 
 
@@ -466,6 +508,14 @@ async def pull_templates_from_device(
     terminal = db.query(IClockTerminal).filter(IClockTerminal.sn == sn).first()
     device   = db.query(Device).filter(Device.serial_number == sn).first()
 
+    if _is_adms_reader(terminal, device):
+        raise HTTPException(
+            status_code=400,
+            detail=("This is a remote (ADMS) reader — its templates cannot be pulled over "
+                    "the internet (there is no ADMS 'get all biometrics' command). Enroll on "
+                    "the reader and the template syncs back automatically, or do a one-time "
+                    "pull while on the same LAN."))
+
     ip   = getattr(terminal, "ip_address", None) or getattr(device, "ip_address", None)
     port = getattr(device, "port", None) or 4370
     if not ip:
@@ -579,6 +629,14 @@ async def enroll_direct(
 
     terminal = db.query(IClockTerminal).filter(IClockTerminal.sn == payload.sn).first()
     device   = db.query(Device).filter(Device.serial_number == payload.sn).first()
+
+    if _is_adms_reader(terminal, device):
+        raise HTTPException(
+            status_code=400,
+            detail=("This is a remote (ADMS) reader — live Direct-TCP capture isn't possible "
+                    "over the internet. Use ADMS enrollment (Enroll → ADMS mode): it queues "
+                    "the enrollment to the reader and the scanned template syncs back "
+                    "automatically."))
 
     ip   = getattr(terminal, "ip_address", None) or getattr(device, "ip_address", None)
     port = getattr(device, "port", None) or 4370

@@ -3,7 +3,8 @@
  * Push personnel user data (name, ID, access level) and sync biometric
  * templates to one or all registered ZKTeco readers.
  *
- * Uses the existing POST /api/v1/zkteco/devices/{id}/sync-personnel endpoint.
+ * Pushes users via the ADMS command queue (POST /iclock/cmd/push-users), which
+ * works for both remote (ADMS) readers and direct-IP readers.
  */
 import React, { useState } from 'react';
 import {
@@ -28,35 +29,49 @@ const TemplateSyncTab = ({ terminals = [] }) => {
   const [syncState, setSyncState] = useState({}); // deviceId → { loading, result }
 
   const { data: devicesData, isLoading, refetch } = useQuery({
-    queryKey: ['zkteco-sync-devices'],
-    queryFn: () => apiService.get('/api/v1/zkteco/devices'),
+    queryKey: ['device-terminals-sync'],
+    queryFn: () => apiService.get('/api/device/terminals/'),
     staleTime: 30000,
   });
-  const devices = devicesData?.devices ?? devicesData ?? [];
+  const devices = (Array.isArray(devicesData) ? devicesData : (devicesData?.data ?? []))
+    .map(t => {
+      const sn = t.sn || t.serial_number;
+      return {
+        id: sn, sn,
+        name: t.alias || t.device_name || sn,
+        serial_number: sn,
+        ip_address: t.ip_address,
+        status: t.status,
+        connection_mode: t.connection_mode,
+      };
+    });
 
-  const syncDevice = async (deviceId, deviceName) => {
-    setSyncState(s => ({ ...s, [deviceId]: { loading: true, result: null } }));
+  const syncDevice = async (sn, deviceName) => {
+    setSyncState(s => ({ ...s, [sn]: { loading: true, result: null } }));
     try {
-      const res = await apiService.post(`/api/v1/zkteco/devices/${deviceId}/sync-personnel`);
-      const synced = res?.synced ?? res?.count ?? 0;
+      // Push all active users to the reader via the ADMS command queue.
+      const res = await apiService.post('/iclock/cmd/push-users', { sn });
+      const m = /Queued\s+(\d+)/.exec(res?.detail || '');
+      const synced = m ? parseInt(m[1], 10) : (res?.queued ?? res?.count ?? 0);
       setSyncState(s => ({
         ...s,
-        [deviceId]: { loading: false, result: { success: true, synced } },
+        [sn]: { loading: false, result: { success: true, synced } },
       }));
-      message.success(`${deviceName}: ${synced} users synced`);
+      message.success(`${deviceName}: queued ${synced} user(s) — applied on next device poll`);
     } catch (e) {
+      const err = e?.response?.data?.detail || e?.message || 'Sync failed';
       setSyncState(s => ({
         ...s,
-        [deviceId]: { loading: false, result: { success: false, error: e?.message || 'Sync failed' } },
+        [sn]: { loading: false, result: { success: false, error: err } },
       }));
-      message.error(`${deviceName}: ${e?.message || 'Sync failed'}`);
+      message.error(`${deviceName}: ${err}`);
     }
   };
 
   const syncAll = async () => {
     if (!devices.length) return;
     message.info(`Syncing ${devices.length} devices…`);
-    await Promise.allSettled(devices.map(d => syncDevice(d.id, d.name || d.serial_number)));
+    await Promise.allSettled(devices.map(d => syncDevice(d.sn, d.name)));
   };
 
   const successCount = Object.values(syncState).filter(s => s.result?.success).length;
@@ -92,14 +107,14 @@ const TemplateSyncTab = ({ terminals = [] }) => {
     {
       title: 'Last Sync', key: 'last_sync', width: 130,
       render: (_, r) => {
-        const s = syncState[r.id];
+        const s = syncState[r.sn];
         if (!s) return <Text type="secondary" style={{ fontSize: 12 }}>—</Text>;
         if (s.loading) return <SyncOutlined spin style={{ color: '#3B82F6' }} />;
         if (s.result?.success)
           return (
             <Space size={4}>
               <CheckCircleOutlined style={{ color: '#22C55E' }} />
-              <Text style={{ fontSize: 12, color: '#22C55E' }}>{s.result.synced} users</Text>
+              <Text style={{ fontSize: 12, color: '#22C55E' }}>{s.result.synced} queued</Text>
             </Space>
           );
         return (
@@ -118,8 +133,8 @@ const TemplateSyncTab = ({ terminals = [] }) => {
         <Button
           size="small"
           icon={<SyncOutlined />}
-          loading={syncState[r.id]?.loading}
-          onClick={() => syncDevice(r.id, r.name || r.serial_number)}
+          loading={syncState[r.sn]?.loading}
+          onClick={() => syncDevice(r.sn, r.name || r.serial_number)}
           type="primary"
           ghost
         >

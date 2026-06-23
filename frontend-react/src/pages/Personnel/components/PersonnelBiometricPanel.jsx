@@ -3,7 +3,7 @@
  * Shown in the employee detail drawer — lets admins view, register,
  * and manage biometric credentials (fingerprints, face, RFID card).
  */
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Row, Col, Card, Tag, Button, Space, Alert, Divider,
   Input, InputNumber, Select, Tooltip, Popconfirm, Modal,
@@ -79,6 +79,21 @@ const PersonnelBiometricPanel = ({ empCode, personnelId }) => {
   });
   const terminals = Array.isArray(terminalsRes) ? terminalsRes : (terminalsRes?.data ?? []);
 
+  // A reader is "ADMS" (remote/cloud) unless explicitly direct/both. ADMS readers
+  // can only be driven through the command queue — direct ZKLib pull/enroll fails.
+  const isAdmsMode = (m) => !['direct', 'both'].includes(String(m || 'adms').toLowerCase());
+  const termIsAdms = (t) => isAdmsMode(t?.connection_mode);
+
+  // Watch the device chosen in the Enroll modal so we can lock the mode: a remote
+  // (ADMS) reader must use the ADMS path — Direct TCP can't reach it.
+  const watchedSn = Form.useWatch('sn', enrollForm);
+  const selectedTerminal = terminals.find(t => (t.sn || t.serial_number) === watchedSn);
+  const selectedIsAdms = selectedTerminal ? termIsAdms(selectedTerminal) : false;
+
+  useEffect(() => {
+    if (selectedIsAdms) enrollForm.setFieldsValue({ mode: 'adms' });
+  }, [selectedIsAdms]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // ── Derived state ──────────────────────────────────────────────────────────
 
   const enrolledSlots = new Set(
@@ -121,10 +136,10 @@ const PersonnelBiometricPanel = ({ empCode, personnelId }) => {
 
   // ── Enrollment mutations ───────────────────────────────────────────────────
 
-  // ADMS: queue ENROLL FP command on device (device shows enrollment screen)
+  // ADMS: queue ENROLL_FP command on device (device shows enrollment screen)
   const admsEnrollMutation = useMutation({
-    mutationFn: ({ sn }) =>
-      apiService.post(`/api/device/enrollment/enable/?sn=${encodeURIComponent(sn)}&emp_code=${encodeURIComponent(empCode)}`),
+    mutationFn: ({ sn, finger_id }) =>
+      apiService.post(`/api/device/enrollment/enable/?sn=${encodeURIComponent(sn)}&emp_code=${encodeURIComponent(empCode)}&finger_id=${finger_id ?? 0}`),
     onSuccess: (res) => {
       message.success(res?.data?.message ?? 'Enrollment command queued — employee should now scan on the device');
       setEnrollModal(false);
@@ -198,10 +213,13 @@ const PersonnelBiometricPanel = ({ empCode, personnelId }) => {
   });
 
   const onEnrollSubmit = (values) => {
-    if (values.mode === 'adms') {
-      admsEnrollMutation.mutate({ sn: values.sn });
+    // A remote (ADMS) reader can never use Direct TCP — force the ADMS path.
+    const selTerm = terminals.find(t => (t.sn || t.serial_number) === values.sn);
+    const fid = values.finger_id ?? 0;
+    if (values.mode === 'adms' || termIsAdms(selTerm)) {
+      admsEnrollMutation.mutate({ sn: values.sn, finger_id: fid });
     } else {
-      directEnrollMutation.mutate({ sn: values.sn, finger_id: values.finger_id ?? 0 });
+      directEnrollMutation.mutate({ sn: values.sn, finger_id: fid });
     }
   };
 
@@ -415,13 +433,20 @@ const PersonnelBiometricPanel = ({ empCode, personnelId }) => {
               {enrollment.source_devices.map(sn => {
                 const term = terminals.find(t => (t.sn || t.serial_number) === sn);
                 const label = term?.alias || term?.device_name || sn;
+                const isAdms = termIsAdms(term);
                 return (
                   <div key={sn} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                     <Tag icon={<ThunderboltOutlined />} color="geekblue">{label}</Tag>
-                    <Popconfirm title={`Pull latest templates from ${label}?`} okText="Pull"
-                      onConfirm={() => pullMutation.mutate(sn)}>
-                      <Button size="small" icon={<DownloadOutlined />} loading={pullMutation.isPending}>Pull</Button>
-                    </Popconfirm>
+                    {isAdms ? (
+                      <Tooltip title="Remote (ADMS) reader — templates sync back automatically on enrollment. Manual pull isn't available over the internet.">
+                        <Button size="small" icon={<DownloadOutlined />} disabled>Auto-sync</Button>
+                      </Tooltip>
+                    ) : (
+                      <Popconfirm title={`Pull latest templates from ${label}?`} okText="Pull"
+                        onConfirm={() => pullMutation.mutate(sn)}>
+                        <Button size="small" icon={<DownloadOutlined />} loading={pullMutation.isPending}>Pull</Button>
+                      </Popconfirm>
+                    )}
                   </div>
                 );
               })}
@@ -454,13 +479,6 @@ const PersonnelBiometricPanel = ({ empCode, personnelId }) => {
             }
           />
 
-          <Form.Item label="Enrollment Mode" name="mode" rules={[{ required: true }]}>
-            <Select>
-              <Option value="adms">ADMS (device-side enrollment — recommended)</Option>
-              <Option value="direct">Direct TCP (live capture)</Option>
-            </Select>
-          </Form.Item>
-
           <Form.Item label="Device" name="sn" rules={[{ required: true, message: 'Select a device' }]}>
             <Select placeholder="Select reader" showSearch optionFilterProp="children">
               {terminals.map(t => {
@@ -475,6 +493,9 @@ const PersonnelBiometricPanel = ({ empCode, personnelId }) => {
                         : <Badge status="default" />
                       }
                       {label}
+                      <Tag color={termIsAdms(t) ? 'blue' : 'green'} style={{ fontSize: 10 }}>
+                        {termIsAdms(t) ? 'ADMS' : 'Direct'}
+                      </Tag>
                       {ip && <Tag style={{ fontSize: 10 }}>{ip}</Tag>}
                     </Space>
                   </Option>
@@ -483,18 +504,30 @@ const PersonnelBiometricPanel = ({ empCode, personnelId }) => {
             </Select>
           </Form.Item>
 
-          <Form.Item noStyle shouldUpdate={(p, c) => p.mode !== c.mode}>
-            {({ getFieldValue }) => getFieldValue('mode') === 'direct' && (
-              <Form.Item label="Finger Slot" name="finger_id" rules={[{ required: true }]}
-                tooltip="Which finger to enroll. For face capture, select Face.">
-                <Select>
-                  {FINGER_SLOTS.map(i => (
-                    <Option key={i} value={i}>{FINGER_LABELS[i]}</Option>
-                  ))}
-                  <Option value={10}>Face</Option>
-                </Select>
-              </Form.Item>
-            )}
+          {selectedIsAdms && (
+            <Alert type="success" showIcon style={{ marginBottom: 16, fontSize: 12 }}
+              message="Remote (ADMS) reader — enrollment runs on the device"
+              description="The enrollment is queued to the reader. Walk to the device: it opens the fingerprint screen for this employee, they scan, and the template syncs back automatically. Live Direct-TCP capture isn't available for remote readers." />
+          )}
+
+          <Form.Item label="Enrollment Mode" name="mode" rules={[{ required: true }]}
+            tooltip={selectedIsAdms ? 'This reader is remote (ADMS) — Direct TCP is not available.' : undefined}>
+            <Select disabled={selectedIsAdms}>
+              <Option value="adms">ADMS (device-side enrollment — recommended)</Option>
+              <Option value="direct" disabled={selectedIsAdms}>
+                Direct TCP (live capture){selectedIsAdms ? ' — not available for remote readers' : ''}
+              </Option>
+            </Select>
+          </Form.Item>
+
+          <Form.Item label="Finger Slot" name="finger_id" rules={[{ required: true }]}
+            tooltip="Which finger to enroll. For face capture, select Face.">
+            <Select>
+              {FINGER_SLOTS.map(i => (
+                <Option key={i} value={i}>{FINGER_LABELS[i]}</Option>
+              ))}
+              <Option value={10}>Face</Option>
+            </Select>
           </Form.Item>
         </Form>
       </Modal>
