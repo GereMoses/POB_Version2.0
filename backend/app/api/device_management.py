@@ -185,14 +185,20 @@ def queue_command(db: Session, device_sn: str, command: str, user_id: Optional[i
         raise
 
 def _build_adms_userinfo_cmd(row) -> str:
-    """Build a proper ZKTeco ADMS DATA UPDATE USERINFO command (tab-separated fields)."""
-    name = f"{row.first_name or ''} {row.last_name or ''}".strip() or row.emp_code
+    """Build a ZKTeco PUSH-protocol DATA UPDATE USERINFO command.
+
+    Format is confirmed working (reader replies Return=0): a SPACE after USERINFO,
+    then tab-separated PIN/Name/Pri/Passwd/Card/Grp/TZ. The previous form
+    (`USERINFO\\tPin=..Privilege=..Password=..Group=..TimeZone=..`) was rejected
+    with Return=-1 — wrong leading separator AND wrong field names — which is why
+    Sync All Employees / Sync User / Sync Department silently never landed.
+    """
+    name = (f"{row.first_name or ''} {row.last_name or ''}".strip() or row.emp_code)[:24]
     card = getattr(row, 'card_no', '') or ''
     pwd  = getattr(row, 'pwd', '') or ''
     return (
-        f"DATA UPDATE USERINFO\tPin={row.emp_code}\t"
-        f"Name={name}\tCard={card}\tPrivilege=0\t"
-        f"Password={pwd}\tGroup=1\tTimeZone=0\tVerify=0"
+        f"DATA UPDATE USERINFO PIN={row.emp_code}\t"
+        f"Name={name}\tPri=0\tPasswd={pwd}\tCard={card}\tGrp=1\tTZ=0"
     )
 
 
