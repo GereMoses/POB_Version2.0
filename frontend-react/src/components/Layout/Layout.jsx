@@ -373,14 +373,17 @@ const Layout = ({ user, onLogout, children }) => {
     for (const group of NAV_GROUPS) {
       for (const item of group.items) {
         if (item.children) {
+          // A grouping parent (e.g. 'personnel-group') has no page of its own, so
+          // its breadcrumb must not link to that dead key — fall back to /dashboard.
+          const parentPath = item.key.startsWith('/') ? item.key : '/dashboard';
           const child = item.children.find(c => c.key === path);
           if (child) {
-            crumbs.push({ label: item.label, path: item.key });
+            crumbs.push({ label: item.label, path: parentPath });
             crumbs.push({ label: child.label, path: child.key });
             return crumbs;
           }
           if (path.startsWith(item.key + '/')) {
-            crumbs.push({ label: item.label, path: item.key });
+            crumbs.push({ label: item.label, path: parentPath });
             return crumbs;
           }
         } else if (item.key === path || path.startsWith(item.key + '/')) {
