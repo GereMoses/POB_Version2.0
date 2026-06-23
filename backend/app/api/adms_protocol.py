@@ -397,6 +397,21 @@ def _parse_punch_time(time_str: str) -> Optional[datetime]:
     return None
 
 
+def _punch_already_stored(emp_code: str, punch_time: datetime, sn: str, db: Session) -> bool:
+    """True if this exact punch is already in iclock_transaction. ZKTeco readers
+    resend un-acked batches (and a lost OK duplicates a punch), so we dedupe on
+    the same key BioTime uses: (emp_code, punch_time, terminal_sn)."""
+    try:
+        return db.query(IClockTransaction.id).filter(
+            IClockTransaction.emp_code   == emp_code,
+            IClockTransaction.punch_time == punch_time,
+            IClockTransaction.terminal_sn == sn,
+        ).first() is not None
+    except Exception:
+        db.rollback()
+        return False
+
+
 def handle_attlog(records: List[Dict], sn: str, db: Session) -> Tuple[int, int, Dict[int, int]]:
     """
     Process a batch of ATTLOG records.
@@ -469,6 +484,8 @@ def handle_attlog(records: List[Dict], sn: str, db: Session) -> Tuple[int, int, 
                 logger.warning(f"Onboard status non-fatal error: {oe}")
             # Force punch direction so T&A calculation is unambiguous
             forced_state = 0 if reader_purpose == 'ACCESS_ENTRY' else 1
+            if _punch_already_stored(emp_code, punch_time, sn, db):
+                continue
             try:
                 txn = IClockTransaction(
                     emp_code=emp_code,
@@ -557,6 +574,10 @@ def handle_attlog(records: List[Dict], sn: str, db: Session) -> Tuple[int, int, 
                 saved += 1
             except Exception as e:
                 logger.error(f"Mustering punch error for {emp_code}@{sn}: {e}")
+            continue
+
+        # Skip resent/duplicate punches (reader retries an un-acked batch).
+        if _punch_already_stored(emp_code, punch_time, sn, db):
             continue
 
         try:
@@ -1536,6 +1557,14 @@ async def _handle_cdata(request: Request, db: Session) -> PlainTextResponse:
 
         if 'FACETMP' in by_type:
             handle_facetmp(by_type['FACETMP'], sn, db)
+
+    # A data-bearing POST is an UPLOAD — the reader expects a bare "OK" to confirm
+    # receipt and advance past those records. Returning the options block instead
+    # makes the reader think the upload failed, so it resends the same punches
+    # every cycle (~20-30s) forever. Options are delivered on the GET handshake and
+    # commands via /iclock/getrequest, so acking uploads with OK breaks nothing.
+    if request.method == "POST" and body_str.strip():
+        return PlainTextResponse(ADMS_OK)
 
     # Build response: options block + any queued commands
     options_block = build_options_block(terminal, pushver)
