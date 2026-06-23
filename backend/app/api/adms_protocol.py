@@ -1893,10 +1893,14 @@ async def cmd_push_users(body: PushUsersRequest, db: Session = Depends(get_db)):
         for emp in employees:
             name  = f"{emp.first_name or ''} {emp.last_name or ''}".strip()
             card  = getattr(emp, 'card_no', '') or ''
+            # ZKTeco PUSH USERINFO format: a SPACE after USERINFO, then tab-separated
+            # fields with EXACT names PIN/Name/Pri/Passwd/Card/Grp/TZ. Wrong names
+            # (Pin/Privilege/Password/Group/TimeZone) make the device reject it with
+            # Return=-1&CMD=DATA.
             cmd   = (
-                f"DATA UPDATE USERINFO\tPin={emp.emp_code}\t"
-                f"Name={name}\tCard={card}\tPrivilege=0\t"
-                f"Password=\tGroup=1\tTimeZone=0\tVerify=0"
+                f"DATA UPDATE USERINFO PIN={emp.emp_code}\t"
+                f"Name={name or emp.emp_code}\tPri=0\tPasswd=\t"
+                f"Card={card}\tGrp=1\tTZ=0"
             )
             queue_command(body.sn, cmd, db)
             queued += 1
