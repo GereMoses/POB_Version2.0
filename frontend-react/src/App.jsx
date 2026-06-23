@@ -1,5 +1,5 @@
 import React from 'react';
-import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ConfigProvider, App as AntdApp, Result, Button } from 'antd';
 // import { ReactQueryDevtools } from '@tanstack/react-query-devtools';
@@ -308,6 +308,11 @@ function App() {
                   ? <SubscriptionDashboard />
                   : <Result status="403" title="Access Denied" subTitle="Global Admin access required." />
               } />
+
+              {/* Any unmatched route (e.g. the 'personnel-group' menu group, which
+                  has no page of its own) redirects to the dashboard instead of
+                  rendering a blank content area. */}
+              <Route path="*" element={<Navigate to="/dashboard" replace />} />
             </Routes>
           </Layout>
         </Router>
