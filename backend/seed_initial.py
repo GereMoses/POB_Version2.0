@@ -16,17 +16,45 @@ from sqlalchemy import create_engine, text
 from app.core.security import get_password_hash
 
 
+def seed_permissions(engine) -> None:
+    """
+    Populate auth_permission from the app's DEFAULT_PERMISSIONS catalogue
+    (idempotent). Without this the Roles & Permissions screen lists no
+    permissions, so a new role cannot be granted anything.
+    """
+    try:
+        from app.models.roles import DEFAULT_PERMISSIONS
+    except Exception as e:
+        print(f"[seed] could not import DEFAULT_PERMISSIONS: {e}", flush=True)
+        return
+    inserted = 0
+    with engine.begin() as conn:
+        for p in DEFAULT_PERMISSIONS:
+            r = conn.execute(text(
+                "INSERT INTO auth_permission (name, codename, description) "
+                "SELECT :n, :c, :cat WHERE NOT EXISTS "
+                "(SELECT 1 FROM auth_permission WHERE codename = :c)"
+            ), {"n": p["name"], "c": p["code"], "cat": p.get("category", "")})
+            inserted += r.rowcount or 0
+        total = conn.execute(text("SELECT count(*) FROM auth_permission")).scalar()
+    print(f"[seed] permissions: +{inserted} (total {total})", flush=True)
+
+
 def main() -> int:
     url = os.getenv("DATABASE_URL", "postgresql://pob_user:pob_password@postgres:5432/pob_system")
     username = os.getenv("GLOBAL_ADMIN_USERNAME", "globaladmin")
     password = os.getenv("GLOBAL_ADMIN_PASSWORD", "")
     email = os.getenv("GLOBAL_ADMIN_EMAIL", "admin@apexpob.local")
 
+    engine = create_engine(url)
+
+    # Permission catalogue — always seeded (idempotent), independent of the admin.
+    seed_permissions(engine)
+
     if not password:
         print("[seed] GLOBAL_ADMIN_PASSWORD not set — skipping admin seed", flush=True)
         return 0
 
-    engine = create_engine(url)
     with engine.begin() as conn:
         # Already have a global admin? Then do nothing (idempotent).
         existing = conn.execute(text(
