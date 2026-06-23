@@ -2263,16 +2263,27 @@ async def cmd_sync_time(body: TimeSyncRequest, db: Session = Depends(get_db)):
         except Exception as exc:
             logger.warning(f"Direct sync exception for {body.sn}: {exc} — falling back to ADMS queue")
 
-    # ADMS command queue fallback
-    cmd_id = queue_command(body.sn, f"DATE TIME {correct_time_str}", db)
-    logger.info(f"ADMS time sync queued for {body.sn}: {correct_time_str} (cmd_id={cmd_id})")
+    # ADMS command queue fallback.
+    # The ZKTeco PUSH protocol does NOT understand "DATE TIME <str>" (the reader
+    # replies Return=-1 / UNKNOWN CMD — that is an SDK/ZKLib command). Push-mode
+    # readers set their clock via `SET OPTIONS DateTime=<encoded>`, where the
+    # encoded integer packs the date/time:
+    #   ((Y-2000)*12*31 + (M-1)*31 + (D-1))*24*3600 + H*3600 + Min*60 + Sec
+    enc = (((correct_time.year - 2000) * 12 * 31
+            + (correct_time.month - 1) * 31
+            + (correct_time.day - 1)) * 24 * 3600
+           + correct_time.hour * 3600
+           + correct_time.minute * 60
+           + correct_time.second)
+    cmd_id = queue_command(body.sn, f"SET OPTIONS DateTime={enc}", db)
+    logger.info(f"ADMS time sync queued for {body.sn}: {correct_time_str} (DateTime={enc}, cmd_id={cmd_id})")
     return {
         "success":     True,
         "sn":          body.sn,
         "server_time": correct_time_str,
         "cmd_id":      cmd_id,
         "method":      "adms",
-        "message":     "DATE TIME queued — device will sync on next heartbeat poll",
+        "message":     "SET OPTIONS DateTime queued — device will sync on next heartbeat poll",
     }
 
 
@@ -2282,8 +2293,8 @@ async def cmd_sync_time_all(db: Session = Depends(get_db)):
     Sync ALL approved readers to server time.
 
     Direct-IP devices (connection_mode 'direct'/'both') are synced immediately
-    via ZKLib TCP.  ADMS push devices receive a DATE TIME command on their next
-    heartbeat poll.  Direct sync falls back to ADMS queue on connection failure.
+    via ZKLib TCP.  ADMS push devices receive a `SET OPTIONS DateTime` command on
+    their next heartbeat poll.  Direct sync falls back to ADMS queue on failure.
     """
     terminals = db.query(IClockTerminal).filter(
         IClockTerminal.state == STATE_APPROVED
@@ -2304,6 +2315,13 @@ async def cmd_sync_time_all(db: Session = Depends(get_db)):
 
     correct_time = datetime.now()
     correct_time_str = correct_time.strftime('%Y-%m-%d %H:%M:%S')
+    # Encoded form for the PUSH protocol's `SET OPTIONS DateTime=<n>` (see cmd_sync_time).
+    enc_datetime = (((correct_time.year - 2000) * 12 * 31
+                     + (correct_time.month - 1) * 31
+                     + (correct_time.day - 1)) * 24 * 3600
+                    + correct_time.hour * 3600
+                    + correct_time.minute * 60
+                    + correct_time.second)
     results = []
     queued  = 0
 
@@ -2326,7 +2344,7 @@ async def cmd_sync_time_all(db: Session = Depends(get_db)):
 
         # ADMS queue (primary for push devices, fallback for direct)
         try:
-            cmd_id = queue_command(t.sn, f"DATE TIME {correct_time_str}", db)
+            cmd_id = queue_command(t.sn, f"SET OPTIONS DateTime={enc_datetime}", db)
             results.append({
                 "sn": t.sn, "alias": t.alias or t.sn,
                 "method": "adms", "status": "queued", "cmd_id": cmd_id,
