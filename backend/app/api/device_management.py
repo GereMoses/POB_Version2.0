@@ -948,6 +948,68 @@ async def _execute_direct_command(device: Device, cmd: str) -> dict:
         return {"success": False, "error": str(exc)}
 
 
+async def _direct_delete_user(device: Device, emp_code: str) -> dict:
+    """Delete an employee from a direct (ZKLib) reader: resolve uid by emp_code,
+    then delete. Wrapped in with_device_released so it doesn't fight live_capture."""
+    from ..services.zkteco.direct_connection import zkteco_direct
+    from ..services.zkteco.live_capture import with_device_released
+    if not emp_code:
+        return {"success": False, "error": "emp_code is required"}
+    ip, port = device.ip_address, device.port or 4370
+
+    async def _do():
+        users = await zkteco_direct.get_users_from_device(ip, port)
+        if not users.get("success"):
+            return {"success": False, "error": users.get("error", "could not read device users")}
+        uid = next((u["uid"] for u in users.get("users", [])
+                    if str(u.get("user_id")) == str(emp_code)), None)
+        if uid is None:
+            return {"success": False, "error": f"User {emp_code} is not on this device"}
+        return await zkteco_direct.delete_user(ip=ip, uid=uid, port=port)
+
+    try:
+        return await with_device_released(device.id, _do())
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+
+# ── Control-plane classification (single source of truth for command routing) ──
+PLANE_DIRECT = "direct"   # server → ZKLib (pyzk) TCP; command runs immediately
+PLANE_ADMS   = "adms"     # reader → polls /iclock/getrequest; command is QUEUED
+
+# Access-control panels (InBio / C3-400) speak neither pyzk's standalone protocol
+# nor (necessarily) ADMS push. Flag them so the UI can warn and callers never
+# silently send a command that can't reach them.
+_ACCESS_PANEL_HINTS = ("inbio", "c3-400", "c3-200", "c3-100", "c3400", "c3 400", "c3pro", "c3 pro")
+
+
+def _looks_like_access_panel(*texts) -> bool:
+    blob = " ".join(t.lower() for t in texts if t)
+    return any(h in blob for h in _ACCESS_PANEL_HINTS)
+
+
+def classify_control_plane(sn: str, db: Session) -> dict:
+    """Decide HOW a command must reach a device — the one place this is decided:
+         connection_mode in (direct, both) AND a reachable IP  → DIRECT (ZKLib)
+         otherwise                                             → ADMS (queued poll)
+       Also flags InBio/C3 access panels (pyzk can't drive them)."""
+    dev  = db.query(Device).filter(Device.serial_number == sn).first()
+    term = db.query(IClockTerminal).filter(IClockTerminal.sn == sn).first()
+    mode = (getattr(dev, "connection_mode", None)
+            or getattr(term, "connection_mode", None) or "adms").strip().lower()
+    ip    = getattr(dev, "ip_address", None) or getattr(term, "ip_address", None)
+    port  = getattr(dev, "port", None) or 4370
+    model = (getattr(term, "device_model", None) or getattr(term, "device_name", None)
+             or getattr(dev, "device_name", None) or "")
+    alias = getattr(term, "alias", None) or ""
+    plane = PLANE_DIRECT if (mode in ("direct", "both") and ip) else PLANE_ADMS
+    return {
+        "sn": sn, "plane": plane, "connection_mode": mode,
+        "ip": ip, "port": port, "model": model,
+        "is_access_panel": _looks_like_access_panel(model, alias, sn),
+    }
+
+
 @router.post("/api/device/devcmd")
 async def send_device_command(
     command_data: DeviceCommandRequest,
@@ -1025,6 +1087,18 @@ async def send_device_command(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to send command"
         )
+
+
+@router.get("/api/device/control-planes/")
+async def get_control_planes(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Per-device control-plane map (plane=direct|adms, is_access_panel) so the
+    Command UI can segregate ADMS (push/queue) from Direct (ZKLib) readers and
+    flag InBio/C3 access panels. Backend stays the single source of truth."""
+    sns = [r[0] for r in db.execute(text("SELECT sn FROM iclock_terminal")).fetchall()]
+    return {"data": [classify_control_plane(sn, db) for sn in sns]}
 
 
 @router.delete("/api/device/devcmd/{command_id}")
@@ -2227,51 +2301,63 @@ async def send_extended_command(
         if not terminal:
             raise HTTPException(status_code=404, detail="Device not found")
 
-        p = payload.params
-        cmd_map = {
-            "OPEN_DOOR":    f"OPEN DOOR {p.get('door_id', 1)}",
-            "LOCK":         "DEVICE LOCK",
-            "UNLOCK":       "DEVICE UNLOCK",
-            "DISABLE":      "DISABLE",
-            "ENABLE":       "ENABLE",
-            "DELETE_USER":  f"DATA DELETE USERINFO\tPin={p.get('emp_code', '')}",
-            "SET_ACCESS":   f"DATA UPDATE USERINFO\tPin={p.get('emp_code')}\tACCGROUP={p.get('acc_level_id', 0)}\tPRIVILEGE={p.get('privilege', 0)}",
-            "SET_OPTION":   f"SET OPTION {p.get('key', 'LANGUAGE')}={p.get('value', '0')}",
-            "BIODATA":      f"DATA UPDATE BIODATA PIN={p.get('emp_code', 'ALL')}",
-            "ENROLL":       f"ENROLL FP PIN={p.get('emp_code', '')}",
-            "ENROLL_FACE":  f"ENROLL FACE PIN={p.get('emp_code', '')}",
-            "BLACKLIST":    f"DATA UPDATE USERINFO PIN={p.get('emp_code')} PRIVILEGE=0 ACCGROUP=-1",
-        }
+        p = payload.params or {}
+        ct = payload.command_type
+        info = classify_control_plane(payload.sn, db)
 
-        cmd = cmd_map.get(payload.command_type)
-        if not cmd:
-            raise HTTPException(status_code=400, detail=f"Unknown command type: {payload.command_type}")
+        # Correct ADMS (PUSH-protocol) wire strings. None ⇒ no ADMS equivalent.
+        adms_cmd = {
+            "OPEN_DOOR":   f"CONTROL DEVICE 01 01 {p.get('door_id', 1)} {p.get('hold_seconds', 5)} 0",
+            "LOCK":        "DISABLE",
+            "UNLOCK":      "ENABLE",
+            "DISABLE":     "DISABLE",
+            "ENABLE":      "ENABLE",
+            "DELETE_USER": f"DATA DELETE USERINFO PIN={p.get('emp_code', '')}",
+            "SET_ACCESS":  f"DATA UPDATE USERINFO PIN={p.get('emp_code', '')}\tGrp={p.get('acc_level_id', 1)}\tPri={p.get('privilege', 0)}",
+            "ENROLL":      f"ENROLL_FP PIN={p.get('emp_code', '')}\tFID={p.get('finger_id', 0)}\tRETRY=3\tOVERWRITE=1",
+            "BLACKLIST":   f"DATA UPDATE USERINFO PIN={p.get('emp_code', '')}\tPri=0\tGrp=0",
+        }.get(ct)
 
-        # For DISABLE/ENABLE, try direct ZKLib first then fall back to ADMS queue
-        if payload.command_type in ("DISABLE", "ENABLE"):
-            direct_device = (
-                db.query(Device)
-                .filter(
-                    Device.serial_number == payload.sn,
-                    Device.connection_mode.in_(["direct", "both"]),
-                    Device.ip_address.isnot(None),
-                )
-                .first()
-            )
-            if direct_device:
-                result = await _execute_direct_command(direct_device, cmd)
-                if result.get("success"):
-                    return {"success": True, "data": {"sn": payload.sn, "command_type": payload.command_type, "status": "executed", "method": "direct"}}
-                logger.warning(f"Direct {cmd} failed for {payload.sn}, queuing ADMS: {result.get('error')}")
+        # ── DIRECT plane → run immediately via ZKLib ──────────────────────────
+        if info["plane"] == PLANE_DIRECT:
+            device = db.query(Device).filter(Device.serial_number == payload.sn).first()
+            if ct == "OPEN_DOOR":
+                result = await _execute_direct_command(device, "OPEN DOOR")
+            elif ct in ("DISABLE", "LOCK"):
+                result = await _execute_direct_command(device, "DISABLE")
+            elif ct in ("ENABLE", "UNLOCK"):
+                result = await _execute_direct_command(device, "ENABLE")
+            elif ct == "DELETE_USER":
+                result = await _direct_delete_user(device, p.get("emp_code", ""))
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(f"'{ct}' can't run on a direct (ZKLib) reader from here. "
+                            "Use the Enrollment tab for biometric/access changes, or set "
+                            "the reader to ADMS mode."))
+            if not result.get("success"):
+                raise HTTPException(status_code=502, detail=result.get("error", "Command failed on device"))
+            db.execute(text("""
+                INSERT INTO iclock_devcmd (sn, cmd_content, cmd_commit_time, cmd_trans_time, cmd_return_time, status)
+                VALUES (:sn, :cmd, :now, :now, :now, 2)
+            """), {"sn": payload.sn, "cmd": f"{ct} (direct)", "now": datetime.utcnow()})
+            db.commit()
+            return {"success": True, "data": {
+                "sn": payload.sn, "command_type": ct, "status": "executed", "method": "direct"}}
 
-        cmd_id = queue_command(db, payload.sn, cmd, current_user.id)
-
+        # ── ADMS plane → queue for the next poll ──────────────────────────────
+        if not adms_cmd:
+            raise HTTPException(
+                status_code=400,
+                detail=f"'{ct}' has no ADMS equivalent — it only works on a direct (ZKLib) reader.")
+        cmd_id = queue_command(db, payload.sn, adms_cmd, current_user.id)
         return {"success": True, "data": {
             "command_id": cmd_id,
             "sn": payload.sn,
-            "command_type": payload.command_type,
-            "cmd_string": cmd,
+            "command_type": ct,
+            "cmd_string": adms_cmd,
             "status": "pending",
+            "method": "adms",
         }}
     except HTTPException:
         raise

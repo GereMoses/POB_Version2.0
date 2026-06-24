@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import {
   Table, Button, Space, Input, Select, App, Popconfirm, Tooltip,
   Card, Row, Col, Badge, Drawer, Alert, Statistic, Tag, Form,
-  Modal, Progress, Divider, Spin, Typography,
+  Modal, Progress, Divider, Spin, Typography, Segmented,
 } from 'antd';
 import {
   ThunderboltOutlined, SendOutlined, ReloadOutlined, DeleteOutlined,
@@ -119,6 +119,10 @@ const DeviceCommands = () => {
   const [syncAllBusy,  setSyncAllBusy]  = useState(false);
   const [flushBusy,    setFlushBusy]    = useState(false);
 
+  // Control-plane separation: 'direct' (ZKLib, runs now) vs 'adms' (push, queued)
+  const [plane,    setPlane]    = useState('direct');
+  const [planeMap, setPlaneMap] = useState({});  // sn → {plane, is_access_panel, ...}
+
   // modal states
   const [syncEmpModal,   setSyncEmpModal]   = useState(false);
   const [syncDeptModal,  setSyncDeptModal]  = useState(false);
@@ -157,6 +161,12 @@ const DeviceCommands = () => {
       const res = await deviceAPI.getTerminals({ limit: 1000 });
       setDevices(Array.isArray(res) ? res : (res?.data || []));
     } catch { /* silent */ }
+    try {
+      const pres = await apiService.get('/api/device/control-planes/');
+      const map = {};
+      (pres?.data || []).forEach(p => { map[p.sn] = p; });
+      setPlaneMap(map);
+    } catch { /* silent — falls back to connection_mode */ }
   }, []);
 
   const fetchDrift = useCallback(async () => {
@@ -384,6 +394,25 @@ const DeviceCommands = () => {
     return d ? `${d.alias || sn} (${sn})` : sn;
   };
 
+  // ── Control-plane helpers ──────────────────────────────────────────────────
+  const planeOf = (sn) => {
+    const info = planeMap[sn];
+    if (info?.plane) return info.plane;
+    const d = devices.find(x => x.sn === sn);          // fallback to connection_mode
+    const m = String(d?.connection_mode || 'adms').toLowerCase();
+    return (m === 'direct' || m === 'both') ? 'direct' : 'adms';
+  };
+  const isPanel = (sn) => !!planeMap[sn]?.is_access_panel;
+  const planeDevices = devices.filter(d => planeOf(d.sn) === plane);
+  const admsSelected = plane === 'adms';               // ADMS readers can't take ZKLib-only cmds
+  const selectedIsPanel = actionDevice ? isPanel(actionDevice) : false;
+
+  // If the active device no longer belongs to the chosen plane, clear it.
+  useEffect(() => {
+    if (actionDevice && planeOf(actionDevice) !== plane) setActionDevice(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [plane]);
+
   const noDevice = !actionDevice;
 
   // ── Table columns ────────────────────────────────────────────────────────
@@ -509,21 +538,30 @@ const DeviceCommands = () => {
             </div>
             <div>
               <div style={{ fontWeight: 800, fontSize: 15, color: '#0f172a' }}>Device Control Panel</div>
-              <div style={{ fontSize: 11, color: '#94a3b8' }}>Select a reader, then choose a command</div>
+              <div style={{ fontSize: 11, color: '#94a3b8' }}>Pick a control plane, select a reader, then choose a command</div>
             </div>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Segmented
+              value={plane}
+              onChange={setPlane}
+              options={[
+                { label: `Direct · ZKLib (${devices.filter(d => planeOf(d.sn) === 'direct').length})`, value: 'direct' },
+                { label: `ADMS · Push (${devices.filter(d => planeOf(d.sn) === 'adms').length})`,   value: 'adms' },
+              ]}
+            />
             <Select
               showSearch
-              placeholder="Select reader / device…"
-              style={{ minWidth: 280 }}
+              placeholder={`Select ${plane === 'direct' ? 'direct' : 'ADMS'} reader…`}
+              style={{ minWidth: 260 }}
               value={actionDevice}
               onChange={setActionDevice}
               allowClear
               optionFilterProp="label"
-              options={devices.map(d => ({
+              notFoundContent={`No ${plane === 'direct' ? 'direct/ZKLib' : 'ADMS'} readers`}
+              options={planeDevices.map(d => ({
                 value: d.sn,
-                label: `${d.alias || d.sn} — ${d.sn}`,
+                label: `${d.alias || d.sn} — ${d.sn}${isPanel(d.sn) ? ' [panel]' : ''}`,
               }))}
             />
             <Button
@@ -538,10 +576,28 @@ const DeviceCommands = () => {
           </div>
         </div>
 
+        {/* Plane behaviour banner — makes segregation explicit */}
+        <Alert
+          type={admsSelected ? 'warning' : 'success'} showIcon
+          style={{ borderRadius: 8, marginBottom: 12 }}
+          message={admsSelected
+            ? 'ADMS (Push) plane — commands are QUEUED and applied when the reader next polls (~30s). Direct-only actions (Pull/Get Users/Clear Logs/Test/Info) are hidden.'
+            : 'Direct (ZKLib) plane — commands run IMMEDIATELY over a TCP connection to the reader on the LAN.'}
+        />
+
+        {selectedIsPanel && (
+          <Alert
+            type="error" showIcon
+            style={{ borderRadius: 8, marginBottom: 12 }}
+            message="Access-control panel detected (InBio / C3)"
+            description="These panels don't speak the standalone ZKLib protocol. If commands fail here, the panel must be driven over ADMS push (or a dedicated panel integration). Verify its connection before relying on direct commands."
+          />
+        )}
+
         {noDevice && (
           <Alert
             type="info" showIcon
-            message="Select a reader from the dropdown above to enable the commands below."
+            message={`Select a ${plane === 'direct' ? 'direct' : 'ADMS'} reader above to enable the commands below.`}
             style={{ borderRadius: 8, marginBottom: 16 }}
           />
         )}
@@ -595,7 +651,7 @@ const DeviceCommands = () => {
                 icon={<CloudDownloadOutlined />} color="#0891b2"
                 label="Get Users from Device"
                 desc="Import all users stored on reader into POB"
-                disabled={noDevice || busyCmd === 'getusers'}
+                disabled={noDevice || admsSelected || busyCmd === 'getusers'}
                 onClick={doGetUsers}
               />
             </div>
@@ -698,7 +754,7 @@ const DeviceCommands = () => {
                 icon={<DownloadOutlined />} color="#0891b2"
                 label="Pull Attendance Now"
                 desc="Force an attendance log pull"
-                disabled={noDevice || busyCmd === 'poll'}
+                disabled={noDevice || admsSelected || busyCmd === 'poll'}
                 onClick={doPollNow}
               />
 
@@ -706,7 +762,7 @@ const DeviceCommands = () => {
                 icon={<InfoCircleOutlined />} color="#64748b"
                 label="Get Device Info"
                 desc="Firmware, user/log counts"
-                disabled={noDevice || busyCmd === 'info'}
+                disabled={noDevice || admsSelected || busyCmd === 'info'}
                 onClick={doGetInfo}
               />
 
@@ -714,7 +770,7 @@ const DeviceCommands = () => {
                 icon={<WifiOutlined />} color="#16a34a"
                 label="Test Connection"
                 desc="Verify device is reachable"
-                disabled={noDevice || busyCmd === 'check'}
+                disabled={noDevice || admsSelected || busyCmd === 'check'}
                 onClick={doCheckConn}
               />
             </div>
@@ -734,7 +790,7 @@ const DeviceCommands = () => {
                   icon={<ClearOutlined />} color="#f59e0b"
                   label="Clear Attendance Logs"
                   desc="Erase punch records from device"
-                  disabled={noDevice || busyCmd === 'clearlogs'} danger
+                  disabled={noDevice || admsSelected || busyCmd === 'clearlogs'} danger
                 />
               </Popconfirm>
 
