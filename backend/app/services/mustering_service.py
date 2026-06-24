@@ -327,10 +327,16 @@ class MusteringService:
             if not device:
                 raise ValueError(f"Device {device_sn} not found")
             
-            # Find zone for this device — try reader_sn first, then any active event zone
+            # Find zone for this device — reader_sn, then the terminal's assigned
+            # zone_id (per-location headcount), then any active event zone.
             zone = self.db.query(Zone).filter(
                 Zone.reader_sn == device_sn
             ).first()
+
+            # Prefer the muster reader's OWN assigned zone so multiple Horus handhelds
+            # at different muster points each count to their own location.
+            if not zone and getattr(device, 'zone_id', None):
+                zone = self.db.query(Zone).filter(Zone.id == device.zone_id).first()
 
             if not zone:
                 # Fallback: find any active mustering event and use its zone.

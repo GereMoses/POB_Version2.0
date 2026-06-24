@@ -454,9 +454,14 @@ def handle_attlog(records: List[Dict], sn: str, db: Session) -> Tuple[int, int, 
         except Exception:
             zone_name = None
 
-    # Check mustering mode for this device once
+    # Check mustering mode for this device once. A reader counts as a muster reader
+    # if EITHER its access-door has mustering_mode set OR its purpose is MUSTERING
+    # (the simple way to designate a Horus handheld at a muster point) OR it's a
+    # mustering-type terminal (device_type=2).
     acc_door = db.query(AccDoor).filter(AccDoor.terminal_sn == sn).first()
-    mustering_mode = acc_door and getattr(acc_door, 'mustering_mode', False)
+    mustering_mode = (bool(acc_door and getattr(acc_door, 'mustering_mode', False))
+                      or reader_purpose == 'MUSTERING'
+                      or getattr(terminal, 'device_type', None) == 2)
 
     for rec in records:
         emp_code = rec.get('PIN') or rec.get('UserID') or rec.get('USERID')
