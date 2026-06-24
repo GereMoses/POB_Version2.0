@@ -28,7 +28,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from sqlalchemy import text
+from sqlalchemy import text, func
 
 from ..core.database import get_db, SessionLocal
 from ..core.config import settings
@@ -2403,7 +2403,10 @@ async def cmd_sync_time_all(db: Session = Depends(get_db)):
     their next heartbeat poll.  Direct sync falls back to ADMS queue on failure.
     """
     terminals = db.query(IClockTerminal).filter(
-        IClockTerminal.state == STATE_APPROVED
+        IClockTerminal.state == STATE_APPROVED,
+        # InBio/C3 controllers don't take ADMS/ZKLib time-sync — skip them so bulk
+        # ops never queue junk or raise errors for panels with no driver yet.
+        func.coalesce(IClockTerminal.connection_mode, 'adms') != 'controller',
     ).all()
 
     if not terminals:
