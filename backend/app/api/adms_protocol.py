@@ -351,7 +351,9 @@ def build_options_block(terminal: IClockTerminal, pushver: str) -> str:
     user_stamp = terminal.user_stamp or 0
     delay      = terminal.heartbeat_interval or 10
     server_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    is_v2 = pushver.startswith("2")
+    # PushVer 2.x AND 3.x (newer Android terminals like Horus) use the full v2
+    # options set; only legacy 1.x needs the reduced field list.
+    is_v2 = pushver[:1] in ("2", "3")
 
     lines = [
         "GET OPTION FROM THE SERVER",
@@ -852,6 +854,37 @@ def handle_facetmp(records: List[Dict], sn: str, db: Session) -> int:
     """Store face templates — finger_id = -1 convention."""
     face_records = [{**r, 'FingerID': '-1'} for r in records]
     return handle_fingertmp(face_records, sn, db)
+
+
+def handle_biodata(records: List[Dict], sn: str, db: Session) -> int:
+    """Store BIODATA records — the unified biometric format newer Android/face
+    terminals (e.g. Horus) push instead of FINGERTMP/FACETMP. Logs the first
+    record's shape so the exact field/Type names can be confirmed against the real
+    device, then maps into iclock_bio_template (finger_id -1 = face, 0-9 = fp slot).
+    BioType mapping is firmware-dependent — VERIFY on the actual Horus."""
+    if records:
+        logger.info("BIODATA %s: %d record(s); first keys=%s",
+                    sn, len(records), list(records[0].keys()))
+    mapped: List[Dict] = []
+    for r in records:
+        pin = r.get('PIN') or r.get('Pin') or r.get('UserID') or r.get('UserPin')
+        tmp = r.get('Tmp') or r.get('TMP') or r.get('TmpData') or r.get('Template') or ''
+        if not pin or not tmp:
+            continue
+        try:
+            btype = int(r.get('Type') or r.get('TYPE') or 0)
+        except (TypeError, ValueError):
+            btype = 0
+        if btype in (2, 9):                 # face (visible/IR) — VERIFY
+            fid = -1
+        else:                                # fingerprint slot from No/Index
+            idx = r.get('No') or r.get('Index') or '0'
+            fid = int(idx) if str(idx).isdigit() else 0
+        mapped.append({'PIN': pin, 'FingerID': str(fid),
+                       'Size': r.get('Size') or r.get('SIZE') or '0',
+                       'Valid': r.get('Valid') or r.get('VALID') or '1',
+                       'TmpData': tmp})
+    return handle_fingertmp(mapped, sn, db) if mapped else 0
 
 # ── Terminal management ──────────────────────────────────────────────────────
 
@@ -1566,6 +1599,9 @@ async def _handle_cdata(request: Request, db: Session) -> PlainTextResponse:
 
         if 'FACETMP' in by_type:
             handle_facetmp(by_type['FACETMP'], sn, db)
+
+        if 'BIODATA' in by_type:
+            handle_biodata(by_type['BIODATA'], sn, db)
 
     # A data-bearing POST is an UPLOAD — the reader expects a bare "OK" to confirm
     # receipt and advance past those records. Returning the options block instead
