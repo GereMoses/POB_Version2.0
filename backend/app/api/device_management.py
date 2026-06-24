@@ -996,8 +996,13 @@ def classify_control_plane(sn: str, db: Session) -> dict:
        Also flags InBio/C3 access panels (pyzk can't drive them)."""
     dev  = db.query(Device).filter(Device.serial_number == sn).first()
     term = db.query(IClockTerminal).filter(IClockTerminal.sn == sn).first()
-    mode = (getattr(dev, "connection_mode", None)
-            or getattr(term, "connection_mode", None) or "adms").strip().lower()
+    dev_mode  = (getattr(dev, "connection_mode", None) or "").strip().lower()
+    term_mode = (getattr(term, "connection_mode", None) or "").strip().lower()
+    mode = dev_mode or term_mode or "adms"
+    # A 'controller' flag in EITHER table wins — never let table drift cause a panel
+    # to be misrouted to ZKLib/ADMS (which would silently fail or send junk).
+    if PLANE_CONTROLLER in (dev_mode, term_mode):
+        mode = PLANE_CONTROLLER
     ip    = getattr(dev, "ip_address", None) or getattr(term, "ip_address", None)
     port  = getattr(dev, "port", None) or 4370
     model = (getattr(term, "device_model", None) or getattr(term, "device_name", None)
