@@ -69,9 +69,10 @@ const { Title, Text } = Typography;
 // ─── Pure helpers (module scope — safe to call before component renders) ──────
 
 const CONNECTION_MODE_META = {
-  adms:   { label: 'ADMS',   color: 'purple', description: 'Device pushes to server' },
-  direct: { label: 'Direct', color: 'blue',   description: 'Server polls via ZKLib' },
-  both:   { label: 'Both',   color: 'cyan',   description: 'ADMS + ZKLib polling' },
+  adms:       { label: 'ADMS',       color: 'purple', description: 'Device pushes to server' },
+  direct:     { label: 'Direct',     color: 'blue',   description: 'Server polls via ZKLib' },
+  both:       { label: 'Both',       color: 'cyan',   description: 'ADMS + ZKLib polling' },
+  controller: { label: 'Controller', color: 'gold',   description: 'InBio/C3 access panel (driver pending)' },
 };
 
 const READER_PURPOSE_META = {
@@ -1362,6 +1363,7 @@ const DeviceList = ({ onDeviceSelect, refreshTrigger }) => {
                   <Option value="adms">ADMS — device pushes to server</Option>
                   <Option value="direct">Direct — server polls via ZKLib</Option>
                   <Option value="both">Both — ADMS + ZKLib polling</Option>
+                  <Option value="controller">Controller — InBio/C3 access panel (driver pending)</Option>
                 </Select>
               </Form.Item>
             </Col>

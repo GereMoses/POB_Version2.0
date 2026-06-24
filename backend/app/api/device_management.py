@@ -974,8 +974,9 @@ async def _direct_delete_user(device: Device, emp_code: str) -> dict:
 
 
 # ── Control-plane classification (single source of truth for command routing) ──
-PLANE_DIRECT = "direct"   # server → ZKLib (pyzk) TCP; command runs immediately
-PLANE_ADMS   = "adms"     # reader → polls /iclock/getrequest; command is QUEUED
+PLANE_DIRECT     = "direct"      # server → ZKLib (pyzk) TCP; command runs immediately
+PLANE_ADMS       = "adms"        # reader → polls /iclock/getrequest; command is QUEUED
+PLANE_CONTROLLER = "controller"  # InBio/C3 access panel — C3/PULL protocol (driver pending)
 
 # Access-control panels (InBio / C3-400) speak neither pyzk's standalone protocol
 # nor (necessarily) ADMS push. Flag them so the UI can warn and callers never
@@ -1002,7 +1003,12 @@ def classify_control_plane(sn: str, db: Session) -> dict:
     model = (getattr(term, "device_model", None) or getattr(term, "device_name", None)
              or getattr(dev, "device_name", None) or "")
     alias = getattr(term, "alias", None) or ""
-    plane = PLANE_DIRECT if (mode in ("direct", "both") and ip) else PLANE_ADMS
+    if mode == PLANE_CONTROLLER:
+        plane = PLANE_CONTROLLER          # admin explicitly flagged an InBio/C3 panel
+    elif mode in ("direct", "both") and ip:
+        plane = PLANE_DIRECT
+    else:
+        plane = PLANE_ADMS
     return {
         "sn": sn, "plane": plane, "connection_mode": mode,
         "ip": ip, "port": port, "model": model,
@@ -1019,6 +1025,16 @@ async def send_device_command(
     """Send command to device — direct via ZKLib for direct-connect devices, queued for ADMS devices."""
     try:
         validate_device_exists(db, command_data.sn)
+
+        # InBio/C3 access controllers speak the C3/PULL protocol — neither ZKLib nor
+        # ADMS. No driver yet, so never silently queue/ZKLib; tell the caller plainly.
+        if classify_control_plane(command_data.sn, db)["plane"] == PLANE_CONTROLLER:
+            return {
+                "sn": command_data.sn, "cmd": command_data.cmd, "status": "not_supported",
+                "message": ("This is an InBio/C3 access controller. POB's controller "
+                            "(C3/PULL) driver isn't available yet — manage it on its "
+                            "access-control software until that integration ships."),
+            }
 
         # Check if this is a direct-connect device (ZKLib, not ADMS queue)
         direct_device = (
@@ -2304,6 +2320,12 @@ async def send_extended_command(
         p = payload.params or {}
         ct = payload.command_type
         info = classify_control_plane(payload.sn, db)
+
+        if info["plane"] == PLANE_CONTROLLER:
+            raise HTTPException(
+                status_code=400,
+                detail=("InBio/C3 access controller — POB's controller (C3/PULL) driver "
+                        "isn't available yet, so this command can't be sent from here."))
 
         # Correct ADMS (PUSH-protocol) wire strings. None ⇒ no ADMS equivalent.
         adms_cmd = {

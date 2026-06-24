@@ -405,6 +405,7 @@ const DeviceCommands = () => {
   const isPanel = (sn) => !!planeMap[sn]?.is_access_panel;
   const planeDevices = devices.filter(d => planeOf(d.sn) === plane);
   const admsSelected = plane === 'adms';               // ADMS readers can't take ZKLib-only cmds
+  const controllerSelected = plane === 'controller';   // InBio/C3 — no driver yet, all cmds blocked
   const selectedIsPanel = actionDevice ? isPanel(actionDevice) : false;
 
   // If the active device no longer belongs to the chosen plane, clear it.
@@ -548,6 +549,7 @@ const DeviceCommands = () => {
               options={[
                 { label: `Direct · ZKLib (${devices.filter(d => planeOf(d.sn) === 'direct').length})`, value: 'direct' },
                 { label: `ADMS · Push (${devices.filter(d => planeOf(d.sn) === 'adms').length})`,   value: 'adms' },
+                { label: `Controller (${devices.filter(d => planeOf(d.sn) === 'controller').length})`, value: 'controller' },
               ]}
             />
             <Select
@@ -578,11 +580,13 @@ const DeviceCommands = () => {
 
         {/* Plane behaviour banner — makes segregation explicit */}
         <Alert
-          type={admsSelected ? 'warning' : 'success'} showIcon
+          type={controllerSelected ? 'error' : admsSelected ? 'warning' : 'success'} showIcon
           style={{ borderRadius: 8, marginBottom: 12 }}
-          message={admsSelected
-            ? 'ADMS (Push) plane — commands are QUEUED and applied when the reader next polls (~30s). Direct-only actions (Pull/Get Users/Clear Logs/Test/Info) are hidden.'
-            : 'Direct (ZKLib) plane — commands run IMMEDIATELY over a TCP connection to the reader on the LAN.'}
+          message={controllerSelected
+            ? 'Controller plane — InBio/C3 access panels. POB\'s controller (C3/PULL) driver is not available yet, so commands here are disabled. These run on their own access-control protocol; integration is planned.'
+            : admsSelected
+              ? 'ADMS (Push) plane — commands are QUEUED and applied when the reader next polls (~30s). Direct-only actions (Pull/Get Users/Clear Logs/Test/Info) are hidden.'
+              : 'Direct (ZKLib) plane — commands run IMMEDIATELY over a TCP connection to the reader on the LAN.'}
         />
 
         {selectedIsPanel && (
@@ -612,13 +616,13 @@ const DeviceCommands = () => {
                 title="Sync ALL active employees to this reader?"
                 description="This will push every active employee from the database to the selected device."
                 onConfirm={doSyncAll}
-                okText="Sync All" disabled={noDevice}
+                okText="Sync All" disabled={noDevice || controllerSelected}
               >
                 <ActionBtn
                   icon={<TeamOutlined />} color="#2563eb"
                   label="Sync All Employees"
                   desc="Push all active staff to reader"
-                  disabled={noDevice || busyCmd === 'sync-all'}
+                  disabled={noDevice || controllerSelected || busyCmd === 'sync-all'}
                 />
               </Popconfirm>
 
@@ -626,7 +630,7 @@ const DeviceCommands = () => {
                 icon={<UserOutlined />} color="#2563eb"
                 label="Sync One Employee"
                 desc="Push a single employee by code"
-                disabled={noDevice || busyCmd === 'sync-emp'}
+                disabled={noDevice || controllerSelected || busyCmd === 'sync-emp'}
                 onClick={() => { syncEmpForm.setFieldValue('sn', actionDevice); setSyncEmpModal(true); }}
               />
 
@@ -634,7 +638,7 @@ const DeviceCommands = () => {
                 icon={<TeamOutlined />} color="#0891b2"
                 label="Sync by Department"
                 desc="Push one department to reader"
-                disabled={noDevice || busyCmd === 'sync-dept'}
+                disabled={noDevice || controllerSelected || busyCmd === 'sync-dept'}
                 onClick={() => { syncDeptForm.setFieldValue('sn', actionDevice); setSyncDeptModal(true); }}
               />
 
@@ -642,7 +646,7 @@ const DeviceCommands = () => {
                 icon={<UserDeleteOutlined />} color="#7c3aed"
                 label="Remove Employee"
                 desc="Delete an employee from reader"
-                disabled={noDevice || busyCmd === 'remove-emp'}
+                disabled={noDevice || controllerSelected || busyCmd === 'remove-emp'}
                 onClick={() => { removeEmpForm.setFieldValue('sn', actionDevice); setRemoveEmpModal(true); }}
                 danger
               />
@@ -651,7 +655,7 @@ const DeviceCommands = () => {
                 icon={<CloudDownloadOutlined />} color="#0891b2"
                 label="Get Users from Device"
                 desc="Import all users stored on reader into POB"
-                disabled={noDevice || admsSelected || busyCmd === 'getusers'}
+                disabled={noDevice || controllerSelected || admsSelected || busyCmd === 'getusers'}
                 onClick={doGetUsers}
               />
             </div>
@@ -665,7 +669,7 @@ const DeviceCommands = () => {
                 icon={<UnlockOutlined />} color="#16a34a"
                 label="Open / Unlock Door"
                 desc="Temporarily unlock relay"
-                disabled={noDevice || busyCmd === 'open-door'}
+                disabled={noDevice || controllerSelected || busyCmd === 'open-door'}
                 onClick={() => { openDoorForm.setFieldValue('sn', actionDevice); setOpenDoorModal(true); }}
               />
 
@@ -673,26 +677,26 @@ const DeviceCommands = () => {
                 title="Disable this device (lockdown)?"
                 description="Local authentication will be suspended until you re-enable the device."
                 onConfirm={doDisable} okText="Disable" okButtonProps={{ danger: true }}
-                disabled={noDevice}
+                disabled={noDevice || controllerSelected}
               >
                 <ActionBtn
                   icon={<LockOutlined />} color="#dc2626"
                   label="Lock Down Device"
                   desc="Suspend local authentication"
-                  disabled={noDevice || busyCmd === 'disable'} danger
+                  disabled={noDevice || controllerSelected || busyCmd === 'disable'} danger
                 />
               </Popconfirm>
 
               <Popconfirm
                 title="Re-enable this device?"
                 onConfirm={doEnable} okText="Enable"
-                disabled={noDevice}
+                disabled={noDevice || controllerSelected}
               >
                 <ActionBtn
                   icon={<UnlockOutlined />} color="#16a34a"
                   label="Enable Device"
                   desc="Restore normal operation"
-                  disabled={noDevice || busyCmd === 'enable'}
+                  disabled={noDevice || controllerSelected || busyCmd === 'enable'}
                 />
               </Popconfirm>
 
@@ -700,26 +704,26 @@ const DeviceCommands = () => {
                 title="Activate EMERGENCY mode?"
                 description="Triggers emergency lockdown sequence on device."
                 onConfirm={doEmergencyOn} okText="Activate" okButtonProps={{ danger: true }}
-                disabled={noDevice}
+                disabled={noDevice || controllerSelected}
               >
                 <ActionBtn
                   icon={<SafetyOutlined />} color="#dc2626"
                   label="Emergency ON"
                   desc="Activate emergency lockdown"
-                  disabled={noDevice || busyCmd === 'emg-on'} danger
+                  disabled={noDevice || controllerSelected || busyCmd === 'emg-on'} danger
                 />
               </Popconfirm>
 
               <Popconfirm
                 title="Deactivate emergency mode?"
                 onConfirm={doEmergencyOff} okText="Deactivate"
-                disabled={noDevice}
+                disabled={noDevice || controllerSelected}
               >
                 <ActionBtn
                   icon={<SafetyOutlined />} color="#f59e0b"
                   label="Emergency OFF"
                   desc="Cancel emergency mode"
-                  disabled={noDevice || busyCmd === 'emg-off'}
+                  disabled={noDevice || controllerSelected || busyCmd === 'emg-off'}
                 />
               </Popconfirm>
             </div>
@@ -732,13 +736,13 @@ const DeviceCommands = () => {
               <Popconfirm
                 title="Restart this device?" description="The device will reboot. It will be offline for ~30 seconds."
                 onConfirm={doRestart} okText="Restart" okButtonProps={{ danger: true }}
-                disabled={noDevice}
+                disabled={noDevice || controllerSelected}
               >
                 <ActionBtn
                   icon={<PoweroffOutlined />} color="#f59e0b"
                   label="Restart Device"
                   desc="Reboot the reader"
-                  disabled={noDevice || busyCmd === 'restart'} danger
+                  disabled={noDevice || controllerSelected || busyCmd === 'restart'} danger
                 />
               </Popconfirm>
 
@@ -746,7 +750,7 @@ const DeviceCommands = () => {
                 icon={<ClockCircleOutlined />} color="#7c3aed"
                 label="Sync Device Time"
                 desc="Set clock to server UTC time"
-                disabled={noDevice || busyCmd === 'synctime'}
+                disabled={noDevice || controllerSelected || busyCmd === 'synctime'}
                 onClick={doSyncTime}
               />
 
@@ -754,7 +758,7 @@ const DeviceCommands = () => {
                 icon={<DownloadOutlined />} color="#0891b2"
                 label="Pull Attendance Now"
                 desc="Force an attendance log pull"
-                disabled={noDevice || admsSelected || busyCmd === 'poll'}
+                disabled={noDevice || controllerSelected || admsSelected || busyCmd === 'poll'}
                 onClick={doPollNow}
               />
 
@@ -762,7 +766,7 @@ const DeviceCommands = () => {
                 icon={<InfoCircleOutlined />} color="#64748b"
                 label="Get Device Info"
                 desc="Firmware, user/log counts"
-                disabled={noDevice || admsSelected || busyCmd === 'info'}
+                disabled={noDevice || controllerSelected || admsSelected || busyCmd === 'info'}
                 onClick={doGetInfo}
               />
 
@@ -770,7 +774,7 @@ const DeviceCommands = () => {
                 icon={<WifiOutlined />} color="#16a34a"
                 label="Test Connection"
                 desc="Verify device is reachable"
-                disabled={noDevice || admsSelected || busyCmd === 'check'}
+                disabled={noDevice || controllerSelected || admsSelected || busyCmd === 'check'}
                 onClick={doCheckConn}
               />
             </div>
@@ -784,13 +788,13 @@ const DeviceCommands = () => {
                 title="Clear attendance logs on device?"
                 description="This will permanently erase all punch records from the reader's memory. Database records are unaffected."
                 onConfirm={doClearLogs} okText="Clear Logs" okButtonProps={{ danger: true }}
-                disabled={noDevice}
+                disabled={noDevice || controllerSelected}
               >
                 <ActionBtn
                   icon={<ClearOutlined />} color="#f59e0b"
                   label="Clear Attendance Logs"
                   desc="Erase punch records from device"
-                  disabled={noDevice || admsSelected || busyCmd === 'clearlogs'} danger
+                  disabled={noDevice || controllerSelected || admsSelected || busyCmd === 'clearlogs'} danger
                 />
               </Popconfirm>
 
