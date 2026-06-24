@@ -19,6 +19,7 @@ from ..core.dependencies import get_current_user
 from ..models.user import User
 from ..models.biotime_models import IClockTerminal, IClockTransaction, PersonnelEmployee
 from ..models.device import Device, DeviceStatus, DeviceSchedule, DeviceMaintenance
+from ..services.device_planes import is_controller as _is_controller
 
 # Router
 router = APIRouter()
@@ -1021,6 +1022,17 @@ def classify_control_plane(sn: str, db: Session) -> dict:
     }
 
 
+def _block_controller(sn: str, db: Session) -> None:
+    """Refuse generic ADMS/ZKLib command paths for InBio/C3 controllers — they have
+    no driver yet, so a queued/ZKLib command would silently fail or send junk.
+    Call at the top of every command endpoint that isn't controller-specific."""
+    if _is_controller(sn, db):
+        raise HTTPException(
+            status_code=400,
+            detail=("InBio/C3 access controller — POB's controller (C3/PULL) driver "
+                    "isn't available yet, so this command can't be sent from here."))
+
+
 @router.post("/api/device/devcmd")
 async def send_device_command(
     command_data: DeviceCommandRequest,
@@ -1195,6 +1207,7 @@ async def sync_user_to_device(
     """
     try:
         terminal = validate_device_exists(db, sn)
+        _block_controller(sn, db)
 
         # Check personnel table first (UI-created employees), then personnel_employee (bulk import)
         row = db.execute(text("""
@@ -1282,6 +1295,7 @@ async def sync_all_users_to_device(
     """
     try:
         terminal = validate_device_exists(db, sn)
+        _block_controller(sn, db)
 
         # Fetch all active employees from both tables (personnel = UI-created, personnel_employee = bulk-imported)
         rows = db.execute(text("""
@@ -1464,6 +1478,7 @@ async def flush_pending_commands_via_zklib(
     them directly via ZKLib, then mark them as delivered.  Clears the backlog
     that builds up when the ADMS fallback queued commands a device never picks up.
     """
+    _block_controller(sn, db)
     device = db.execute(text("""
         SELECT ip_address, port FROM devices
         WHERE serial_number = :sn AND ip_address IS NOT NULL
@@ -1579,6 +1594,7 @@ async def sync_department_to_device(
     """Sync all active employees in a department to the device."""
     try:
         terminal = validate_device_exists(db, sn)
+        _block_controller(sn, db)
 
         rows = db.execute(text("""
             SELECT p.id, p.emp_code, p.first_name, p.last_name, NULL::text AS card_no, NULL::text AS pwd
@@ -1682,6 +1698,7 @@ async def emergency_device_command(
     try:
         # Validate device exists and is emergency type
         device = validate_device_exists(db, sn)
+        _block_controller(sn, db)
         
         if device.device_type != 3:  # Not emergency device
             raise HTTPException(

@@ -29,6 +29,7 @@ from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import text, func
+from ..services.device_planes import is_controller as _is_controller
 
 from ..core.database import get_db, SessionLocal
 from ..core.config import settings
@@ -92,6 +93,14 @@ async def _async_recalculate(emp_codes: Set[str], date_strs: Set[str]) -> None:
 ADMS_OK    = "OK"
 ADMS_NONE  = "NONE"
 ADMS_ERROR = "ERROR="
+
+
+def _block_controller(sn, db):
+    """Refuse ADMS command endpoints for InBio/C3 controllers (no driver yet)."""
+    if _is_controller(sn, db):
+        raise HTTPException(status_code=400, detail=(
+            "InBio/C3 access controller — POB's controller (C3/PULL) driver isn't "
+            "available yet, so this command can't be sent from here."))
 
 # state values on iclock_terminal
 STATE_PENDING  = 0
@@ -1980,6 +1989,7 @@ async def cmd_push_users(body: PushUsersRequest, db: Session = Depends(get_db)):
     terminal = db.query(IClockTerminal).filter(IClockTerminal.sn == body.sn).first()
     if not terminal:
         raise HTTPException(404, "Device not found")
+    _block_controller(body.sn, db)
 
     pushver = (terminal.pushver or "").strip()
 
@@ -2077,6 +2087,7 @@ async def cmd_push_templates(body: PushTemplatesRequest, db: Session = Depends(g
     """
     Queue DATA UPDATE FINGERTMP / FACETMP commands to push biometric templates to a device.
     """
+    _block_controller(body.sn, db)
     terminal = db.query(IClockTerminal).filter(IClockTerminal.sn == body.sn).first()
     if not terminal:
         raise HTTPException(404, "Device not found")
@@ -2202,6 +2213,7 @@ async def cmd_pull_users(body: _SNRequest, db: Session = Depends(get_db)):
     New users (not in DB) are created as pending employees.
     Existing employees get their card_no updated if the device has one.
     """
+    _block_controller(body.sn, db)
     terminal = db.query(IClockTerminal).filter(IClockTerminal.sn == body.sn).first()
     if not terminal:
         raise HTTPException(404, "Device not found")
@@ -2341,6 +2353,7 @@ async def cmd_sync_time(body: TimeSyncRequest, db: Session = Depends(get_db)):
     For ADMS push devices: queues a DATE TIME command; the device applies it
     on its next /iclock/getrequest poll.
     """
+    _block_controller(body.sn, db)
     terminal = db.query(IClockTerminal).filter(IClockTerminal.sn == body.sn).first()
     if not terminal:
         raise HTTPException(404, "Device not found")

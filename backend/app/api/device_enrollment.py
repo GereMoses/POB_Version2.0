@@ -19,6 +19,7 @@ from ..models.biotime_models import (
 )
 from ..models.personnel import Personnel, PersonnelStatus
 from ..models.resignation import Resignation, ResignationType
+from ..services.device_planes import is_controller as _is_controller
 
 router = APIRouter()
 
@@ -295,6 +296,10 @@ async def enable_enrollment_mode(
     terminal = db.query(IClockTerminal).filter(IClockTerminal.sn == sn).first()
     if not terminal:
         raise HTTPException(status_code=404, detail="Device not found")
+    if _is_controller(sn, db):
+        raise HTTPException(status_code=400, detail=(
+            "InBio/C3 access controller — biometric enrollment isn't available via "
+            "POB yet (controller driver pending). Enrol on the controller's software."))
 
     queued = []
 
@@ -370,6 +375,8 @@ async def push_templates_to_devices(
 
     commands_queued = []
     for sn in payload.target_sns:
+        if _is_controller(sn, db):
+            continue  # InBio/C3 panels have no template-push driver yet — skip
         terminal = db.query(IClockTerminal).filter(IClockTerminal.sn == sn).first()
         if not terminal:
             continue
