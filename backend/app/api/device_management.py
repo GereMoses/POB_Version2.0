@@ -1117,6 +1117,48 @@ async def get_control_planes(
     return {"data": [classify_control_plane(sn, db) for sn in sns]}
 
 
+# ── InBio/C3 access-controller endpoints (Phase 2 — transport under validation) ─
+class ControllerActionRequest(BaseModel):
+    sn: str
+    door_id: int = 1
+    duration: int = 5
+
+
+def _require_controller(sn: str, db: Session) -> dict:
+    info = classify_control_plane(sn, db)
+    if info["plane"] != PLANE_CONTROLLER:
+        raise HTTPException(status_code=400,
+                            detail="Device isn't a Controller. Set Connection Mode = Controller first.")
+    if not info["ip"]:
+        raise HTTPException(status_code=400, detail="Controller has no IP address configured.")
+    return info
+
+
+@router.post("/api/device/controller/test/")
+async def controller_test(
+    sn: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Try to reach an InBio/C3 controller and read its realtime-event buffer.
+    Returns success/error — used to validate the C3 driver against real hardware."""
+    info = _require_controller(sn, db)
+    from ..services.zkteco.c3_controller import test_connection
+    return test_connection(info["ip"], info["port"] or 4370)
+
+
+@router.post("/api/device/controller/open-door/")
+async def controller_open_door(
+    payload: ControllerActionRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Open (unlock) a door on an InBio/C3 controller for N seconds."""
+    info = _require_controller(payload.sn, db)
+    from ..services.zkteco.c3_controller import open_door
+    return open_door(info["ip"], payload.door_id, payload.duration, info["port"] or 4370)
+
+
 @router.delete("/api/device/devcmd/{command_id}")
 async def delete_device_command(
     command_id: int,
