@@ -12,10 +12,34 @@ from typing import AsyncGenerator, Optional
 from sqlalchemy.orm import Session
 
 from .tools import execute_tool
+from . import knowledge_base as _kb
+from . import knowledge_seed as _kb_seed
 
 logger = logging.getLogger(__name__)
 
 PROVIDER_INFO = {"provider": "ARIA Internal", "model": "knowledge-base", "free": True}
+
+# Knowledge-base entries are served when no live-data intent matches AND the query
+# clears this rank (precise AND hits ~0.4–1.0, OR-recall hits ~0.1–0.5). 0.12 keeps
+# out weak single-word overlaps while admitting genuine how-to / concept questions.
+_KB_ANSWER_THRESHOLD = 0.12
+_kb_seeded = False
+
+
+def _ensure_kb(db) -> None:
+    """Seed the knowledge base once per process if it's empty. Idempotent and
+    non-fatal — a KB problem must never break the chat path."""
+    global _kb_seeded
+    if _kb_seeded:
+        return
+    try:
+        if _kb.count(db) == 0:
+            _kb_seed.seed_all(db)
+        else:
+            _kb.ensure_table(db)
+        _kb_seeded = True
+    except Exception as exc:
+        logger.warning("ARIA KB init skipped: %s", exc)
 
 MONTH_NAMES = {
     'january':'01','february':'02','march':'03','april':'04',
@@ -1269,6 +1293,34 @@ async def aria_stream(
             yield f"data: {json.dumps({'type': 'text', 'text': text})}\n\n"
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
             return
+
+        # ── Knowledge base ───────────────────────────────────────────────────
+        # Consult the curated KB when EITHER:
+        #   (a) the query is phrased as a how-to / concept question — even if a data
+        #       keyword is present ("how do readers connect", "what is mustering").
+        #       Explanatory phrasing should win over a raw data dump; OR
+        #   (b) no real live-data intent matched at all (only the dashboard fallback).
+        # This is the "question sensitivity" layer: it reads the user's INTENT
+        # (explain vs. fetch), not just keywords.
+        _conceptual = bool(re.search(
+            r'\b(how\s+(do|does|to|can|would|should|are|is)|what\s+is|what\s+are|'
+            r'what\s+does|difference\s+between|explain|describe|why\s+(is|are|do|does|can)|'
+            r'guide|set\s?up|configure|connect|meaning\s+of|tell\s+me\s+about|'
+            r'walk\s+me\s+through|steps?\s+to|how\s+come)\b',
+            user_msg.lower()))
+        _data_intents = [i for i in intents if i[0] != 'get_dashboard_stats']
+        if _conceptual or not _data_intents:
+            _ensure_kb(db)
+            kb_hit = _kb.best_answer(user_msg, db, min_rank=_KB_ANSWER_THRESHOLD)
+            if kb_hit:
+                yield f"data: {json.dumps({'type': 'tool_call', 'tool': 'knowledge_base'})}\n\n"
+                yield f"data: {json.dumps({'type': 'text', 'text': kb_hit['answer']})}\n\n"
+                related = [h['question'] for h in _kb.search(user_msg, db, k=4)
+                           if h['id'] != kb_hit['id']][:3]
+                if related:
+                    yield f"data: {json.dumps({'type': 'follow_ups', 'items': related})}\n\n"
+                yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                return
 
         parts = []
         tools_called = []
