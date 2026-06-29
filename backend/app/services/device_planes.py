@@ -61,3 +61,20 @@ def plane_of(sn: str, db: Session) -> str:
 
 def is_controller(sn: str, db: Session) -> bool:
     return connection_mode(sn, db) == PLANE_CONTROLLER
+
+
+def is_direct_only(sn: str, db: Session) -> bool:
+    """True if the device is reachable ONLY by direct ZKLib TCP and does NOT poll
+    /iclock/getrequest — so an ADMS command QUEUED for it would never be delivered.
+
+    Used to refuse the ADMS-queue-only command endpoints (push-templates,
+    push-timezones, push-access-levels, query-attlog) for such a reader instead of
+    silently black-holing the command in iclock_devcmd.
+
+    Note: 'both' is NOT direct-only — it polls getrequest too, so queued commands
+    DO reach it. 'controller' is handled separately by is_controller()."""
+    dm, tm, _ = _modes(sn, db)
+    if PLANE_CONTROLLER in (dm, tm):
+        return False
+    mode = dm or tm or PLANE_ADMS
+    return mode == PLANE_DIRECT

@@ -376,9 +376,8 @@ except ImportError:
 
 def _sync_time_one_pass() -> None:
     """Synchronous inner body of the time-sync loop — runs in a thread pool."""
-    from .api.adms_protocol import queue_command, STATE_APPROVED, _get_direct_device
+    from .api.adms_protocol import queue_clock_sync, STATE_APPROVED, _get_direct_device
     from .models.biotime_models import IClockTerminal
-    correct_time_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     db = SessionLocal()
     try:
         terminals = db.query(IClockTerminal).filter(IClockTerminal.state == STATE_APPROVED).all()
@@ -387,7 +386,9 @@ def _sync_time_one_pass() -> None:
             if dev and (dev.connection_mode or '').lower() in ('direct', 'both'):
                 continue  # direct sync handled by async caller
             try:
-                queue_command(t.sn, f"DATE TIME {correct_time_str}", db)
+                # ADMS-correct clock command (SET OPTIONS DateTime=<enc>); push
+                # firmware rejects the ZKLib-style "DATE TIME <str>" as UNKNOWN CMD.
+                queue_clock_sync(t.sn, db)
             except Exception as te:
                 logger.warning(f"Time sync ADMS queue failed for {t.sn}: {te}")
         logger.info(f"Hourly ADMS time-sync queued for {len(terminals)} reader(s)")

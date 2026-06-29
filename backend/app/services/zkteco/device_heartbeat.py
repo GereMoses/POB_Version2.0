@@ -301,22 +301,25 @@ def _on_device_came_online(sn: str, now: datetime) -> None:
     except Exception:
         pass
 
-    # Queue a DATE TIME command so the device corrects its clock immediately
+    # Queue an ADMS clock-correction so the device fixes its clock immediately.
+    # Use the shared helper (SET OPTIONS DateTime=<enc>) — push firmware rejects the
+    # ZKLib-style "DATE TIME <str>" as UNKNOWN CMD. Skip direct-only readers: they
+    # don't poll the ADMS queue, so a queued command would just black-hole (this
+    # reconnect path also fires for flapping ADMS readers, which is how thousands of
+    # stale commands accumulated before).
     try:
-        correct_time = now.strftime('%Y-%m-%d %H:%M:%S')
+        from ...api.adms_protocol import queue_clock_sync, _is_direct_only
         db2 = SessionLocal()
         try:
-            from sqlalchemy import text as _text
-            db2.execute(_text(
-                "INSERT INTO iclock_devcmd (sn, cmd_content, cmd_commit_time, status) "
-                "VALUES (:sn, :cmd, :now, 0)"
-            ), {"sn": sn, "cmd": f"DATE TIME {correct_time}", "now": now})
-            db2.commit()
-            logger.info("Heartbeat: queued DATE TIME for %s on reconnect", sn)
+            if _is_direct_only(sn, db2):
+                logger.debug("Heartbeat: %s is direct-only — skipping ADMS clock queue", sn)
+            else:
+                queue_clock_sync(sn, db2)
+                logger.info("Heartbeat: queued clock sync for %s on reconnect", sn)
         finally:
             db2.close()
     except Exception as te:
-        logger.warning("Heartbeat: failed to queue DATE TIME for %s: %s", sn, te)
+        logger.warning("Heartbeat: failed to queue clock sync for %s: %s", sn, te)
 
 
 # ── Auto-discovery ────────────────────────────────────────────────────────────
