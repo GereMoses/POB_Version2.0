@@ -664,20 +664,19 @@ const ARIAWidget = () => {
             <Tooltip title="Daily Briefing"><Button type="text" size="small" icon={<ThunderboltOutlined />}
               style={{ color: 'rgba(255,255,255,0.9)', borderRadius: 8, height: 32, width: 32 }}
               onClick={() => { setShowQuickActions(false); sendMessage("Generate today's full operations briefing"); }} /></Tooltip>
-            {alerts.length > 0 && (
-              <Tooltip title={`${alerts.length} alert(s)`}>
-                <Badge count={alerts.length} size="small" offset={[2, -2]}>
-                  <Button type="text" size="small" icon={<BellFilled />}
-                    style={{ color: '#fbbf24', borderRadius: 8, height: 32, width: 32 }}
-                    onClick={() => sendMessage('Show system notifications and alerts')} />
-                </Badge>
-              </Tooltip>
-            )}
+            {/* Notification bell — always visible; badge + amber only when alerts exist */}
+            <Tooltip title={alerts.length > 0 ? `${alerts.length} alert(s)` : 'Notifications & alerts'}>
+              <Badge count={alerts.length} size="small" offset={[2, -2]}>
+                <Button type="text" size="small" icon={alerts.length > 0 ? <BellFilled /> : <BellOutlined />}
+                  style={{ color: alerts.length > 0 ? '#fbbf24' : 'rgba(255,255,255,0.9)', borderRadius: 8, height: 32, width: 32 }}
+                  onClick={() => sendMessage('Show system notifications and alerts')} />
+              </Badge>
+            </Tooltip>
+            {/* Settings — Button must be the Popover's DIRECT child or the click
+                trigger gets swallowed by a wrapping Tooltip and never toggles. */}
             <Popover content={<ScheduleSettings isDark={isDark} />} trigger="click" open={scheduleOpen} onOpenChange={setScheduleOpen} placement="bottomRight">
-              <Tooltip title="Schedule Briefing">
-                <Button type="text" size="small" icon={<SettingOutlined />}
-                  style={{ color: 'rgba(255,255,255,0.9)', borderRadius: 8, height: 32, width: 32 }} />
-              </Tooltip>
+              <Button type="text" size="small" icon={<SettingOutlined />} title="Schedule Briefing"
+                style={{ color: 'rgba(255,255,255,0.9)', borderRadius: 8, height: 32, width: 32 }} />
             </Popover>
             <Tooltip title="Clear chat"><Button type="text" size="small" icon={<ClearOutlined />}
               style={{ color: 'rgba(255,255,255,0.9)', borderRadius: 8, height: 32, width: 32 }}
