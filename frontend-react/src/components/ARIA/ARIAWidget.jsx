@@ -164,6 +164,25 @@ const Markdown = ({ children }) => {
 };
 
 // ── CSV export ────────────────────────────────────────────────────────────────
+// Download an ARIA-generated PDF report. The /report endpoint is auth-gated, so a
+// plain <a download> won't work — fetch with the token, then save the blob.
+async function downloadReport(report) {
+  if (!report?.url) return;
+  try {
+    const token = localStorage.getItem('token') || localStorage.getItem('authToken') || localStorage.getItem('access_token');
+    const res = await fetch(report.url, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const blob = await res.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = report.filename || 'report.pdf';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  } catch (e) {
+    console.error('ARIA report download failed', e);
+  }
+}
+
 function exportCSV(text, filename = 'aria-report.csv') {
   const tableMatch = text.match(/\|(.+)\|\n\|[-| ]+\|\n([\s\S]+?)(?:\n\n|$)/);
   if (!tableMatch) {
@@ -332,6 +351,16 @@ const Bubble = ({ msg, isDark, onFollowUp, onNavigate }) => {
                 {msg.chartData && (
                   <div style={{ marginTop: 12, borderTop: `1px solid ${isDark ? '#2a2a2a' : '#e8e8e8'}`, paddingTop: 12 }}>
                     <InlineChart chart={msg.chartData} isDark={isDark} />
+                  </div>
+                )}
+                {msg.report && (
+                  <div style={{ marginTop: 12 }}>
+                    <button onClick={() => downloadReport(msg.report)}
+                      style={{ display: 'inline-flex', alignItems: 'center', gap: 8, background: '#10b981', color: '#fff', border: 'none', borderRadius: 8, padding: '8px 16px', fontSize: 13, fontWeight: 600, cursor: 'pointer', boxShadow: '0 2px 6px rgba(16,185,129,0.3)' }}
+                      onMouseEnter={e => e.currentTarget.style.background = '#059669'}
+                      onMouseLeave={e => e.currentTarget.style.background = '#10b981'}>
+                      <DownloadOutlined /> {msg.report.label || 'Download report (PDF)'}
+                    </button>
                   </div>
                 )}
               </>
@@ -586,6 +615,8 @@ const ARIAWidget = () => {
               setMessages(prev => { const n=[...prev]; const l={...n[n.length-1]}; if(!l.toolCalls.includes(evt.tool)) l.toolCalls=[...l.toolCalls,evt.tool]; n[n.length-1]=l; return n; });
             } else if (evt.type === 'chart_data') {
               setMessages(prev => { const n=[...prev]; const l={...n[n.length-1]}; l.chartData=evt.chart; n[n.length-1]=l; return n; });
+            } else if (evt.type === 'report') {
+              setMessages(prev => { const n=[...prev]; const l={...n[n.length-1]}; l.report={ url: evt.url, filename: evt.filename, label: evt.label }; n[n.length-1]=l; return n; });
             } else if (evt.type === 'text') {
               setMessages(prev => { const n=[...prev]; const l={...n[n.length-1]}; l.content=(l.content??'')+evt.text; l.streaming=false; n[n.length-1]=l; return n; });
             } else if (evt.type === 'follow_ups') {
@@ -664,20 +695,19 @@ const ARIAWidget = () => {
             <Tooltip title="Daily Briefing"><Button type="text" size="small" icon={<ThunderboltOutlined />}
               style={{ color: 'rgba(255,255,255,0.9)', borderRadius: 8, height: 32, width: 32 }}
               onClick={() => { setShowQuickActions(false); sendMessage("Generate today's full operations briefing"); }} /></Tooltip>
-            {alerts.length > 0 && (
-              <Tooltip title={`${alerts.length} alert(s)`}>
-                <Badge count={alerts.length} size="small" offset={[2, -2]}>
-                  <Button type="text" size="small" icon={<BellFilled />}
-                    style={{ color: '#fbbf24', borderRadius: 8, height: 32, width: 32 }}
-                    onClick={() => sendMessage('Show system notifications and alerts')} />
-                </Badge>
-              </Tooltip>
-            )}
+            {/* Notification bell — always visible; badge + amber only when alerts exist */}
+            <Tooltip title={alerts.length > 0 ? `${alerts.length} alert(s)` : 'Notifications & alerts'}>
+              <Badge count={alerts.length} size="small" offset={[2, -2]}>
+                <Button type="text" size="small" icon={alerts.length > 0 ? <BellFilled /> : <BellOutlined />}
+                  style={{ color: alerts.length > 0 ? '#fbbf24' : 'rgba(255,255,255,0.9)', borderRadius: 8, height: 32, width: 32 }}
+                  onClick={() => sendMessage('Show system notifications and alerts')} />
+              </Badge>
+            </Tooltip>
+            {/* Settings — Button must be the Popover's DIRECT child or the click
+                trigger gets swallowed by a wrapping Tooltip and never toggles. */}
             <Popover content={<ScheduleSettings isDark={isDark} />} trigger="click" open={scheduleOpen} onOpenChange={setScheduleOpen} placement="bottomRight">
-              <Tooltip title="Schedule Briefing">
-                <Button type="text" size="small" icon={<SettingOutlined />}
-                  style={{ color: 'rgba(255,255,255,0.9)', borderRadius: 8, height: 32, width: 32 }} />
-              </Tooltip>
+              <Button type="text" size="small" icon={<SettingOutlined />} title="Schedule Briefing"
+                style={{ color: 'rgba(255,255,255,0.9)', borderRadius: 8, height: 32, width: 32 }} />
             </Popover>
             <Tooltip title="Clear chat"><Button type="text" size="small" icon={<ClearOutlined />}
               style={{ color: 'rgba(255,255,255,0.9)', borderRadius: 8, height: 32, width: 32 }}

@@ -12,10 +12,34 @@ from typing import AsyncGenerator, Optional
 from sqlalchemy.orm import Session
 
 from .tools import execute_tool
+from . import knowledge_base as _kb
+from . import knowledge_seed as _kb_seed
 
 logger = logging.getLogger(__name__)
 
 PROVIDER_INFO = {"provider": "ARIA Internal", "model": "knowledge-base", "free": True}
+
+# Knowledge-base entries are served when no live-data intent matches AND the query
+# clears this rank (precise AND hits ~0.4–1.0, OR-recall hits ~0.1–0.5). 0.12 keeps
+# out weak single-word overlaps while admitting genuine how-to / concept questions.
+_KB_ANSWER_THRESHOLD = 0.12
+_kb_seeded = False
+
+
+def _ensure_kb(db) -> None:
+    """Seed the knowledge base once per process if it's empty. Idempotent and
+    non-fatal — a KB problem must never break the chat path."""
+    global _kb_seeded
+    if _kb_seeded:
+        return
+    try:
+        if _kb.count(db) == 0:
+            _kb_seed.seed_all(db)
+        else:
+            _kb.ensure_table(db)
+        _kb_seeded = True
+    except Exception as exc:
+        logger.warning("ARIA KB init skipped: %s", exc)
 
 MONTH_NAMES = {
     'january':'01','february':'02','march':'03','april':'04',
@@ -1222,6 +1246,31 @@ def _fmt_comparison(tool: str, a: dict, b: dict, range_a: dict, range_b: dict) -
     return "\n".join(lines)
 
 
+# ── Report request detection ──────────────────────────────────────────────────
+_REPORT_DOC  = re.compile(r'\b(report|pdf|export|spreadsheet|document)\b', re.I)
+_REPORT_VERB = re.compile(r'\b(generate|create|make|build|produce|prepare|download|'
+                          r'export|give me|send me|pull|want|need)\b', re.I)
+_REPORT_LABELS = {'attendance': 'Attendance report', 'pob': 'POB report',
+                  'overview': 'Operations Overview report'}
+
+
+def _detect_report_request(text: str):
+    """Return (report_type, date_range) when the user asks ARIA to PRODUCE a
+    downloadable report, else None. Requires a document word AND an action verb, so
+    a pure capability question ('can ARIA make reports?') still goes to the KB."""
+    t = text.lower()
+    if not (_REPORT_DOC.search(t) and _REPORT_VERB.search(t)):
+        return None
+    if re.search(r'attendance|punch|present|absent|clock.?in', t):
+        rtype = 'attendance'
+    elif re.search(r'\bpob\b|personnel on board|manning|on.?board|head\s?count', t):
+        rtype = 'pob'
+    else:
+        rtype = 'overview'
+    dr = _extract_date_range(text) if rtype == 'attendance' else {}
+    return rtype, dr
+
+
 async def aria_stream(
     messages: list,
     db: Session,
@@ -1256,6 +1305,24 @@ async def aria_stream(
                 yield f"data: {json.dumps({'type': 'done'})}\n\n"
                 return
 
+        # ── Report generation ────────────────────────────────────────────────
+        # "generate an attendance report", "make a POB report with charts" → hand
+        # back a download link to the PDF endpoint (built on click).
+        report_req = _detect_report_request(user_msg)
+        if report_req:
+            rtype, dr = report_req
+            params = f"type={rtype}"
+            if dr.get('start_date'):
+                params += f"&start={dr['start_date']}&end={dr['end_date']}"
+            url = f"/api/v1/ai/report?{params}"
+            label = _REPORT_LABELS.get(rtype, 'report')
+            rng = f" for {dr['start_date']} to {dr['end_date']}" if dr.get('start_date') else ""
+            yield f"data: {json.dumps({'type': 'tool_call', 'tool': 'generate_report'})}\n\n"
+            yield f"data: {json.dumps({'type': 'text', 'text': f'📄 Your **{label}**{rng} is ready — it includes charts and a data table. Click the button below to download the PDF.'})}\n\n"
+            yield f"data: {json.dumps({'type': 'report', 'url': url, 'filename': f'{rtype}_report.pdf', 'label': f'Download {label} (PDF)'})}\n\n"
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+            return
+
         intents = _detect_intents(user_msg)
 
         if intents == [('help', {})]:
@@ -1269,6 +1336,34 @@ async def aria_stream(
             yield f"data: {json.dumps({'type': 'text', 'text': text})}\n\n"
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
             return
+
+        # ── Knowledge base ───────────────────────────────────────────────────
+        # Consult the curated KB when EITHER:
+        #   (a) the query is phrased as a how-to / concept question — even if a data
+        #       keyword is present ("how do readers connect", "what is mustering").
+        #       Explanatory phrasing should win over a raw data dump; OR
+        #   (b) no real live-data intent matched at all (only the dashboard fallback).
+        # This is the "question sensitivity" layer: it reads the user's INTENT
+        # (explain vs. fetch), not just keywords.
+        _conceptual = bool(re.search(
+            r'\b(how\s+(do|does|to|can|would|should|are|is)|what\s+is|what\s+are|'
+            r'what\s+does|difference\s+between|explain|describe|why\s+(is|are|do|does|can)|'
+            r'guide|set\s?up|configure|connect|meaning\s+of|tell\s+me\s+about|'
+            r'walk\s+me\s+through|steps?\s+to|how\s+come)\b',
+            user_msg.lower()))
+        _data_intents = [i for i in intents if i[0] != 'get_dashboard_stats']
+        if _conceptual or not _data_intents:
+            _ensure_kb(db)
+            kb_hit = _kb.best_answer(user_msg, db, min_rank=_KB_ANSWER_THRESHOLD)
+            if kb_hit:
+                yield f"data: {json.dumps({'type': 'tool_call', 'tool': 'knowledge_base'})}\n\n"
+                yield f"data: {json.dumps({'type': 'text', 'text': kb_hit['answer']})}\n\n"
+                related = [h['question'] for h in _kb.search(user_msg, db, k=4)
+                           if h['id'] != kb_hit['id']][:3]
+                if related:
+                    yield f"data: {json.dumps({'type': 'follow_ups', 'items': related})}\n\n"
+                yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                return
 
         parts = []
         tools_called = []

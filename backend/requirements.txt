@@ -33,10 +33,9 @@ flake8==6.1.0
 jinja2==3.1.2
 pyzk==0.9
 
-# ── AI / LLM ─────────────────────────────────────────────────────────────────
-# Works with Groq (free cloud) AND Ollama (free local) — same library, different base_url
-openai>=1.40.0
-groq>=0.9.0
+# ── ARIA AI ──────────────────────────────────────────────────────────────────
+# ARIA runs fully local: live DB tools + an offline Postgres full-text knowledge
+# base. No external LLM client (openai/groq/ollama) is used or required.
 
 # ── 2FA / TOTP ────────────────────────────────────────────────────────────────
 pyotp>=2.9.0
@@ -45,5 +44,6 @@ pyotp>=2.9.0
 aiosmtplib>=3.0.0
 jinja2>=3.1.0
 
-# ── PDF Generation ────────────────────────────────────────────────────────────
+# ── PDF Generation + report charts ────────────────────────────────────────────
 fpdf2>=2.7.9
+matplotlib>=3.7.0   # ARIA report charts → PNG embedded in PDF (headless Agg)
