@@ -30,6 +30,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import text, func
 from ..services.device_planes import is_controller as _is_controller
+from ..services.device_planes import is_direct_only as _is_direct_only
 
 from ..core.database import get_db, SessionLocal
 from ..core.config import settings
@@ -101,6 +102,39 @@ def _block_controller(sn, db):
         raise HTTPException(status_code=400, detail=(
             "InBio/C3 access controller — POB's controller (C3/PULL) driver isn't "
             "available yet, so this command can't be sent from here."))
+
+
+def _block_direct_only(sn, db):
+    """Refuse ADMS-queue-only command endpoints for a Direct (ZKLib TCP) reader.
+
+    A direct-only reader never polls /iclock/getrequest, so a command queued in
+    iclock_devcmd would sit there forever, undelivered. Reject with a clear message
+    instead of black-holing it. ('both' devices poll too — they are allowed.)"""
+    if _is_direct_only(sn, db):
+        raise HTTPException(status_code=400, detail=(
+            "This reader is in Direct (ZKLib TCP) mode and does not poll for ADMS "
+            "commands, so a queued command would never reach it. Set its Connection "
+            "Mode to 'adms' or 'both', or use the direct/ZKLib command path."))
+
+
+def _encode_adms_datetime(dt: datetime) -> int:
+    """Encode a datetime for the ZKTeco PUSH protocol's `SET OPTIONS DateTime=<n>`.
+
+    Push-mode firmware does NOT understand the ZKLib-style "DATE TIME <str>" command
+    (it replies Return=-1 / UNKNOWN CMD) — it sets its clock from this packed integer:
+        ((Y-2000)*12*31 + (M-1)*31 + (D-1))*24*3600 + H*3600 + Min*60 + Sec
+    Use naive local wall-clock time (matches build_options_block's DateTime=)."""
+    return (((dt.year - 2000) * 12 * 31 + (dt.month - 1) * 31 + (dt.day - 1)) * 24 * 3600
+            + dt.hour * 3600 + dt.minute * 60 + dt.second)
+
+
+def queue_clock_sync(sn: str, db: Session) -> int:
+    """Queue the ADMS-correct clock-correction command for a push reader and return
+    the command id. ALWAYS use this for ADMS clock sync — never queue the ZKLib-style
+    "DATE TIME <str>" form, which push firmware rejects as UNKNOWN CMD (it sets its
+    clock from SET OPTIONS DateTime=<encoded> instead)."""
+    enc = _encode_adms_datetime(datetime.now())
+    return queue_command(sn, f"SET OPTIONS DateTime={enc}", db)
 
 # state values on iclock_terminal
 STATE_PENDING  = 0
@@ -656,15 +690,16 @@ def handle_attlog(records: List[Dict], sn: str, db: Session) -> Tuple[int, int, 
                 if 60 < drift_secs < 86400:
                     logger.warning(
                         f"ADMS {sn}: clock drift detected — {drift_secs:.0f}s off server time. "
-                        f"Queuing SET DATE TIME correction."
+                        f"Queuing SET OPTIONS DateTime correction."
                     )
-                    # Queue a SET DATE TIME command so the device corrects itself
-                    # as soon as it next polls /iclock/getrequest.
-                    correct_time = server_now.strftime('%Y-%m-%d %H:%M:%S')
+                    # The reader just pushed punches via /iclock, so it IS on the ADMS
+                    # plane and polls getrequest — queue the ADMS-correct clock command.
+                    # Push firmware rejects the ZKLib-style "DATE TIME <str>" (UNKNOWN
+                    # CMD); it sets its clock from SET OPTIONS DateTime=<encoded>.
                     try:
-                        queue_command(sn, f"DATE TIME {correct_time}", db)
+                        queue_clock_sync(sn, db)
                     except Exception as qe:
-                        logger.error(f"Failed to queue DATE TIME for {sn}: {qe}")
+                        logger.error(f"Failed to queue clock correction for {sn}: {qe}")
         except Exception as de:
             logger.warning(f"Drift detection non-fatal error for {sn}: {de}")
 
@@ -2129,6 +2164,7 @@ async def cmd_push_templates(body: PushTemplatesRequest, db: Session = Depends(g
     Queue DATA UPDATE FINGERTMP / FACETMP commands to push biometric templates to a device.
     """
     _block_controller(body.sn, db)
+    _block_direct_only(body.sn, db)
     terminal = db.query(IClockTerminal).filter(IClockTerminal.sn == body.sn).first()
     if not terminal:
         raise HTTPException(404, "Device not found")
@@ -2166,6 +2202,8 @@ async def cmd_push_timezones(body: PushTimezonesRequest, db: Session = Depends(g
     ZKTeco TIMEZONE format:  ID\tSunTime1\tMonTime1\t...\tSatTime1
     Each time slot is encoded as HHMM (0000=disabled).
     """
+    _block_controller(body.sn, db)
+    _block_direct_only(body.sn, db)
     terminal = db.query(IClockTerminal).filter(IClockTerminal.sn == body.sn).first()
     if not terminal:
         raise HTTPException(404, "Device not found")
@@ -2197,6 +2235,8 @@ async def cmd_push_access_levels(body: PushAccessLevelsRequest, db: Session = De
     Queue DATA UPDATE USERATT commands to push access level assignments to a device.
     USERATT format: UserID=001\tTimeZoneID=1\tDoorID=1\tBooleanValue=1
     """
+    _block_controller(body.sn, db)
+    _block_direct_only(body.sn, db)
     terminal = db.query(IClockTerminal).filter(IClockTerminal.sn == body.sn).first()
     if not terminal:
         raise HTTPException(404, "Device not found")
@@ -2227,6 +2267,8 @@ async def cmd_query_attlog(body: CommandRequest, db: Session = Depends(get_db)):
     Use this after a data gap (network dropout, device replacement, etc.).
     stamp=0 means 'send everything'.
     """
+    _block_controller(body.sn, db)
+    _block_direct_only(body.sn, db)
     terminal = db.query(IClockTerminal).filter(IClockTerminal.sn == body.sn).first()
     if not terminal:
         raise HTTPException(404, "Device not found")
@@ -2404,9 +2446,10 @@ async def cmd_sync_time(body: TimeSyncRequest, db: Session = Depends(get_db)):
     correct_time = datetime.now()
     correct_time_str = correct_time.strftime('%Y-%m-%d %H:%M:%S')
 
-    # Prefer direct TCP sync when the device has an IP and is in direct/both mode
+    # Direct (ZKLib TCP) readers: set the clock immediately over TCP.
     dev = _get_direct_device(body.sn, db)
     if dev and (dev.connection_mode or '').lower() in ('direct', 'both'):
+        direct_err = None
         try:
             result = await _direct_sync_time(dev.ip_address, dev.port)
             if result.get('success'):
@@ -2419,22 +2462,26 @@ async def cmd_sync_time(body: TimeSyncRequest, db: Session = Depends(get_db)):
                     "method": "direct",
                     "message": "Clock synchronized via direct ZKLib connection",
                 }
-            logger.warning(f"Direct sync failed for {body.sn}: {result.get('error')} — falling back to ADMS queue")
+            direct_err = result.get('error')
         except Exception as exc:
-            logger.warning(f"Direct sync exception for {body.sn}: {exc} — falling back to ADMS queue")
+            direct_err = str(exc)
 
-    # ADMS command queue fallback.
-    # The ZKTeco PUSH protocol does NOT understand "DATE TIME <str>" (the reader
-    # replies Return=-1 / UNKNOWN CMD — that is an SDK/ZKLib command). Push-mode
-    # readers set their clock via `SET OPTIONS DateTime=<encoded>`, where the
-    # encoded integer packs the date/time:
-    #   ((Y-2000)*12*31 + (M-1)*31 + (D-1))*24*3600 + H*3600 + Min*60 + Sec
-    enc = (((correct_time.year - 2000) * 12 * 31
-            + (correct_time.month - 1) * 31
-            + (correct_time.day - 1)) * 24 * 3600
-           + correct_time.hour * 3600
-           + correct_time.minute * 60
-           + correct_time.second)
+        # Direct attempt failed. Honour strict plane separation: a DIRECT-ONLY reader
+        # never polls /iclock/getrequest, so we must NOT fall back to queuing an ADMS
+        # command (it would black-hole). Report the failure instead — the reader is
+        # most likely offline. ('both' readers DO poll, so the ADMS fallback below is
+        # still valid for them.)
+        if _is_direct_only(body.sn, db):
+            logger.warning(f"Direct time sync failed for {body.sn}: {direct_err} — direct-only reader, NOT queuing ADMS")
+            raise HTTPException(status_code=502, detail=(
+                f"Direct (ZKLib) clock sync failed: {direct_err or 'reader unreachable'}. "
+                "This reader is Direct-only and does not poll for ADMS commands, so nothing "
+                "was queued. Check that the reader is online and reachable on the LAN."))
+        logger.warning(f"Direct sync failed for {body.sn}: {direct_err} — 'both' mode, falling back to ADMS queue")
+
+    # ADMS command queue path (adms readers, or 'both' readers whose direct attempt
+    # failed). Push-mode readers set their clock via SET OPTIONS DateTime=<encoded>.
+    enc = _encode_adms_datetime(correct_time)
     cmd_id = queue_command(body.sn, f"SET OPTIONS DateTime={enc}", db)
     logger.info(f"ADMS time sync queued for {body.sn}: {correct_time_str} (DateTime={enc}, cmd_id={cmd_id})")
     return {
@@ -2479,18 +2526,14 @@ async def cmd_sync_time_all(db: Session = Depends(get_db)):
     correct_time = datetime.now()
     correct_time_str = correct_time.strftime('%Y-%m-%d %H:%M:%S')
     # Encoded form for the PUSH protocol's `SET OPTIONS DateTime=<n>` (see cmd_sync_time).
-    enc_datetime = (((correct_time.year - 2000) * 12 * 31
-                     + (correct_time.month - 1) * 31
-                     + (correct_time.day - 1)) * 24 * 3600
-                    + correct_time.hour * 3600
-                    + correct_time.minute * 60
-                    + correct_time.second)
+    enc_datetime = _encode_adms_datetime(correct_time)
     results = []
     queued  = 0
 
     for t in terminals:
         dev = dev_map.get(t.sn)
         if dev and (dev.connection_mode or '').lower() in ('direct', 'both'):
+            direct_err = None
             try:
                 result = await _direct_sync_time(dev.ip_address, dev.port)
                 if result.get('success'):
@@ -2501,11 +2544,24 @@ async def cmd_sync_time_all(db: Session = Depends(get_db)):
                     })
                     queued += 1
                     continue
-                logger.warning(f"Direct sync failed for {t.sn}: {result.get('error')} — using ADMS queue")
+                direct_err = result.get('error')
             except Exception as exc:
-                logger.warning(f"Direct sync exception for {t.sn}: {exc} — using ADMS queue")
+                direct_err = str(exc)
 
-        # ADMS queue (primary for push devices, fallback for direct)
+            # Strict plane separation: a DIRECT-ONLY reader doesn't poll the ADMS
+            # queue, so don't black-hole a command — record the failure and move on.
+            # ('both' readers poll too, so the ADMS fallback below still applies.)
+            if _is_direct_only(t.sn, db):
+                logger.warning(f"Direct sync failed for {t.sn}: {direct_err} — direct-only, not queuing ADMS")
+                results.append({
+                    "sn": t.sn, "alias": t.alias or t.sn,
+                    "method": "direct", "status": "failed",
+                    "error": f"{direct_err or 'reader unreachable'} (direct-only — not queued)",
+                })
+                continue
+            logger.warning(f"Direct sync failed for {t.sn}: {direct_err} — 'both' mode, using ADMS queue")
+
+        # ADMS queue (primary for push devices, fallback for 'both' readers)
         try:
             cmd_id = queue_command(t.sn, f"SET OPTIONS DateTime={enc_datetime}", db)
             results.append({
@@ -2524,6 +2580,56 @@ async def cmd_sync_time_all(db: Session = Depends(get_db)):
         "queued":      queued,
         "total":       len(terminals),
         "devices":     results,
+    }
+
+
+@router.get("/iclock/cmd/stuck")
+async def get_stuck_commands(older_than_minutes: int = 5, db: Session = Depends(get_db)):
+    """
+    Surface ADMS commands that are likely BLACK-HOLED — queued (status=0) but on a
+    device that can't pick them up because it doesn't poll /iclock/getrequest.
+
+    A command is flagged when it has sat at status=0 for longer than
+    `older_than_minutes` AND its device's effective plane is Direct-only or
+    Controller (neither polls the ADMS command queue). This is the safety net for
+    the guard added to the push-* / query-attlog endpoints: it also catches rows
+    queued before the guard existed, or queued via some other path.
+    """
+    rows = db.execute(text("""
+        SELECT c.id, c.sn, c.cmd_content, c.cmd_commit_time,
+               EXTRACT(EPOCH FROM (NOW() - c.cmd_commit_time))/60.0 AS age_minutes
+        FROM iclock_devcmd c
+        WHERE c.status = 0
+          AND c.cmd_commit_time < NOW() - (:mins || ' minutes')::interval
+        ORDER BY c.cmd_commit_time ASC
+        LIMIT 500
+    """), {"mins": older_than_minutes}).fetchall()
+
+    stuck = []
+    for r in rows:
+        if _is_controller(r.sn, db):
+            reason = "controller"
+        elif _is_direct_only(r.sn, db):
+            reason = "direct_only"
+        else:
+            continue  # adms/both device — legitimately pending, not black-holed
+        stuck.append({
+            "id":          r.id,
+            "sn":          r.sn,
+            "cmd_content": (r.cmd_content or "")[:120],
+            "queued_at":   r.cmd_commit_time.isoformat() if r.cmd_commit_time else None,
+            "age_minutes": round(float(r.age_minutes or 0), 1),
+            "reason":      reason,
+        })
+
+    return {
+        "count":             len(stuck),
+        "older_than_minutes": older_than_minutes,
+        "commands":          stuck,
+        "hint": ("These commands target Direct/Controller devices that don't poll the "
+                 "ADMS queue — they will never deliver. Cancel them (DELETE "
+                 "/iclock/devcmd/{id} on the device-management API) or fix the device's "
+                 "Connection Mode."),
     }
 
 

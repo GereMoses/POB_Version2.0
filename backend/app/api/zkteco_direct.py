@@ -525,7 +525,7 @@ async def quick_sync_time(body: QuickConnectRequest, db: Session = Depends(get_d
     if result.get("success"):
         return result
 
-    # ZKLib failed — fall back to ADMS DATE TIME command queue
+    # ZKLib failed — fall back to the ADMS clock-sync command queue.
     sn = (dev.serial_number if dev else None) or body.ip_address
     term = db.query(IClockTerminal).filter(IClockTerminal.sn == sn).first()
     if not term and dev and dev.serial_number:
@@ -535,9 +535,17 @@ async def quick_sync_time(body: QuickConnectRequest, db: Session = Depends(get_d
         term = db.query(IClockTerminal).filter(IClockTerminal.ip_address == body.ip_address).first()
 
     if term:
+        # Strict plane separation: a direct-only reader doesn't poll the ADMS queue,
+        # so don't black-hole a command — report the ZKLib failure instead.
+        from .adms_protocol import queue_clock_sync, _is_direct_only
+        if _is_direct_only(term.sn, db):
+            raise HTTPException(status_code=502, detail=(
+                f"Direct (ZKLib) sync failed: {result.get('error')}. Reader is "
+                "direct-only and does not poll for ADMS commands — nothing queued."))
         correct_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         try:
-            queue_command(term.sn, f"DATE TIME {correct_time}", db)
+            # SET OPTIONS DateTime=<enc> — push firmware rejects "DATE TIME <str>".
+            queue_clock_sync(term.sn, db)
             return {
                 "success": True,
                 "method": "adms_queued",
