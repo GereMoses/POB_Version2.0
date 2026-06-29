@@ -2481,6 +2481,14 @@ async def cmd_sync_time(body: TimeSyncRequest, db: Session = Depends(get_db)):
 
     # ADMS command queue path (adms readers, or 'both' readers whose direct attempt
     # failed). Push-mode readers set their clock via SET OPTIONS DateTime=<encoded>.
+    # Final plane check: a direct-only reader can reach here when its mode lives only
+    # in iclock_terminal (so _get_direct_device, which reads `devices`, returned None
+    # and the direct attempt above was skipped). Never queue for it — it won't poll.
+    if _is_direct_only(body.sn, db):
+        raise HTTPException(status_code=502, detail=(
+            "This reader is Direct-only and does not poll for ADMS commands, so nothing "
+            "was queued. Check that it is online/reachable on the LAN, or set its "
+            "Connection Mode to 'adms'/'both'."))
     enc = _encode_adms_datetime(correct_time)
     cmd_id = queue_command(body.sn, f"SET OPTIONS DateTime={enc}", db)
     logger.info(f"ADMS time sync queued for {body.sn}: {correct_time_str} (DateTime={enc}, cmd_id={cmd_id})")
@@ -2561,7 +2569,17 @@ async def cmd_sync_time_all(db: Session = Depends(get_db)):
                 continue
             logger.warning(f"Direct sync failed for {t.sn}: {direct_err} — 'both' mode, using ADMS queue")
 
-        # ADMS queue (primary for push devices, fallback for 'both' readers)
+        # ADMS queue (primary for push devices, fallback for 'both' readers).
+        # Final plane check: skip a direct-only reader that reached here because its
+        # mode lives only in iclock_terminal (no `devices` row, so the direct attempt
+        # above was skipped) — queuing for it would just black-hole.
+        if _is_direct_only(t.sn, db):
+            results.append({
+                "sn": t.sn, "alias": t.alias or t.sn,
+                "method": "direct", "status": "skipped",
+                "error": "direct-only — does not poll ADMS; not queued",
+            })
+            continue
         try:
             cmd_id = queue_command(t.sn, f"SET OPTIONS DateTime={enc_datetime}", db)
             results.append({
