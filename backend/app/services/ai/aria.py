@@ -1246,6 +1246,31 @@ def _fmt_comparison(tool: str, a: dict, b: dict, range_a: dict, range_b: dict) -
     return "\n".join(lines)
 
 
+# ── Report request detection ──────────────────────────────────────────────────
+_REPORT_DOC  = re.compile(r'\b(report|pdf|export|spreadsheet|document)\b', re.I)
+_REPORT_VERB = re.compile(r'\b(generate|create|make|build|produce|prepare|download|'
+                          r'export|give me|send me|pull|want|need)\b', re.I)
+_REPORT_LABELS = {'attendance': 'Attendance report', 'pob': 'POB report',
+                  'overview': 'Operations Overview report'}
+
+
+def _detect_report_request(text: str):
+    """Return (report_type, date_range) when the user asks ARIA to PRODUCE a
+    downloadable report, else None. Requires a document word AND an action verb, so
+    a pure capability question ('can ARIA make reports?') still goes to the KB."""
+    t = text.lower()
+    if not (_REPORT_DOC.search(t) and _REPORT_VERB.search(t)):
+        return None
+    if re.search(r'attendance|punch|present|absent|clock.?in', t):
+        rtype = 'attendance'
+    elif re.search(r'\bpob\b|personnel on board|manning|on.?board|head\s?count', t):
+        rtype = 'pob'
+    else:
+        rtype = 'overview'
+    dr = _extract_date_range(text) if rtype == 'attendance' else {}
+    return rtype, dr
+
+
 async def aria_stream(
     messages: list,
     db: Session,
@@ -1279,6 +1304,24 @@ async def aria_stream(
                 yield f"data: {json.dumps({'type': 'follow_ups', 'items': ['Show full report for each period', 'Compare last month vs this month', 'Generate daily briefing']})}\n\n"
                 yield f"data: {json.dumps({'type': 'done'})}\n\n"
                 return
+
+        # ── Report generation ────────────────────────────────────────────────
+        # "generate an attendance report", "make a POB report with charts" → hand
+        # back a download link to the PDF endpoint (built on click).
+        report_req = _detect_report_request(user_msg)
+        if report_req:
+            rtype, dr = report_req
+            params = f"type={rtype}"
+            if dr.get('start_date'):
+                params += f"&start={dr['start_date']}&end={dr['end_date']}"
+            url = f"/api/v1/ai/report?{params}"
+            label = _REPORT_LABELS.get(rtype, 'report')
+            rng = f" for {dr['start_date']} to {dr['end_date']}" if dr.get('start_date') else ""
+            yield f"data: {json.dumps({'type': 'tool_call', 'tool': 'generate_report'})}\n\n"
+            yield f"data: {json.dumps({'type': 'text', 'text': f'📄 Your **{label}**{rng} is ready — it includes charts and a data table. Click the button below to download the PDF.'})}\n\n"
+            yield f"data: {json.dumps({'type': 'report', 'url': url, 'filename': f'{rtype}_report.pdf', 'label': f'Download {label} (PDF)'})}\n\n"
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+            return
 
         intents = _detect_intents(user_msg)
 

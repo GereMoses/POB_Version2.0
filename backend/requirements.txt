@@ -44,5 +44,6 @@ pyotp>=2.9.0
 aiosmtplib>=3.0.0
 jinja2>=3.1.0
 
-# ── PDF Generation ────────────────────────────────────────────────────────────
+# ── PDF Generation + report charts ────────────────────────────────────────────
 fpdf2>=2.7.9
+matplotlib>=3.7.0   # ARIA report charts → PNG embedded in PDF (headless Agg)

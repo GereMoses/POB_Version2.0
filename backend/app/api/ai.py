@@ -121,6 +121,29 @@ async def aria_status(
     return {"success": True, "data": info}
 
 
+@router.get("/report")
+async def aria_report(
+    type: str = "overview",
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """Generate a downloadable PDF report (live data + matplotlib charts).
+    ARIA hands the chat a link to this endpoint; the PDF is built on download."""
+    from ..services.ai.report_generator import build_report
+    try:
+        pdf_bytes, filename, _title = build_report(type, start, end, db)
+    except Exception as e:
+        logger.error(f"Report generation error ({type}): {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to generate report")
+    return StreamingResponse(
+        iter([pdf_bytes]),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @router.get("/briefing")
 async def get_daily_briefing(
     db: Session = Depends(get_db),
