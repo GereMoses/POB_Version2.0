@@ -6,9 +6,9 @@ Design goals:
     (weighted tsvector), which every Postgres ships with. No model, no extension.
   • "Increase the knowledge base" = INSERT a row. No retraining, no GPU. Edits take
     effect immediately.
-  • pgvector-ready: an optional `embedding` column lights up semantic search when the
-    pgvector extension + a local embedding model (Ollama nomic-embed-text) are present.
-    Until then, FTS alone answers keyword/question queries well.
+  • pgvector-ready (optional, not used today): if you ever want fuzzy semantic match
+    on top of keyword search, an `embedding` column can be added later. Not required —
+    FTS alone answers keyword/question queries well, with no model and no network.
 
 Matching is weighted: a query term in the QUESTION (weight A) beats the same term in
 KEYWORDS (B), which beats a hit in the ANSWER body (C). websearch_to_tsquery makes

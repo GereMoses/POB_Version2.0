@@ -237,8 +237,6 @@ volumes:
     driver: local
   redis_data:
     driver: local
-  ollama_data:
-    driver: local
   uploads_dev:
     driver: local
   media_dev:

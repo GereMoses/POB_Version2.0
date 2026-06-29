@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from ..core.database import get_db
 from ..core.dependencies import get_current_user
 from ..services.ai.aria import aria_stream, aria_daily_briefing
-from ..services.ai.config import provider_info, get_async_client
+from ..services.ai.config import provider_info
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/ai", tags=["ARIA AI Assistant"])
@@ -104,22 +104,20 @@ async def set_briefing_schedule(
 
 
 @router.get("/status")
-async def aria_status(current_user=Depends(get_current_user)):
-    """Check which AI provider is active and whether it is reachable."""
+async def aria_status(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """ARIA runs entirely on the local engine (live DB tools + offline knowledge
+    base) — there is no external LLM to be unreachable, so it is always online.
+    Reports the knowledge-base entry count for visibility."""
     info = provider_info()
+    info["status"] = "online"
     try:
-        client, model = get_async_client()
-        # Quick ping — tiny completion to verify connectivity
-        resp = await client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": "ping"}],
-            max_tokens=5,
-        )
-        info["status"] = "online"
-        info["test_response"] = resp.choices[0].message.content
-    except Exception as e:
-        info["status"] = "offline"
-        info["error"]  = str(e)
+        from ..services.ai import knowledge_base as _kb
+        info["knowledge_entries"] = _kb.count(db)
+    except Exception:
+        pass
     return {"success": True, "data": info}
 
 
