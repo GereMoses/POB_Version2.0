@@ -203,14 +203,51 @@ def get_zone_statuses(_=Depends(get_current_user)):
     ]
 
 
+def _muster_occupancy_context(db: Session):
+    """During an active muster/drill, zone occupancy must reflect evacuation:
+    a person already accounted-for (Safe at a muster point) has LEFT their work
+    zone, so they must not still be counted there. Returns
+    (safe_emp_codes, safe_count_by_zone, active):
+      • safe_emp_codes     — excluded from their work-zone counts, so work zones
+                             show only the MISSING (still-in-zone / to be searched).
+      • safe_count_by_zone — added to the muster-point zone (the reader they
+                             mustered at), so the total POB stays accurate.
+    When no drill is active, returns empties and occupancy behaves normally.
+    Muster punches write mustering_log (not iclock_transaction), which is why the
+    two views drift apart without this reconciliation."""
+    event_ids = [r.id for r in db.execute(text(
+        "SELECT id FROM mustering_event WHERE status = 0")).fetchall()]
+    if not event_ids:
+        return set(), {}, False
+    safe_codes = {r.emp_code for r in db.execute(text(
+        "SELECT DISTINCT emp_code FROM mustering_log "
+        "WHERE event_id = ANY(:ids) AND status = 1"), {"ids": event_ids}).fetchall()}
+    safe_by_zone = {}
+    for r in db.execute(text("""
+        SELECT term.zone_id AS zid, COUNT(DISTINCT ml.emp_code) AS cnt
+        FROM mustering_log ml
+        JOIN iclock_terminal term ON term.sn = ml.device_sn
+        WHERE ml.event_id = ANY(:ids) AND ml.status = 1 AND term.zone_id IS NOT NULL
+        GROUP BY term.zone_id
+    """), {"ids": event_ids}).fetchall():
+        safe_by_zone[r.zid] = r.cnt
+    return safe_codes, safe_by_zone, True
+
+
 @router.get("/dashboard")
 def get_dashboard(db: Session = Depends(get_db), _=Depends(get_current_user)):
     zones = db.query(Zone).order_by(Zone.name).all()
 
+    # Muster-aware occupancy: during a drill, Safe personnel move from their work
+    # zone to the muster point (see _muster_occupancy_context).
+    safe_codes, safe_by_zone, muster_active = _muster_occupancy_context(db)
+
     # Single bulk query: count distinct employees currently "in" each zone.
     # Uses iclock_transaction (authoritative punch log) joined to iclock_terminal.zone_id.
     # punch_state IN (0,4) = Check-In / OT-In  →  person is inside.
-    live_rows = db.execute(text("""
+    # Exclude already-mustered (Safe) people from their work-zone counts during a drill.
+    _exclude_safe = "AND latest.emp_code <> ALL(:safe_codes)" if safe_codes else ""
+    live_rows = db.execute(text(f"""
         SELECT term.zone_id, COUNT(DISTINCT latest.emp_code) AS cnt
         FROM (
             SELECT DISTINCT ON (t.emp_code)
@@ -221,8 +258,9 @@ def get_dashboard(db: Session = Depends(get_db), _=Depends(get_current_user)):
         JOIN iclock_terminal term ON term.sn = latest.terminal_sn
         WHERE latest.punch_state IN (0, 4)
           AND term.zone_id IS NOT NULL
+          {_exclude_safe}
         GROUP BY term.zone_id
-    """)).fetchall()
+    """), ({"safe_codes": list(safe_codes)} if safe_codes else {})).fetchall()
     live_count_map = {r.zone_id: r.cnt for r in live_rows}
 
     # Last activity per zone (most recent punch on any terminal in that zone)
@@ -248,11 +286,17 @@ def get_dashboard(db: Session = Depends(get_db), _=Depends(get_current_user)):
         reader_count = reader_count_map.get(z.id, 0)
 
         d = _to_dict(z, db)
-        # Override stored count with live transaction-based count
-        live = live_count_map.get(z.id, 0)
+        # Override stored count with live transaction-based count.
+        # During a drill: work zones = missing only (Safe excluded above); the muster
+        # zone gains the Safe headcount, so this zone's number stays truthful and the
+        # POB total (sum of zones) is preserved.
+        live = live_count_map.get(z.id, 0) + safe_by_zone.get(z.id, 0)
         d["current_personnel_count"] = live
         d["current_occupancy"] = live
         d["reader_count"] = reader_count
+        if muster_active:
+            d["muster_active"] = True
+            d["mustered_safe_here"] = safe_by_zone.get(z.id, 0)
 
         last_emp, last_punch = last_activity_map.get(z.id, (None, None))
         d["last_activity_time"] = last_punch.isoformat() if last_punch else None
