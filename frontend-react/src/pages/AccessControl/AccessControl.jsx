@@ -4,7 +4,7 @@ import {
   DashboardOutlined, ClockCircleOutlined, SafetyOutlined, TeamOutlined,
   ApiOutlined, ThunderboltOutlined, StopOutlined, KeyOutlined,
   LockOutlined, LinkOutlined, AlertOutlined, FileTextOutlined,
-  CompassOutlined, UserAddOutlined, HeatMapOutlined,
+  CompassOutlined, UserAddOutlined, HeatMapOutlined, ClusterOutlined,
   MenuFoldOutlined, MenuUnfoldOutlined,
 } from '@ant-design/icons';
 import AccessControlDashboard from './AccessControlDashboard';
@@ -23,6 +23,7 @@ import AccessReports          from './AccessReports';
 import GuardTour              from './GuardTour';
 import VisitorAccess          from './VisitorAccess';
 import ACZones                from './ACZones';
+import Controllers            from './Controllers';
 
 const NAV = [
   {
@@ -38,6 +39,7 @@ const NAV = [
       { key: 'levels',      label: 'Access Levels',  icon: SafetyOutlined,      component: AccessLevelManagement },
       { key: 'user-levels', label: 'User Levels',    icon: TeamOutlined,        component: UserLevelManagement   },
       { key: 'doors',       label: 'Doors',          icon: ApiOutlined,         component: DoorSettings          },
+      { key: 'controllers', label: 'Controllers',    icon: ClusterOutlined,     component: Controllers           },
     ],
   },
   {

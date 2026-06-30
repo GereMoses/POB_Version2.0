@@ -3,6 +3,7 @@ from .user import User
 from .device import Device, AccessLog, DeviceEvent, DeviceSchedule, DeviceMaintenance
 from .zone import Zone, ZonePersonnelAssignment
 from .zone_reader_assignment import ZoneReaderAssignment
+from .access_controller import AccessController, AccessReader
 from .department import Department, DepartmentPersonnel
 from .payroll import (
     PayStructure, PayItem, PayStructureAssign, PayPeriod, PaySalary, PaySalaryItem,

@@ -227,6 +227,7 @@ function App() {
               <Route path="/access-control/timezone" element={<ProtectedRoute permission="access_control.view"><AccessControl /></ProtectedRoute>} />
               <Route path="/access-control/levels" element={<ProtectedRoute permission="access_control.view"><AccessControl /></ProtectedRoute>} />
               <Route path="/access-control/doors" element={<ProtectedRoute permission="access_control.view"><AccessControl /></ProtectedRoute>} />
+              <Route path="/access-control/controllers" element={<ProtectedRoute permission="access_control.view"><AccessControl /></ProtectedRoute>} />
               <Route path="/access-control/events" element={<ProtectedRoute permission="access_control.view"><AccessControl /></ProtectedRoute>} />
 
               {/* Emergency */}

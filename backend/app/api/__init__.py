@@ -96,6 +96,10 @@ api_router.include_router(biometric_router, tags=["Biometric Management"])
 from .zkteco_direct import router as zkteco_direct_router
 api_router.include_router(zkteco_direct_router, prefix="/zkteco", tags=["ZKTeco Direct IP"])
 
+# Access-Control Controllers (LAN inBio/C3 panels — separate from ADMS readers)
+from .access_controllers import router as access_controllers_router
+api_router.include_router(access_controllers_router, tags=["Access Control Controllers"])
+
 # Device Auto-Discovery (pending ADMS approvals + on-demand network scan)
 from .device_discovery import router as device_discovery_router
 api_router.include_router(device_discovery_router, tags=["Device Auto-Discovery"])
