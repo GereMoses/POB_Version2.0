@@ -234,34 +234,39 @@ def _muster_occupancy_context(db: Session):
     return safe_codes, safe_by_zone, True
 
 
-@router.get("/dashboard")
-def get_dashboard(db: Session = Depends(get_db), _=Depends(get_current_user)):
-    zones = db.query(Zone).order_by(Zone.name).all()
-
-    # Muster-aware occupancy: during a drill, Safe personnel move from their work
-    # zone to the muster point (see _muster_occupancy_context).
+def _live_zone_occupancy(db: Session):
+    """Per-zone live occupancy {zone_id: count}, muster-aware. The single source of
+    truth shared by /dashboard and /hierarchy so the POB total always equals the sum
+    of the zone cards. During a drill, work zones exclude Safe people and muster zones
+    add them (see _muster_occupancy_context). Returns (counts, safe_by_zone, active)."""
     safe_codes, safe_by_zone, muster_active = _muster_occupancy_context(db)
-
-    # Single bulk query: count distinct employees currently "in" each zone.
-    # Uses iclock_transaction (authoritative punch log) joined to iclock_terminal.zone_id.
-    # punch_state IN (0,4) = Check-In / OT-In  →  person is inside.
-    # Exclude already-mustered (Safe) people from their work-zone counts during a drill.
     _exclude_safe = "AND latest.emp_code <> ALL(:safe_codes)" if safe_codes else ""
-    live_rows = db.execute(text(f"""
+    rows = db.execute(text(f"""
         SELECT term.zone_id, COUNT(DISTINCT latest.emp_code) AS cnt
         FROM (
-            SELECT DISTINCT ON (t.emp_code)
-                t.emp_code, t.punch_state, t.terminal_sn
+            SELECT DISTINCT ON (t.emp_code) t.emp_code, t.punch_state, t.terminal_sn
             FROM iclock_transaction t
             ORDER BY t.emp_code, t.punch_time DESC
         ) latest
         JOIN iclock_terminal term ON term.sn = latest.terminal_sn
-        WHERE latest.punch_state IN (0, 4)
-          AND term.zone_id IS NOT NULL
+        WHERE latest.punch_state IN (0, 4) AND term.zone_id IS NOT NULL
           {_exclude_safe}
         GROUP BY term.zone_id
     """), ({"safe_codes": list(safe_codes)} if safe_codes else {})).fetchall()
-    live_count_map = {r.zone_id: r.cnt for r in live_rows}
+    counts = {r.zone_id: r.cnt for r in rows}
+    for zid, cnt in safe_by_zone.items():     # move Safe people to the muster zone
+        counts[zid] = counts.get(zid, 0) + cnt
+    return counts, safe_by_zone, muster_active
+
+
+@router.get("/dashboard")
+def get_dashboard(db: Session = Depends(get_db), _=Depends(get_current_user)):
+    zones = db.query(Zone).order_by(Zone.name).all()
+
+    # Muster-aware per-zone occupancy (shared with /hierarchy so totals always agree):
+    # counts distinct employees currently "in" each zone from iclock_transaction; during
+    # a drill, Safe personnel are moved from their work zone to the muster point.
+    live_count_map, safe_by_zone, muster_active = _live_zone_occupancy(db)
 
     # Last activity per zone (most recent punch on any terminal in that zone)
     last_activity_map = {}
@@ -286,11 +291,9 @@ def get_dashboard(db: Session = Depends(get_db), _=Depends(get_current_user)):
         reader_count = reader_count_map.get(z.id, 0)
 
         d = _to_dict(z, db)
-        # Override stored count with live transaction-based count.
-        # During a drill: work zones = missing only (Safe excluded above); the muster
-        # zone gains the Safe headcount, so this zone's number stays truthful and the
-        # POB total (sum of zones) is preserved.
-        live = live_count_map.get(z.id, 0) + safe_by_zone.get(z.id, 0)
+        # Override stored count with the live, muster-aware count (work zones show
+        # missing only during a drill; muster zones already include the Safe headcount).
+        live = live_count_map.get(z.id, 0)
         d["current_personnel_count"] = live
         d["current_occupancy"] = live
         d["reader_count"] = reader_count
@@ -336,6 +339,16 @@ def get_available_devices(db: Session = Depends(get_db), _=Depends(get_current_u
 def get_hierarchy(db: Session = Depends(get_db), _=Depends(get_current_user)):
     zones = db.query(Zone).filter(Zone.is_active == True).order_by(Zone.name).all()
     zone_dicts = [_to_dict(z, db) for z in zones]
+
+    # Same live, muster-aware counts as /dashboard so the POB total matches the cards.
+    live_counts, safe_by_zone, muster_active = _live_zone_occupancy(db)
+    for zd in zone_dicts:
+        cnt = live_counts.get(zd.get("id"), 0)
+        zd["current_personnel_count"] = cnt
+        zd["current_occupancy"] = cnt
+        if muster_active:
+            zd["muster_active"] = True
+            zd["mustered_safe_here"] = safe_by_zone.get(zd.get("id"), 0)
 
     top_level = [zd for zd in zone_dicts if not zd.get("parent_zone_id")]
     by_parent: dict = {}
@@ -1091,8 +1104,18 @@ def get_zone_live_personnel(
     db: Session = Depends(get_db),
     _=Depends(get_current_user),
 ):
-    """Who is currently inside this zone — from zone_personnel_tracking."""
-    rows = db.execute(text("""
+    """Who is currently inside this zone — from zone_personnel_tracking.
+    Muster-aware: during a drill, Safe (mustered) people are removed from their work
+    zone's list (work zones show only the missing) and instead listed at the muster
+    zone they reported to — matching the muster-aware occupancy counts."""
+    safe_codes, _safe_by_zone, muster_active = _muster_occupancy_context(db)
+
+    _exclude_safe = "AND last.emp_code <> ALL(:safe)" if safe_codes else ""
+    params = {"zid": zone_id}
+    if safe_codes:
+        params["safe"] = list(safe_codes)
+
+    rows = db.execute(text(f"""
         SELECT
             last.emp_code,
             last.punch_time   AS entry_time,
@@ -1110,10 +1133,11 @@ def get_zone_live_personnel(
         ) last
         LEFT JOIN personnel p ON p.emp_code = last.emp_code
         WHERE last.event_type = 'CLOCK_IN'
+          {_exclude_safe}
         ORDER BY last.punch_time DESC
-    """), {"zid": zone_id}).fetchall()
+    """), params).fetchall()
 
-    return [
+    result = [
         {
             "emp_code":  r.emp_code,
             "full_name": r.full_name,
@@ -1122,6 +1146,34 @@ def get_zone_live_personnel(
             "photo_url": r.photo_url,
             "department": r.department,
             "designation": r.position,
+            "muster_status": None,
         }
         for r in rows
     ]
+
+    # During a drill, also list the Safe people who mustered at a reader in THIS zone,
+    # so the muster zone's list matches its (boosted) occupancy count.
+    if muster_active:
+        safe_here = db.execute(text("""
+            SELECT ml.emp_code, ml.check_time, ml.device_sn,
+                   COALESCE(TRIM(p.first_name || ' ' || p.last_name), ml.emp_code) AS full_name,
+                   p.photo_url, p.department, p.position
+            FROM mustering_log ml
+            JOIN iclock_terminal t ON t.sn = ml.device_sn AND t.zone_id = :zid
+            JOIN mustering_event e ON e.id = ml.event_id AND e.status = 0
+            LEFT JOIN personnel p ON p.emp_code = ml.emp_code
+            WHERE ml.status = 1
+        """), {"zid": zone_id}).fetchall()
+        for r in safe_here:
+            result.append({
+                "emp_code":  r.emp_code,
+                "full_name": r.full_name,
+                "entry_time": r.check_time.isoformat() if r.check_time else None,
+                "device_sn": r.device_sn,
+                "photo_url": r.photo_url,
+                "department": r.department,
+                "designation": r.position,
+                "muster_status": "safe",
+            })
+
+    return result
