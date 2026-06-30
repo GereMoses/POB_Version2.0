@@ -413,7 +413,32 @@ async def start_mustering_event(
             initiated_by=current_user.id,
             notes=event_data.notes
         )
-        
+
+        # Muster-reader readiness: a drill can only auto-mark Safe if at least one
+        # muster-point reader is ONLINE. A reader counts as a muster point via any of
+        # the three ways handle_attlog detects mustering (acc_door.mustering_mode,
+        # reader_purpose=MUSTERING, or device_type=2). If none are online, the headcount
+        # can't capture punches → silent 0% safe; surface a warning so the operator
+        # marks people Safe manually instead of trusting an empty count.
+        from sqlalchemy import text as _text
+        rr = db.execute(_text("""
+            SELECT COUNT(*) FILTER (WHERE t.state = 1) AS online,
+                   COUNT(*)                              AS total
+            FROM iclock_terminal t
+            LEFT JOIN acc_door d ON d.terminal_sn = t.sn
+            WHERE d.mustering_mode = true
+               OR t.reader_purpose = 'MUSTERING'
+               OR t.device_type = 2
+        """)).fetchone()
+        result["muster_readers_total"]  = rr.total or 0
+        result["muster_readers_online"] = rr.online or 0
+        if (rr.online or 0) == 0:
+            result["warning"] = (
+                "No muster-point reader is online. Automatic headcount cannot capture "
+                "punches for this drill — mark personnel Safe manually, or bring a "
+                "muster reader online first."
+            )
+
         log_operation(
             db=db,
             user_id=current_user.id,
