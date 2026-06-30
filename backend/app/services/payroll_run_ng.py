@@ -14,7 +14,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Dict, List, Optional
 
-from sqlalchemy import or_
+from sqlalchemy import or_, extract, func
 from sqlalchemy.orm import Session
 
 from ..models.payroll import (
@@ -22,7 +22,7 @@ from ..models.payroll import (
     PayEmployeeCompensation, PayItemType, PayCalcStatus,
 )
 from ..models.personnel import Personnel
-from .payroll_statutory_ng import compute_statutory, StatutoryConfig
+from .payroll_statutory_ng import compute_statutory, compute_statutory_cumulative, StatutoryConfig
 
 
 def get_active_compensation(db: Session, emp_id: int, on: date) -> Optional[PayEmployeeCompensation]:
@@ -54,9 +54,35 @@ def _active_loan_emi(db: Session, emp_id: int) -> List[Dict]:
     return out
 
 
+def _ytd_prior(db: Session, emp_id: int, tax_year: int, before_month: int) -> Dict:
+    """Sum the employee's prior periods THIS tax year (months < before_month):
+    gross + the Pension/NHF/PAYE already deducted — feeds cumulative PAYE."""
+    prior = (
+        db.query(PaySalary).join(PayPeriod, PaySalary.period_id == PayPeriod.id)
+        .filter(PaySalary.emp_id == emp_id,
+                extract("year", PayPeriod.start_date) == tax_year,
+                extract("month", PayPeriod.start_date) < before_month)
+        .all()
+    )
+    gross = sum((Decimal(str(s.gross_salary or 0)) for s in prior), Decimal("0"))
+    sums = {"Pension (8%)": Decimal("0"), "NHF (2.5%)": Decimal("0"), "PAYE": Decimal("0")}
+    if prior:
+        rows = (
+            db.query(PaySalaryItem.item_name, func.coalesce(func.sum(PaySalaryItem.item_value), 0))
+            .filter(PaySalaryItem.salary_id.in_([s.id for s in prior]),
+                    PaySalaryItem.item_name.in_(list(sums.keys())))
+            .group_by(PaySalaryItem.item_name).all()
+        )
+        for name, total in rows:
+            sums[name] = Decimal(str(total))
+    return {"gross": gross, "pension": sums["Pension (8%)"],
+            "nhf": sums["NHF (2.5%)"], "paye": sums["PAYE"]}
+
+
 def run_employee_payroll(db: Session, period_id: int, emp_id: int,
                          actor_id: Optional[int] = None,
-                         cfg: Optional[StatutoryConfig] = None) -> Dict:
+                         cfg: Optional[StatutoryConfig] = None,
+                         use_cumulative: bool = True) -> Dict:
     """Compute + persist a statutory payslip for one employee/period."""
     result: Dict = {"success": False, "error": None}
 
@@ -77,11 +103,22 @@ def run_employee_payroll(db: Session, period_id: int, emp_id: int,
     cfg = cfg or StatutoryConfig()
     cfg.nhf_enabled = bool(comp.nhf_enabled)
 
-    st = compute_statutory(
-        basic=comp.basic, housing=comp.housing, transport=comp.transport,
-        other_taxable=comp.other_allowances, nhis=comp.nhis,
-        life_assurance=comp.life_assurance, cfg=cfg,
-    )
+    if use_cumulative:
+        m = period.start_date.month
+        ytd = _ytd_prior(db, emp_id, period.start_date.year, m)
+        st = compute_statutory_cumulative(
+            basic=comp.basic, housing=comp.housing, transport=comp.transport,
+            other_taxable=comp.other_allowances, nhis=comp.nhis,
+            life_assurance=comp.life_assurance, months_elapsed=m,
+            ytd_gross_prior=ytd["gross"], ytd_pension_prior=ytd["pension"],
+            ytd_nhf_prior=ytd["nhf"], ytd_paye_prior=ytd["paye"], cfg=cfg,
+        )
+    else:
+        st = compute_statutory(
+            basic=comp.basic, housing=comp.housing, transport=comp.transport,
+            other_taxable=comp.other_allowances, nhis=comp.nhis,
+            life_assurance=comp.life_assurance, cfg=cfg,
+        )
 
     # Build line items: earnings from comp components, deductions from statutory + loans
     earnings = [
@@ -151,3 +188,87 @@ def run_employee_payroll(db: Session, period_id: int, emp_id: int,
         "statutory": st.as_dict(),
     })
     return result
+
+
+def run_period_payroll(db: Session, period_id: int, actor_id: Optional[int] = None,
+                       use_cumulative: bool = True) -> Dict:
+    """Bulk run: process every active employee that has compensation configured."""
+    period = db.query(PayPeriod).filter(PayPeriod.id == period_id).first()
+    if not period:
+        return {"success": False, "error": "Pay period not found"}
+
+    emp_ids = [r[0] for r in db.query(PayEmployeeCompensation.emp_id)
+               .filter(PayEmployeeCompensation.is_active == True).distinct().all()]  # noqa: E712
+
+    processed, failed, errors = 0, 0, []
+    totals = {"gross": 0.0, "paye": 0.0, "pension_emp": 0.0, "nhf": 0.0, "net": 0.0}
+    for emp_id in emp_ids:
+        res = run_employee_payroll(db, period_id, emp_id, actor_id, use_cumulative=use_cumulative)
+        if res.get("success"):
+            processed += 1
+            totals["gross"] += res["totals"]["gross"]
+            totals["net"] += res["totals"]["net"]
+            totals["paye"] += res["statutory"]["employee_deductions"]["paye"]
+            totals["pension_emp"] += res["statutory"]["employee_deductions"]["pension"]
+            totals["nhf"] += res["statutory"]["employee_deductions"]["nhf"]
+        else:
+            failed += 1
+            errors.append({"emp_id": emp_id, "error": res.get("error")})
+    return {"success": True, "period_id": period_id, "processed": processed,
+            "failed": failed, "errors": errors, "totals": totals}
+
+
+# ── Statutory remittance schedules (what a large org files/pays monthly) ────────
+def _period_salaries(db: Session, period_id: int):
+    """One row per salary, each paired with the SINGLE compensation effective for
+    the period (resolved via effective dating — never the all-active join, which
+    would duplicate employees who have superseded compensation rows)."""
+    period = db.query(PayPeriod).filter(PayPeriod.id == period_id).first()
+    on = period.start_date if period else None
+    salaries = (
+        db.query(PaySalary, Personnel)
+        .join(Personnel, PaySalary.emp_id == Personnel.id)
+        .filter(PaySalary.period_id == period_id).all()
+    )
+    return [(sal, get_active_compensation(db, sal.emp_id, on) if on else None, emp)
+            for sal, emp in salaries]
+
+
+def _item_value(db: Session, salary_id: int, name: str) -> float:
+    v = (db.query(func.coalesce(func.sum(PaySalaryItem.item_value), 0))
+         .filter(PaySalaryItem.salary_id == salary_id, PaySalaryItem.item_name == name).scalar())
+    return float(v or 0)
+
+
+def build_schedule(db: Session, period_id: int, kind: str) -> Dict:
+    """kind = 'bank' | 'paye' | 'pension'. Returns rows + totals for remittance."""
+    rows, total = [], 0.0
+    for sal, comp, emp in _period_salaries(db, period_id):
+        code = getattr(emp, "emp_code", None)
+        name = getattr(emp, "full_name", None) or getattr(emp, "first_name", "")
+        if kind == "bank":
+            amt = float(sal.net_salary or 0)
+            rows.append({"emp_code": code, "name": name,
+                         "bank": getattr(comp, "bank_name", None),
+                         "account_no": getattr(comp, "bank_account_no", None),
+                         "amount": amt})
+        elif kind == "paye":
+            amt = _item_value(db, sal.id, "PAYE")
+            rows.append({"emp_code": code, "name": name,
+                         "tin": getattr(comp, "tin", None),
+                         "tax_state": getattr(comp, "tax_state", None),
+                         "gross": float(sal.gross_salary or 0), "paye": amt})
+        elif kind == "pension":
+            emp_p = _item_value(db, sal.id, "Pension (8%)")
+            base = float((comp.basic + comp.housing + comp.transport)) if comp else 0.0
+            empr_p = round(base * 0.10, 2)
+            amt = emp_p + empr_p
+            rows.append({"emp_code": code, "name": name,
+                         "rsa_pin": getattr(comp, "rsa_pin", None),
+                         "pfa": getattr(comp, "pfa_name", None),
+                         "employee": emp_p, "employer": empr_p, "total": amt})
+        else:
+            return {"error": f"unknown schedule kind: {kind}"}
+        total += amt
+    return {"period_id": period_id, "kind": kind, "count": len(rows),
+            "total": round(total, 2), "rows": rows}

@@ -14,7 +14,9 @@ from sqlalchemy.orm import Session
 from ..core.database import get_db
 from ..models.payroll import PayEmployeeCompensation
 from ..services.payroll_statutory_ng import compute_statutory, StatutoryConfig
-from ..services.payroll_run_ng import run_employee_payroll, get_active_compensation
+from ..services.payroll_run_ng import (
+    run_employee_payroll, run_period_payroll, get_active_compensation, build_schedule,
+)
 
 router = APIRouter(prefix="/api/v1/payroll/statutory", tags=["Payroll Statutory (NG)"])
 
@@ -123,8 +125,23 @@ def get_compensation(emp_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/run", summary="Compute + persist a statutory payslip for one employee")
-def run(period_id: int, emp_id: int, db: Session = Depends(get_db)):
-    res = run_employee_payroll(db, period_id, emp_id)
+def run(period_id: int, emp_id: int, cumulative: bool = True, db: Session = Depends(get_db)):
+    res = run_employee_payroll(db, period_id, emp_id, use_cumulative=cumulative)
     if not res.get("success"):
         raise HTTPException(status_code=400, detail=res.get("error"))
     return res
+
+
+@router.post("/run/bulk", summary="Run payroll for all employees with compensation")
+def run_bulk(period_id: int, cumulative: bool = True, db: Session = Depends(get_db)):
+    res = run_period_payroll(db, period_id, use_cumulative=cumulative)
+    if not res.get("success"):
+        raise HTTPException(status_code=400, detail=res.get("error"))
+    return res
+
+
+@router.get("/schedule/{kind}", summary="Remittance schedule: kind = bank | paye | pension")
+def schedule(kind: str, period_id: int, db: Session = Depends(get_db)):
+    if kind not in ("bank", "paye", "pension"):
+        raise HTTPException(status_code=400, detail="kind must be bank, paye or pension")
+    return build_schedule(db, period_id, kind)

@@ -130,6 +130,83 @@ def _apply_paye_bands(taxable_annual: Decimal, cfg: StatutoryConfig
     return tax, breakdown
 
 
+def compute_statutory_cumulative(
+    basic: Decimal | float,
+    housing: Decimal | float = 0,
+    transport: Decimal | float = 0,
+    other_taxable: Decimal | float = 0,
+    *,
+    months_elapsed: int,                 # 1..12 — index of THIS period in the tax year
+    ytd_gross_prior: Decimal | float = 0,    # gross of months 1..(m-1)
+    ytd_pension_prior: Decimal | float = 0,
+    ytd_nhf_prior: Decimal | float = 0,
+    ytd_paye_prior: Decimal | float = 0,     # PAYE already deducted in months 1..(m-1)
+    nhis: Decimal | float = 0,
+    life_assurance: Decimal | float = 0,
+    cfg: StatutoryConfig | None = None,
+) -> StatutoryResult:
+    """Cumulative (year-to-date averaging) PAYE — the correct method when pay varies
+    across the year. Projects annual figures from cumulative income, computes tax to
+    date, and charges the difference vs PAYE already paid. For a flat salary this
+    yields the same monthly PAYE as `compute_statutory`."""
+    cfg = cfg or StatutoryConfig()
+    m = max(1, min(12, int(months_elapsed)))
+
+    basic = Decimal(str(basic)); housing = Decimal(str(housing))
+    transport = Decimal(str(transport)); other_taxable = Decimal(str(other_taxable))
+    nhis = Decimal(str(nhis)); life = Decimal(str(life_assurance))
+
+    pension_base = basic + housing + transport
+    gross_m = pension_base + other_taxable
+    pension_emp = _money(pension_base * cfg.pension_employee_pct)
+    pension_empr = _money(pension_base * cfg.pension_employer_pct)
+    nhf = _money(basic * cfg.nhf_pct) if cfg.nhf_enabled else Decimal("0")
+
+    # Cumulative to date (incl. current month)
+    cgtd = Decimal(str(ytd_gross_prior)) + gross_m
+    cum_pension = Decimal(str(ytd_pension_prior)) + (pension_emp if cfg.pension_relief_in_paye else Decimal("0"))
+    cum_nhf = Decimal(str(ytd_nhf_prior)) + (nhf if cfg.nhf_relief_in_paye else Decimal("0"))
+
+    # Project to a full year from m months, then compute annual tax
+    proj_annual_gross = cgtd * 12 / m
+    cra_annual = (max(cfg.cra_fixed_min, proj_annual_gross * cfg.cra_gross_pct)
+                  + proj_annual_gross * cfg.cra_extra_pct)
+    proj_reliefs = (cum_pension + cum_nhf + (nhis + life) * m) * 12 / m
+    annual_taxable = proj_annual_gross - cra_annual - proj_reliefs
+    if annual_taxable < 0:
+        annual_taxable = Decimal("0")
+
+    annual_tax, bands = _apply_paye_bands(annual_taxable, cfg)
+    notes: List[str] = []
+
+    tax_to_date = annual_tax * m / 12
+    min_tax_to_date = cgtd * cfg.minimum_tax_pct
+    if tax_to_date < min_tax_to_date:
+        notes.append(f"Minimum tax ({cfg.minimum_tax_pct*100:.0f}% of cumulative gross) applied.")
+        tax_to_date = min_tax_to_date
+
+    paye_m = tax_to_date - Decimal(str(ytd_paye_prior))
+    if paye_m < 0:
+        notes.append("PAYE already over-deducted YTD — this month's PAYE floored at ₦0.")
+        paye_m = Decimal("0")
+    paye_m = _money(paye_m)
+
+    total_ded = _money(pension_emp + nhf + paye_m)
+    net_m = _money(gross_m - total_ded)
+
+    return StatutoryResult(
+        gross_monthly=_money(gross_m),
+        annual_gross=_money(proj_annual_gross),
+        cra_annual=_money(cra_annual),
+        taxable_annual=_money(annual_taxable),
+        pension_employee=pension_emp, nhf=nhf, paye=paye_m,
+        total_statutory_deductions=total_ded, net_monthly=net_m,
+        pension_employer=pension_empr,
+        nsitf=_money(gross_m * cfg.nsitf_pct), itf=_money(gross_m * cfg.itf_pct),
+        paye_band_breakdown=bands, notes=notes,
+    )
+
+
 def compute_statutory(
     basic: Decimal | float,
     housing: Decimal | float = 0,
