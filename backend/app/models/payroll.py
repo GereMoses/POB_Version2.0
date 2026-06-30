@@ -167,10 +167,13 @@ class PaySalary(Base):
     is_final = Column(Boolean, default=False)
     calc_status = Column(Enum(PayCalcStatus), default=PayCalcStatus.PENDING)
     calc_time = Column(DateTime(timezone=True), server_default=func.now())
-    calc_by = Column(Integer, ForeignKey("users.id"), nullable=True)
-    verified_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    # Actor audit columns are SOFT references (no FK): the app authenticates against
+    # auth_user, whose id-space differs from the legacy `users` table these once
+    # FK'd to — a hard FK here breaks approvals. Store the authenticated actor id.
+    calc_by = Column(Integer, nullable=True)
+    verified_by = Column(Integer, nullable=True)
     verified_at = Column(DateTime(timezone=True), nullable=True)
-    approved_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    approved_by = Column(Integer, nullable=True)
     approved_at = Column(DateTime(timezone=True), nullable=True)
 
     # POB Extensions

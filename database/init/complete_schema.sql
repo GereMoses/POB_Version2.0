@@ -20016,3 +20016,9 @@ CREATE TABLE IF NOT EXISTS public.pay_employee_compensation (
     updated_at       timestamptz DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS ix_pay_emp_comp_emp_id ON public.pay_employee_compensation (emp_id);
+
+
+-- Payroll approval actor columns are soft references (auth is auth_user, not users).
+ALTER TABLE public.pay_salary DROP CONSTRAINT IF EXISTS pay_salary_calc_by_fkey;
+ALTER TABLE public.pay_salary DROP CONSTRAINT IF EXISTS pay_salary_verified_by_fkey;
+ALTER TABLE public.pay_salary DROP CONSTRAINT IF EXISTS pay_salary_approved_by_fkey;

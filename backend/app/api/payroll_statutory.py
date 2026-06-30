@@ -128,16 +128,18 @@ def get_compensation(emp_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/run", summary="Compute + persist a statutory payslip for one employee")
-def run(period_id: int, emp_id: int, cumulative: bool = True, db: Session = Depends(get_db)):
-    res = run_employee_payroll(db, period_id, emp_id, use_cumulative=cumulative)
+def run(period_id: int, emp_id: int, cumulative: bool = True,
+        db: Session = Depends(get_db), user=Depends(get_current_user)):
+    res = run_employee_payroll(db, period_id, emp_id, actor_id=user.id, use_cumulative=cumulative)
     if not res.get("success"):
         raise HTTPException(status_code=400, detail=res.get("error"))
     return res
 
 
 @router.post("/run/bulk", summary="Run payroll for all employees with compensation")
-def run_bulk(period_id: int, cumulative: bool = True, db: Session = Depends(get_db)):
-    res = run_period_payroll(db, period_id, use_cumulative=cumulative)
+def run_bulk(period_id: int, cumulative: bool = True,
+             db: Session = Depends(get_db), user=Depends(get_current_user)):
+    res = run_period_payroll(db, period_id, actor_id=user.id, use_cumulative=cumulative)
     if not res.get("success"):
         raise HTTPException(status_code=400, detail=res.get("error"))
     return res
