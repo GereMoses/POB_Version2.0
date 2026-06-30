@@ -585,10 +585,24 @@ const MusteringManagement = ({ embedded = false, onSectionSwitch }) => {
   const startMut = useMutation({
     mutationFn: (v) => apiService.post('/api/mustering/events/start/', v),
     onSuccess: (d) => {
-      message.success('Mustering event started');
+      const data = d?.data || {};
+      // Drill-readiness: warn if no muster reader is online, so the operator marks
+      // Safe manually instead of trusting a silent 0% headcount.
+      if (data.warning) {
+        modal.warning({
+          title: 'No muster reader online',
+          content: data.warning,
+          okText: 'Understood — I will mark Safe manually',
+          width: 460,
+        });
+      } else {
+        message.success(
+          `Mustering event started${data.muster_readers_online ? ` · ${data.muster_readers_online} muster reader(s) online` : ''}`
+        );
+      }
       qc.invalidateQueries(['muster-active']); qc.invalidateQueries(['muster-events']);
       setStartModal(false); startForm.resetFields();
-      const evId = d?.data?.event_id;
+      const evId = data.event_id;
       if (evId) { setSelectedEventId(evId); setActiveTab('live'); }
     },
     onError: e => message.error(e?.response?.data?.detail || 'Failed to start event'),
