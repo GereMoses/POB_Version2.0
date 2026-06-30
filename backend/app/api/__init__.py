@@ -195,6 +195,12 @@ except Exception as e:
     _logger.warning(f"Payroll API disabled: {e}")
 
 try:
+    from .payroll_statutory import router as payroll_statutory_router
+    direct_router.include_router(payroll_statutory_router, tags=["Payroll Statutory (NG)"])
+except Exception as e:
+    _logger.warning(f"Payroll Statutory API disabled: {e}")
+
+try:
     from .meeting import router as meeting_api_router
     direct_router.include_router(meeting_api_router, tags=["Meeting"])
 except Exception as e:

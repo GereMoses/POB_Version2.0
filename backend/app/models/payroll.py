@@ -376,6 +376,52 @@ class PayCalculationLog(Base):
     creator = relationship("User")
 
 
+class PayEmployeeCompensation(Base):
+    """Per-employee salary components + statutory identifiers.
+
+    The base payroll keyed pay at the structure level (every assigned employee got
+    identical pay, defaulting to a hardcoded basic). Real organisations pay each
+    person individually; this effective-dated table is the per-employee source of
+    Basic/Housing/Transport/other and the statutory IDs needed to file PAYE/pension.
+    Money is Numeric(14,2) to comfortably hold senior-grade and annualised figures.
+    """
+    __tablename__ = "pay_employee_compensation"
+
+    id = Column(Integer, primary_key=True, index=True)
+    emp_id = Column(Integer, ForeignKey("personnel.id"), nullable=False, index=True)
+
+    # Monthly salary components (Basic+Housing+Transport = pension base)
+    basic = Column(Numeric(14, 2), nullable=False, default=0)
+    housing = Column(Numeric(14, 2), nullable=False, default=0)
+    transport = Column(Numeric(14, 2), nullable=False, default=0)
+    other_allowances = Column(Numeric(14, 2), nullable=False, default=0)
+    nhis = Column(Numeric(14, 2), nullable=False, default=0)            # PAYE-relievable
+    life_assurance = Column(Numeric(14, 2), nullable=False, default=0)  # PAYE-relievable
+
+    currency = Column(String(3), nullable=False, default="NGN")
+    grade = Column(String(50), nullable=True)
+    nhf_enabled = Column(Boolean, default=True)
+
+    # Statutory / payment identifiers (required to actually remit)
+    tin = Column(String(30), nullable=True)            # tax identification number
+    rsa_pin = Column(String(30), nullable=True)        # pension RSA PIN
+    pfa_name = Column(String(100), nullable=True)      # pension fund administrator
+    nhf_number = Column(String(30), nullable=True)
+    tax_state = Column(String(50), nullable=True)      # state of PAYE remittance
+    bank_name = Column(String(100), nullable=True)
+    bank_account_no = Column(String(20), nullable=True)
+
+    # Effective dating — most recent active row applicable to the period wins
+    effective_date = Column(Date, nullable=True)
+    end_date = Column(Date, nullable=True)
+    is_active = Column(Boolean, default=True)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    employee = relationship("Personnel")
+
+
 class PayAuditLog(Base):
     """Payroll audit trail"""
     __tablename__ = "pay_audit_log"

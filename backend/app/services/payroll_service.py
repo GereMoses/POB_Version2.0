@@ -7,7 +7,7 @@ from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime, date, timedelta
 from decimal import Decimal
 from sqlalchemy.orm import Session
-from sqlalchemy import and_, or_, func, case, extract
+from sqlalchemy import and_, or_, func, case, extract, Numeric, Date
 import logging
 
 from ..models.payroll import (
