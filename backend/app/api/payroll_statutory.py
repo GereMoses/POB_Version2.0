@@ -7,16 +7,19 @@ correct breakdown for any salary before it's wired into the full payroll run.
 
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from ..core.database import get_db
+from ..core.dependencies import get_current_user
 from ..models.payroll import PayEmployeeCompensation
 from ..services.payroll_statutory_ng import compute_statutory, StatutoryConfig
 from ..services.payroll_run_ng import (
     run_employee_payroll, run_period_payroll, get_active_compensation, build_schedule,
+    _transition,
 )
+from ..services.payroll_payslip_ng import generate_payslip_pdf
 
 router = APIRouter(prefix="/api/v1/payroll/statutory", tags=["Payroll Statutory (NG)"])
 
@@ -145,3 +148,37 @@ def schedule(kind: str, period_id: int, db: Session = Depends(get_db)):
     if kind not in ("bank", "paye", "pension"):
         raise HTTPException(status_code=400, detail="kind must be bank, paye or pension")
     return build_schedule(db, period_id, kind)
+
+
+@router.get("/payslip/{salary_id}/pdf", summary="Download a payslip PDF")
+def payslip_pdf(salary_id: int, db: Session = Depends(get_db)):
+    pdf = generate_payslip_pdf(db, salary_id)
+    if pdf is None:
+        raise HTTPException(status_code=404, detail="Salary record not found")
+    return Response(content=pdf, media_type="application/pdf",
+                    headers={"Content-Disposition": f'inline; filename="payslip_{salary_id}.pdf"'})
+
+
+# ── Maker-checker approval (segregation of duties enforced) ──────────────────────
+@router.post("/payslip/{salary_id}/verify", summary="Verify a calculated payslip (checker)")
+def verify(salary_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    res = _transition(db, salary_id, user.id, "verify")
+    if not res["success"]:
+        raise HTTPException(status_code=400, detail=res["error"])
+    return res
+
+
+@router.post("/payslip/{salary_id}/approve", summary="Approve + lock a verified payslip")
+def approve(salary_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    res = _transition(db, salary_id, user.id, "approve")
+    if not res["success"]:
+        raise HTTPException(status_code=400, detail=res["error"])
+    return res
+
+
+@router.post("/payslip/{salary_id}/reopen", summary="Reopen an approved/verified payslip")
+def reopen(salary_id: int, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    res = _transition(db, salary_id, user.id, "reopen")
+    if not res["success"]:
+        raise HTTPException(status_code=400, detail=res["error"])
+    return res

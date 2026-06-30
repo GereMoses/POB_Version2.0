@@ -140,10 +140,13 @@ def run_employee_payroll(db: Session, period_id: int, emp_id: int,
     total_deductions = sum((v for _, v in deductions), Decimal("0"))
     net = total_earnings - total_deductions
 
-    # Upsert PaySalary
+    # Upsert PaySalary — but never overwrite an APPROVED (locked) payslip
     salary = db.query(PaySalary).filter(
         PaySalary.period_id == period_id, PaySalary.emp_id == emp_id
     ).first()
+    if salary and salary.calc_status == PayCalcStatus.APPROVED:
+        result["error"] = "Payslip is approved and locked — reopen before recalculating"
+        return result
     if salary:
         db.query(PaySalaryItem).filter(PaySalaryItem.salary_id == salary.id).delete()
     else:
@@ -216,6 +219,45 @@ def run_period_payroll(db: Session, period_id: int, actor_id: Optional[int] = No
             errors.append({"emp_id": emp_id, "error": res.get("error")})
     return {"success": True, "period_id": period_id, "processed": processed,
             "failed": failed, "errors": errors, "totals": totals}
+
+
+# ── Maker-checker approval (segregation of duties) ──────────────────────────────
+def _transition(db: Session, salary_id: int, actor_id: int, action: str) -> Dict:
+    """action = 'verify' | 'approve' | 'reopen'. Enforces that the same person
+    cannot both prepare and check the payroll."""
+    from datetime import datetime
+    sal = db.query(PaySalary).filter(PaySalary.id == salary_id).first()
+    if not sal:
+        return {"success": False, "error": "Salary not found"}
+
+    if action == "verify":
+        if sal.calc_status != PayCalcStatus.CALCULATED:
+            return {"success": False, "error": f"Can only verify a CALCULATED payslip (is {sal.calc_status.value})"}
+        if sal.calc_by and actor_id == sal.calc_by:
+            return {"success": False, "error": "Segregation of duties: the preparer cannot verify their own payroll"}
+        sal.calc_status = PayCalcStatus.VERIFIED
+        sal.verified_by = actor_id
+        sal.verified_at = datetime.utcnow()
+    elif action == "approve":
+        if sal.calc_status != PayCalcStatus.VERIFIED:
+            return {"success": False, "error": f"Can only approve a VERIFIED payslip (is {sal.calc_status.value})"}
+        if actor_id in (sal.calc_by, sal.verified_by):
+            return {"success": False, "error": "Segregation of duties: approver must differ from preparer and verifier"}
+        sal.calc_status = PayCalcStatus.APPROVED
+        sal.approved_by = actor_id
+        sal.approved_at = datetime.utcnow()
+        sal.is_final = True
+    elif action == "reopen":
+        sal.calc_status = PayCalcStatus.CALCULATED
+        sal.is_final = False
+        sal.verified_by = sal.approved_by = None
+        sal.verified_at = sal.approved_at = None
+    else:
+        return {"success": False, "error": f"Unknown action {action}"}
+
+    db.commit()
+    return {"success": True, "salary_id": sal.id, "status": sal.calc_status.value,
+            "verified_by": sal.verified_by, "approved_by": sal.approved_by}
 
 
 # ── Statutory remittance schedules (what a large org files/pays monthly) ────────
