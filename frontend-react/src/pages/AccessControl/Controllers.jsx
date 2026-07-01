@@ -162,13 +162,8 @@ const ControllerCard = ({ ctrl, zones, api, qc }) => {
     >
       {/* header */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '14px 16px' }}>
-        <div style={{
-          width: 46, height: 40, borderRadius: 8, flexShrink: 0,
-          background: 'linear-gradient(135deg,#0d1117,#1a2332)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          border: '1px solid #22303f',
-        }}>
-          <C3Board size={38} />
+        <div style={{ flexShrink: 0, display: 'flex', alignItems: 'center' }}>
+          <C3Board size={64} />
         </div>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontWeight: 700, fontSize: 14 }}>
