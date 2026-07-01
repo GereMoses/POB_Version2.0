@@ -4,7 +4,7 @@ import {
   AppstoreOutlined, DatabaseOutlined, ThunderboltOutlined,
   MonitorOutlined, CloudUploadOutlined, SettingOutlined,
   WifiOutlined, ReloadOutlined, SafetyOutlined, ToolOutlined,
-  CalendarOutlined, LockOutlined, BarChartOutlined, SyncOutlined,
+  CalendarOutlined, BarChartOutlined, SyncOutlined,
 } from '@ant-design/icons';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 
@@ -15,7 +15,6 @@ import RealTimeMonitor    from './tabs/RealTimeMonitor';
 import FirmwareManagement from './tabs/FirmwareManagement';
 import AutoRegisterSettings from './tabs/AutoRegisterSettings';
 import BiometricEnrollment  from './tabs/BiometricEnrollment';
-import AccessControl        from './tabs/AccessControl';
 import DeviceSchedules      from './tabs/DeviceSchedules';
 import MaintenanceTracking  from './tabs/MaintenanceTracking';
 import BiotimeAnalytics     from './tabs/BiotimeAnalytics';
@@ -86,11 +85,6 @@ const Device = () => {
       key: '5',
       label: <span><SafetyOutlined />Biometric Enrollment</span>,
       children: <BiometricEnrollment terminals={terminals} />,
-    },
-    {
-      key: '6',
-      label: <span><LockOutlined />Access Control</span>,
-      children: <AccessControl terminals={terminals} />,
     },
     {
       key: '7',
