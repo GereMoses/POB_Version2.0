@@ -229,6 +229,59 @@ const Schedules = ({ periods }) => {
   );
 };
 
+/* ── Off-cycle adjustments (arrears / bonus / one-off deductions) ─────────── */
+const Adjustments = ({ periods, employees }) => {
+  const { message } = App.useApp();
+  const [pid, setPid] = useState(null);
+  const [rows, setRows] = useState([]);
+  const [f, setF] = useState({ emp_id: null, name: '', amount: 0, adj_type: 'earning', is_taxable: true });
+
+  const load = useCallback(async id => {
+    if (!id) return;
+    try { setRows(await apiCall(`${BASE}/adjustments?period_id=${id}`)); }
+    catch (e) { message.error(e.message); }
+  }, [message]);
+  useEffect(() => { if (pid) load(pid); }, [pid, load]);
+
+  const add = async () => {
+    if (!pid || !f.emp_id || !f.name) return message.warning('Period, employee and name required');
+    try {
+      await apiCall(`${BASE}/adjustments`, { method: 'POST', body: JSON.stringify({ ...f, period_id: pid }) });
+      message.success('Added — re-run payroll to apply'); setF(s => ({ ...s, name: '', amount: 0 })); load(pid);
+    } catch (e) { message.error(e.message); }
+  };
+  const del = async id => { try { await apiCall(`${BASE}/adjustments/${id}`, { method: 'DELETE' }); load(pid); } catch (e) { message.error(e.message); } };
+
+  const empName = id => { const e = (employees || []).find(x => x.id === id); return e ? empLabel(e) : id; };
+  return (
+    <Card size="small">
+      <Space wrap style={{ marginBottom: 12 }}>
+        <Select style={{ width: 220 }} placeholder="Pay period" value={pid} onChange={setPid}
+          options={(periods || []).map(p => ({ value: p.id, label: p.period_name }))} />
+        <Select showSearch style={{ width: 240 }} placeholder="Employee" optionFilterProp="label" value={f.emp_id}
+          onChange={v => setF(s => ({ ...s, emp_id: v }))}
+          options={(employees || []).map(e => ({ value: e.id, label: empLabel(e) }))} />
+        <Input style={{ width: 180 }} placeholder="Name e.g. May arrears" value={f.name} onChange={e => setF(s => ({ ...s, name: e.target.value }))} />
+        <InputNumber style={{ width: 130 }} min={0} placeholder="Amount" value={f.amount} onChange={v => setF(s => ({ ...s, amount: v }))} />
+        <Select style={{ width: 130 }} value={f.adj_type} onChange={v => setF(s => ({ ...s, adj_type: v }))}
+          options={[{ value: 'earning', label: 'Earning' }, { value: 'deduction', label: 'Deduction' }]} />
+        <Tooltip title="Taxable earnings feed the PAYE base"><span>Taxable <Switch checked={f.is_taxable} onChange={v => setF(s => ({ ...s, is_taxable: v }))} /></span></Tooltip>
+        <Button type="primary" onClick={add}>Add</Button>
+      </Space>
+      <Table size="small" rowKey="id" dataSource={rows} pagination={false}
+        columns={[
+          { title: 'Employee', dataIndex: 'emp_id', render: empName },
+          { title: 'Name', dataIndex: 'name' },
+          { title: 'Type', dataIndex: 'adj_type', render: (t, r) => <Tag color={t === 'earning' ? 'green' : 'red'}>{t}{t === 'earning' && !r.is_taxable ? ' (non-tax)' : ''}</Tag> },
+          { title: 'Amount', dataIndex: 'amount', align: 'right', render: fmt },
+          { title: '', render: (_, r) => <Button size="small" danger onClick={() => del(r.id)}>Remove</Button> },
+        ]}
+        locale={{ emptyText: 'No adjustments for this period' }} />
+      <div style={{ color: '#8c8c8c', fontSize: 12, marginTop: 8 }}>After adding, re-run payroll for the period (Run Payroll tab) to apply.</div>
+    </Card>
+  );
+};
+
 /* ── Tax preview calculator ───────────────────────────────────────────────── */
 const Preview = () => {
   const { message } = App.useApp();
@@ -285,6 +338,7 @@ const StatutoryTab = ({ periods, employees }) => {
     { label: 'Compensation', value: 'Compensation', icon: <DollarOutlined /> },
     { label: 'Run Payroll', value: 'Run Payroll', icon: <PlayCircleOutlined /> },
     { label: 'Payslips & Approval', value: 'Payslips', icon: <FileTextOutlined /> },
+    { label: 'Adjustments', value: 'Adjustments', icon: <DollarOutlined /> },
     { label: 'Schedules', value: 'Schedules', icon: <BankOutlined /> },
     { label: 'Tax Preview', value: 'Preview', icon: <CalculatorOutlined /> },
   ];
@@ -299,6 +353,7 @@ const StatutoryTab = ({ periods, employees }) => {
       {view === 'Compensation' && <Compensation employees={employees} />}
       {view === 'Run Payroll' && <RunPayroll periods={periods} />}
       {view === 'Payslips' && <Payslips periods={periods} />}
+      {view === 'Adjustments' && <Adjustments periods={periods} employees={employees} />}
       {view === 'Schedules' && <Schedules periods={periods} />}
       {view === 'Preview' && <Preview />}
     </div>
