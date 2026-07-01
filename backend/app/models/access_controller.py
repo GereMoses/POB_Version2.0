@@ -44,6 +44,9 @@ class AccessController(Base):
     port = Column(Integer, nullable=False, default=4370)
     comm_password = Column(String(64), nullable=True)  # panel comm password, if set
 
+    # Physical location (building / gate / floor) — helps identify the panel on site
+    location = Column(String(255), nullable=True)
+
     # Topology
     door_count = Column(Integer, nullable=False, default=1)
 

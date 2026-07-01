@@ -46,6 +46,7 @@ class AccessControllerBase(BaseModel):
     serial_number: Optional[str] = None
     manufacturer: Optional[str] = "ZKTeco"
     comm_password: Optional[str] = None
+    location: Optional[str] = None
     door_count: int = Field(1, ge=1, le=8)
     poll_enabled: bool = False
     poll_interval_sec: int = Field(5, ge=1, le=3600)
@@ -64,6 +65,7 @@ class AccessControllerUpdate(BaseModel):
     model: Optional[str] = None
     serial_number: Optional[str] = None
     comm_password: Optional[str] = None
+    location: Optional[str] = None
     door_count: Optional[int] = Field(None, ge=1, le=8)
     poll_enabled: Optional[bool] = None
     poll_interval_sec: Optional[int] = Field(None, ge=1, le=3600)

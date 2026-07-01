@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import {
   Button, Input, Select, Switch, Tag, Tooltip, Popconfirm, Form, InputNumber,
-  Space, Spin, App, Empty, Modal, Card, Collapse, Badge,
+  Space, Spin, App, Empty, Modal, Card, Collapse, Badge, Radio,
 } from 'antd';
 import {
   PlusOutlined, EditOutlined, DeleteOutlined, ApiOutlined,
@@ -14,7 +14,29 @@ import apiService from '../../services/api';
 
 const { Option } = Select;
 const BASE = '/api/v1/access-controllers';
-const C3_MODELS = { 'C3-100': 1, 'C3-200': 2, 'C3-400': 4 };  // door counts (datasheet)
+// ZKTeco datasheet specs
+const C3_MODELS = {
+  'C3-100': { doors: 1, readerPorts: 2, inputs: 2, outputs: 2 },
+  'C3-200': { doors: 2, readerPorts: 4, inputs: 6, outputs: 4 },
+  'C3-400': { doors: 4, readerPorts: 4, inputs: 12, outputs: 8 },
+};
+const IPV4 = /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/;
+
+// Build the reader ports for a controller from its model + chosen layout.
+// C3-400 has only 4 reader ports: either 4 doors (entry-only) OR 2 doors (in+out).
+const buildReaders = (model, doorCount, mode) => {
+  const rows = [];
+  if (model === 'C3-400' && mode === 'entry_only') {
+    for (let d = 1; d <= 4; d++) rows.push({ door_no: d, direction: 'ENTRY', name: `Door ${d} Entry` });
+    return rows;
+  }
+  const doors = model === 'C3-400' ? 2 : (C3_MODELS[model]?.doors || doorCount || 1);
+  for (let d = 1; d <= doors; d++) {
+    rows.push({ door_no: d, direction: 'ENTRY', name: `Door ${d} Entry` });
+    rows.push({ door_no: d, direction: 'EXIT', name: `Door ${d} Exit` });
+  }
+  return rows;
+};
 
 const STATUS = {
   online:  { color: '#52c41a', icon: <WifiOutlined />,       label: 'Online'  },
@@ -124,6 +146,7 @@ const ControllerCard = ({ ctrl, zones, api, qc }) => {
           </div>
           <div style={{ fontSize: 12, color: '#8c8c8c' }}>
             {ctrl.door_count} door(s) · {ctrl.readers.length} reader port(s)
+            {ctrl.location && <span> · {ctrl.location}</span>}
             {unassigned > 0 && <Tag color="warning" style={{ marginLeft: 8 }}>{unassigned} unassigned</Tag>}
           </div>
         </div>
@@ -348,7 +371,11 @@ const Controllers = () => {
   const qc = useQueryClient();
   const [modal, setModal] = useState(null);   // {mode:'create'|'edit', ctrl?} | {mode:'reader', ctrl}
   const [learnId, setLearnId] = useState(null);
+  const [readerMode, setReaderMode] = useState('entry_only');  // C3-400: entry_only | entry_exit
   const [form] = Form.useForm();
+  const watchModel = Form.useWatch('model', form);
+  const watchDoors = Form.useWatch('door_count', form);
+  const previewReaders = buildReaders(watchModel, watchDoors, readerMode);
 
   const { data: controllers = [], isLoading } = useQuery({
     queryKey: ['ac-controllers'],
@@ -400,8 +427,14 @@ const Controllers = () => {
 
   const submit = async () => {
     const v = await form.validateFields();
-    if (modal.mode === 'reader') addReader.mutate({ ctrlId: modal.ctrl.id, v });
-    else saveCtrl.mutate(v);
+    if (modal.mode === 'reader') { addReader.mutate({ ctrlId: modal.ctrl.id, v }); return; }
+    if (!modal.ctrl) {
+      // Create: seed the exact reader ports shown in the preview.
+      const readers = buildReaders(v.model, v.door_count, readerMode);
+      v.readers = readers;
+      v.door_count = Math.max(...readers.map(r => r.door_no), 1);
+    }
+    saveCtrl.mutate(v);
   };
 
   return (
@@ -424,7 +457,7 @@ const Controllers = () => {
             Refresh
           </Button>
           <Button type="primary" icon={<PlusOutlined />}
-            onClick={() => { setModal({ mode: 'create' }); form.resetFields(); form.setFieldsValue({ port: 4370, door_count: 2, poll_interval_sec: 5 }); }}>
+            onClick={() => { setReaderMode('entry_only'); setModal({ mode: 'create' }); form.resetFields(); form.setFieldsValue({ port: 4370, door_count: 2, poll_interval_sec: 5, poll_enabled: false }); }}>
             Add Controller
           </Button>
         </Space>
@@ -478,44 +511,102 @@ const Controllers = () => {
             </>
           ) : (
             <>
-              <Form.Item name="name" label="Name" rules={[{ required: true }]}>
-                <Input placeholder="e.g. Main Gate Controller" />
-              </Form.Item>
               <Space style={{ display: 'flex' }} align="start">
-                <Form.Item name="ip_address" label="IP address" rules={[{ required: true }]} style={{ flex: 1 }}>
-                  <Input placeholder="192.168.1.50" />
+                <Form.Item name="name" label="Name" rules={[{ required: true }]} style={{ flex: 1 }}>
+                  <Input placeholder="e.g. Main Gate Controller" />
                 </Form.Item>
-                <Form.Item name="port" label="Port"><InputNumber min={1} max={65535} /></Form.Item>
-              </Space>
-              <Space style={{ display: 'flex' }} align="start">
-                <Form.Item name="model" label="Model" style={{ flex: 1 }}
-                  tooltip="Picking a C3 model sets the door count and the correct reader layout">
-                  <Select
-                    placeholder="Select model"
+                <Form.Item name="model" label="Model" rules={[{ required: true }]} style={{ width: 190 }}
+                  tooltip="Sets door count + reader layout (ZKTeco datasheet)">
+                  <Select placeholder="Select model" disabled={!!modal?.ctrl}
                     onChange={m => {
-                      const doors = C3_MODELS[m];
-                      if (doors) form.setFieldsValue({ door_count: doors });
+                      const s = C3_MODELS[m];
+                      if (s) form.setFieldsValue({ door_count: s.doors });
+                      setReaderMode('entry_only');
                     }}
                     options={[
                       { value: 'C3-100', label: 'ZKTeco C3-100 (1 door)' },
                       { value: 'C3-200', label: 'ZKTeco C3-200 (2 doors)' },
                       { value: 'C3-400', label: 'ZKTeco C3-400 (4 doors)' },
-                    ]}
-                  />
-                </Form.Item>
-                <Form.Item name="door_count" label="Doors"
-                  tooltip="C3-100/200 seed IN+OUT per door; C3-400 seeds entry-only per door (exit by button)">
-                  <InputNumber min={1} max={8} />
+                    ]} />
                 </Form.Item>
               </Space>
-              <Form.Item name="serial_number" label="Serial number"><Input /></Form.Item>
-              <Form.Item name="comm_password" label="Comm password" tooltip="Panel communication password, if set">
-                <Input.Password autoComplete="new-password" />
+
+              {watchModel && C3_MODELS[watchModel] && (
+                <div style={{ margin: '-4px 0 12px', fontSize: 12, color: '#8c8c8c' }}>
+                  {watchModel}: {C3_MODELS[watchModel].doors} door(s) · {C3_MODELS[watchModel].readerPorts} reader ports ·
+                  {' '}{C3_MODELS[watchModel].inputs} inputs · {C3_MODELS[watchModel].outputs} outputs · 30,000 cards
+                </div>
+              )}
+
+              <Form.Item name="location" label="Location"
+                tooltip="Where the panel is physically installed">
+                <Input placeholder="e.g. Main gate — Building A, ground floor" />
               </Form.Item>
-              <Space>
-                <Form.Item name="poll_enabled" label="Auto-poll" valuePropName="checked"><Switch /></Form.Item>
-                <Form.Item name="poll_interval_sec" label="Interval (s)"><InputNumber min={1} max={3600} /></Form.Item>
+
+              <Space style={{ display: 'flex' }} align="start">
+                <Form.Item name="ip_address" label="IP address" style={{ flex: 1 }}
+                  rules={[{ required: true }, { pattern: IPV4, message: 'Enter a valid IPv4 address' }]}>
+                  <Input placeholder="192.168.1.201" />
+                </Form.Item>
+                <Form.Item name="port" label="Port" tooltip="C3 default is 4370"><InputNumber min={1} max={65535} /></Form.Item>
               </Space>
+
+              <Space style={{ display: 'flex' }} align="start">
+                <Form.Item name="serial_number" label="Serial number" style={{ flex: 1 }}
+                  tooltip="From the device label (optional; can auto-read on Test)">
+                  <Input placeholder="e.g. AGKD204..." />
+                </Form.Item>
+                <Form.Item name="comm_password" label="Comm password"
+                  tooltip="C3 communication password, if one is set on the panel">
+                  <Input.Password autoComplete="new-password" />
+                </Form.Item>
+              </Space>
+
+              {!modal?.ctrl && (
+                <>
+                  <Form.Item label="Reader layout"
+                    tooltip="How the readers are wired. Zone exit tracking needs a reader on the exit side.">
+                    {watchModel === 'C3-400' ? (
+                      <Radio.Group value={readerMode} onChange={e => setReaderMode(e.target.value)}>
+                        <Radio value="entry_only" style={{ display: 'block', marginBottom: 4 }}>
+                          4 doors — entry reader only <span style={{ color: '#8c8c8c' }}>(exit by push-button; no card-exit)</span>
+                        </Radio>
+                        <Radio value="entry_exit" style={{ display: 'block' }}>
+                          2 doors — entry + exit readers <span style={{ color: '#8c8c8c' }}>(full in/out zone tracking)</span>
+                        </Radio>
+                      </Radio.Group>
+                    ) : (
+                      <span style={{ color: '#595959' }}>IN + OUT reader per door — full entry/exit tracking</span>
+                    )}
+                  </Form.Item>
+
+                  <div style={{ background: '#f6ffed', border: '1px solid #b7eb8f', borderRadius: 6, padding: '8px 12px', marginBottom: 14 }}>
+                    <div style={{ fontSize: 12, color: '#389e0d', marginBottom: 6 }}>
+                      Will create {previewReaders.length} reader port(s):
+                    </div>
+                    <Space size={[4, 4]} wrap>
+                      {previewReaders.map((r, i) => (
+                        <Tag key={i} color={r.direction === 'ENTRY' ? 'green' : 'orange'} style={{ margin: 0 }}>
+                          {r.direction === 'ENTRY' ? <LoginOutlined /> : <LogoutOutlined />} Door {r.door_no} {r.direction}
+                        </Tag>
+                      ))}
+                    </Space>
+                    <div style={{ fontSize: 11, color: '#8c8c8c', marginTop: 6 }}>
+                      You'll assign each port to a zone after creating (or use Learn mode).
+                    </div>
+                  </div>
+                </>
+              )}
+
+              <Space>
+                <Form.Item name="poll_enabled" label="Auto-poll" valuePropName="checked"
+                  tooltip="Continuously read events from this panel into zones"><Switch /></Form.Item>
+                <Form.Item name="poll_interval_sec" label="Poll interval (s)"><InputNumber min={1} max={3600} /></Form.Item>
+              </Space>
+
+              <Form.Item name="notes" label="Notes">
+                <Input.TextArea rows={2} placeholder="Install notes, contact, etc. (optional)" />
+              </Form.Item>
             </>
           )}
         </Form>

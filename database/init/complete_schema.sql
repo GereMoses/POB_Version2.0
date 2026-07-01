@@ -19758,7 +19758,7 @@ ALTER TABLE ONLY public.vis_blacklist
 --
 
 ALTER TABLE ONLY public.vis_pre_registration
-    ADD CONSTRAINT vis_pre_registration_approval_by_fkey FOREIGN KEY (approval_by) REFERENCES public.personnel_employee(id);
+    ADD CONSTRAINT vis_pre_registration_approval_by_fkey FOREIGN KEY (approval_by) REFERENCES public.auth_user(id);
 
 
 --
@@ -20047,3 +20047,6 @@ ALTER TABLE public.hr_integration_config ADD COLUMN IF NOT EXISTS options jsonb;
 
 -- Business Central connector is config-driven (api route / company path / entity / field map).
 ALTER TABLE public.bc_integration_config ADD COLUMN IF NOT EXISTS options jsonb;
+
+-- access controller physical location
+ALTER TABLE public.access_controllers ADD COLUMN IF NOT EXISTS location varchar(255);
