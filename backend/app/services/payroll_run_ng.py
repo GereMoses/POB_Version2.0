@@ -282,6 +282,25 @@ def _item_value(db: Session, salary_id: int, name: str) -> float:
     return float(v or 0)
 
 
+def list_period_salaries(db: Session, period_id: int) -> Dict:
+    """Persisted salaries for a period with ids + approval status (powers the
+    payslip / approval table in the UI)."""
+    rows = []
+    for sal, comp, emp in _period_salaries(db, period_id):
+        rows.append({
+            "salary_id": sal.id,
+            "emp_code": getattr(emp, "emp_code", None),
+            "name": getattr(emp, "full_name", None) or getattr(emp, "first_name", "") or "—",
+            "gross": float(sal.gross_salary or 0),
+            "deductions": float(sal.total_deductions or 0),
+            "net": float(sal.net_salary or 0),
+            "status": sal.calc_status.value if sal.calc_status else "pending",
+            "calc_by": sal.calc_by, "verified_by": sal.verified_by, "approved_by": sal.approved_by,
+        })
+    rows.sort(key=lambda r: (r["emp_code"] or ""))
+    return {"period_id": period_id, "count": len(rows), "rows": rows}
+
+
 def build_schedule(db: Session, period_id: int, kind: str) -> Dict:
     """kind = 'bank' | 'paye' | 'pension'. Returns rows + totals for remittance."""
     rows, total = [], 0.0

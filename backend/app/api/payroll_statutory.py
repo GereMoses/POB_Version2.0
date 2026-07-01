@@ -17,7 +17,7 @@ from ..models.payroll import PayEmployeeCompensation
 from ..services.payroll_statutory_ng import compute_statutory, StatutoryConfig
 from ..services.payroll_run_ng import (
     run_employee_payroll, run_period_payroll, get_active_compensation, build_schedule,
-    _transition,
+    list_period_salaries, _transition,
 )
 from ..services.payroll_payslip_ng import generate_payslip_pdf
 
@@ -143,6 +143,11 @@ def run_bulk(period_id: int, cumulative: bool = True,
     if not res.get("success"):
         raise HTTPException(status_code=400, detail=res.get("error"))
     return res
+
+
+@router.get("/period/{period_id}/salaries", summary="Persisted salaries + approval status for a period")
+def period_salaries(period_id: int, db: Session = Depends(get_db)):
+    return list_period_salaries(db, period_id)
 
 
 @router.get("/schedule/{kind}", summary="Remittance schedule: kind = bank | paye | pension")

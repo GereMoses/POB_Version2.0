@@ -19,6 +19,7 @@ import BankSheetTab from './tabs/BankSheetTab';
 import ReportsTab from './tabs/ReportsTab';
 import LoansTab from './tabs/LoansTab';
 import POBExtensionsTab from './tabs/POBExtensionsTab';
+import StatutoryTab from './tabs/StatutoryTab';
 import { apiCall } from './payrollApi';
 import './Payroll.css';
 
@@ -106,6 +107,11 @@ const Payroll = () => {
       key: 'calculation',
       label: <span className="payroll-tab-label"><CalculatorOutlined /> Calculation</span>,
       children: <CalculationTab periods={periods} employees={employees} departments={departments} />,
+    },
+    {
+      key: 'statutory',
+      label: <span className="payroll-tab-label"><SafetyOutlined /> Statutory (NG)</span>,
+      children: <StatutoryTab periods={periods} employees={employees} />,
     },
     {
       key: 'payslip',
