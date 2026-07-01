@@ -4,7 +4,7 @@ import {
   DashboardOutlined, ClockCircleOutlined, SafetyOutlined, TeamOutlined,
   ApiOutlined, ThunderboltOutlined, StopOutlined, KeyOutlined,
   LockOutlined, LinkOutlined, AlertOutlined, FileTextOutlined,
-  CompassOutlined, UserAddOutlined, HeatMapOutlined, ClusterOutlined,
+  CompassOutlined, UserAddOutlined, ClusterOutlined,
   MenuFoldOutlined, MenuUnfoldOutlined,
 } from '@ant-design/icons';
 import AccessControlDashboard from './AccessControlDashboard';
@@ -22,7 +22,6 @@ import EmergencyLockdown      from './EmergencyLockdown';
 import AccessReports          from './AccessReports';
 import GuardTour              from './GuardTour';
 import VisitorAccess          from './VisitorAccess';
-import ACZones                from './ACZones';
 import Controllers            from './Controllers';
 
 const NAV = [
@@ -64,7 +63,6 @@ const NAV = [
     label: 'EXTENDED',
     items: [
       { key: 'visitors', label: 'Visitor Access', icon: UserAddOutlined, component: VisitorAccess },
-      { key: 'zones',    label: 'AC Zones',       icon: HeatMapOutlined, component: ACZones       },
     ],
   },
   {
