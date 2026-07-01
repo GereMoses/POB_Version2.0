@@ -30,6 +30,16 @@ else
   echo "  ✓ Complete schema applied"
 fi
 
+# ── 1b. Incremental migrations (idempotent — runs on fresh AND existing DBs) ──
+# Additive changes made after the pg_dump. Safe to run every deploy (no-op when
+# already applied). This keeps an EXISTING prod DB up to date with no code change.
+# Optional file, so an older bundle without it still boots.
+if [ -f /migrations/incremental.sql ]; then
+  echo "Applying incremental migrations..."
+  $PSQL -v ON_ERROR_STOP=1 -f /migrations/incremental.sql
+  echo "  ✓ Incremental migrations applied"
+fi
+
 # ── 2. Seed initial data (idempotent — creates global admin only if missing) ──
 echo "Seeding initial data..."
 cd /app && python /app/seed_initial.py

@@ -102,6 +102,7 @@ services:
     volumes:
       - ./docker/db-init.sh:/db-init.sh:ro
       - ./database/init/complete_schema.sql:/migrations/complete_schema.sql:ro
+      - ./database/init/incremental.sql:/migrations/incremental.sql:ro
     entrypoint: ["/bin/bash", "/db-init.sh"]
     depends_on:
       postgres:
