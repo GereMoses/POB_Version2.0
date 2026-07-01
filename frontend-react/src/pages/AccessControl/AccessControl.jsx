@@ -62,7 +62,7 @@ const NAV = [
   {
     label: 'EXTENDED',
     items: [
-      { key: 'visitors', label: 'Visitor Access', icon: UserAddOutlined, component: VisitorAccess },
+      { key: 'visitors', label: 'Visitor Access Levels', icon: UserAddOutlined, component: VisitorAccess },
     ],
   },
   {

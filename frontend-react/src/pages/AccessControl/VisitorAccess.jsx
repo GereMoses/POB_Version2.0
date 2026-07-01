@@ -269,9 +269,9 @@ const VisitorAccess = () => {
             <UserOutlined style={{ color: 'white', fontSize: 20 }} />
           </div>
           <div>
-            <div style={{ color: 'white', fontSize: 18, fontWeight: 700 }}>Visitor Access</div>
+            <div style={{ color: 'white', fontSize: 18, fontWeight: 700 }}>Visitor Access Levels</div>
             <div style={{ color: 'rgba(255,255,255,0.5)', fontSize: 12, marginTop: 1 }}>
-              Time-limited grants for visitors, contractors &amp; temporary staff
+              Grant doors &amp; access levels to visitors/contractors for a time window — visits are managed in the Visitor module
             </div>
           </div>
         </Space>
