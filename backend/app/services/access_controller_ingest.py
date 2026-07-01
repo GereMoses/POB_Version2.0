@@ -97,12 +97,20 @@ def _fetch_via_sidecar(controller: AccessController, base_url: str) -> List[C3Ev
 def _fetch_rtlog(controller: AccessController, db: Session) -> List[C3Event]:
     """Read buffered realtime events. Order of preference:
     1. mock generator (simulated controllers);
-    2. a Windows PULL SDK sidecar (ZK_SDK_SIDECAR_URL) — the real path when only the
-       Windows plcommpro.dll is available (no Linux .so);
-    3. the OFFICIAL ZKTeco PULL SDK loaded locally (libplcommpro.so), if present;
-    4. the scaffold binary client (unverified) as a last resort."""
+    2. the pure-Python zkaccess-c3 driver — the STANDALONE path (in-container, no
+       DLL); this is the production driver for the real C3-200/C3-400 panels;
+    3. a Windows PULL SDK sidecar (ZK_SDK_SIDECAR_URL) — legacy fallback;
+    4. the official PULL SDK loaded locally (libplcommpro.so), if present;
+    5. the scaffold binary client (unverified) as a last resort."""
     if _is_mock(controller):
         return _mock_rtlog(controller, db)
+
+    from ..services.zkteco import c3_zkaccess
+    if c3_zkaccess.sdk_available():
+        with c3_zkaccess.ZKAccessC3Client(
+            controller.ip_address, controller.port or 4370, controller.comm_password or ""
+        ) as c:
+            return c.get_rt_log()
 
     sidecar = os.environ.get("ZK_SDK_SIDECAR_URL")
     if sidecar:

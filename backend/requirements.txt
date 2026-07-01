@@ -49,3 +49,5 @@ fpdf2>=2.7.9
 matplotlib>=3.7.0   # ARIA report charts → PNG embedded in PDF (headless Agg)
 
 reportlab==5.0.0
+
+zkaccess-c3==0.0.15

@@ -21,6 +21,7 @@ from ..schemas.access_controller import (
 )
 from ..services.zkteco import c3_controller as c3
 from ..services.zkteco import c3_pull_sdk
+from ..services.zkteco import c3_zkaccess
 from ..services.access_controller_ingest import poll_controller_once, learn_controller_ports
 
 router = APIRouter(prefix="/access-controllers", tags=["Access Control Controllers"])
@@ -189,9 +190,12 @@ def probe_controller(controller_id: int, db: Session = Depends(get_db)):
     return c3_pull_sdk.probe(ctrl.ip_address, ctrl.port or 4370, ctrl.comm_password or "")
 
 
-@router.get("/sdk/status", summary="Is the ZKTeco PULL SDK library available?")
+@router.get("/sdk/status", summary="Which C3 drivers are available?")
 def sdk_status():
-    return {"pull_sdk_available": c3_pull_sdk.sdk_available()}
+    return {
+        "zkaccess_c3_available": c3_zkaccess.sdk_available(),   # pure-Python, standalone (preferred)
+        "pull_sdk_available": c3_pull_sdk.sdk_available(),      # Windows plcommpro .so, if mounted
+    }
 
 
 @router.post("/{controller_id}/test")
@@ -200,7 +204,11 @@ def test_controller(controller_id: int, db: Session = Depends(get_db)):
     ctrl = db.query(AccessController).filter(AccessController.id == controller_id).first()
     if not ctrl:
         raise HTTPException(status_code=404, detail="Controller not found")
-    result = c3.test_connection(ctrl.ip_address, ctrl.port or 4370, ctrl.comm_password or "")
+    # Prefer the pure-Python standalone driver; fall back to the scaffold.
+    if c3_zkaccess.sdk_available():
+        result = c3_zkaccess.test_connection(ctrl.ip_address, ctrl.port or 4370, ctrl.comm_password or "")
+    else:
+        result = c3.test_connection(ctrl.ip_address, ctrl.port or 4370, ctrl.comm_password or "")
     ctrl.status = "online" if result.get("success") else "error"
     ctrl.last_error = None if result.get("success") else result.get("error")
     db.commit()
@@ -212,6 +220,14 @@ def open_door(controller_id: int, door_no: int, duration: int = 5, db: Session =
     ctrl = db.query(AccessController).filter(AccessController.id == controller_id).first()
     if not ctrl:
         raise HTTPException(status_code=404, detail="Controller not found")
+    # Prefer the pure-Python driver (standalone); fall back to the scaffold.
+    if c3_zkaccess.sdk_available():
+        try:
+            with c3_zkaccess.ZKAccessC3Client(ctrl.ip_address, ctrl.port or 4370, ctrl.comm_password or "") as c:
+                c.open_door(door_no, duration)
+            return {"success": True, "message": f"Door {door_no} opened for {duration}s"}
+        except Exception as exc:  # noqa: BLE001
+            return {"success": False, "error": str(exc)}
     return c3.open_door(ctrl.ip_address, door_no, duration, ctrl.port or 4370, ctrl.comm_password or "")
 
 
