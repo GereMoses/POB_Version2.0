@@ -24,12 +24,23 @@ the backend container. Point to it with env `ZK_PULLSDK_PATH` (default tries com
 names). If the library is absent, every call degrades to a clear error — nothing
 crashes, and the rest of POB is unaffected.
 
-UNCERTAIN BITS ARE VALIDATED, NOT GUESSED
------------------------------------------
-`GetRTLog` returns event records as TEXT. Modern firmware emits comma-separated
-key=value; some emit positional. We parse key=value reliably and expose the RAW
-text via `probe()` so the exact field order is confirmed against the real panel
-before it drives zone occupancy. See `parse_rtlog(..)` `provisional` flag.
+RTLOG FORMAT — FROM THE OFFICIAL DOC (not guessed)
+--------------------------------------------------
+Per the PULL SDK protocol doc v2.0 (Appendix 7/8), realtime events are TEXT:
+  • GetRTLog:    positional CSV, records split by \\r\\n —
+                 time, pin, cardno, eventaddr(door), eventtype, inoutstatus, verifytype
+                 (a record whose index-4 field == 255 is a door/alarm STATE record).
+  • GetRTLogExt: key=value, tab-separated, prefixed type=rtlog | type=rtstate.
+`_parse_rtlog_text` (in c3_controller) implements both authoritatively; `probe()`
+still dumps the raw text for on-site confirmation.
+
+WINDOWS-ONLY LIBRARY
+--------------------
+The PULL SDK 2.2.1.4 package ships `plcommpro.dll` (x86/x64) only — no Linux `.so`.
+Since the POB backend runs on Linux, run the small sidecar (`c3_sdk_sidecar.py`) on
+a Windows host on the LAN and set `ZK_SDK_SIDECAR_URL`; the ingest will fetch events
+over HTTP. If a Linux `libplcommpro.so` is ever obtained, the ctypes path here works
+directly. See PULL_SDK_README.md.
 """
 
 from __future__ import annotations
@@ -73,6 +84,12 @@ def _load_sdk():
         lib.Disconnect.restype = None
         lib.GetRTLog.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
         lib.GetRTLog.restype = ctypes.c_int
+        # GetRTLogExt returns the PUSH key=value form (preferred — explicit type=rtlog)
+        try:
+            lib.GetRTLogExt.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+            lib.GetRTLogExt.restype = ctypes.c_int
+        except AttributeError:
+            pass
         lib.ControlDevice.argtypes = [ctypes.c_void_p, ctypes.c_long, ctypes.c_long,
                                       ctypes.c_long, ctypes.c_long, ctypes.c_long, ctypes.c_char_p]
         lib.ControlDevice.restype = ctypes.c_int
@@ -93,16 +110,10 @@ def _conn_string(ip: str, port: int = 4370, password: str = "") -> str:
 
 
 def parse_rtlog(raw: str) -> Dict:
-    """Parse GetRTLog text. Returns {events: [C3Event], provisional: bool}.
-    key=value form is authoritative; a positional fallback is flagged provisional
-    (its field order must be confirmed via probe against the real device)."""
-    events = _parse_rtlog_text(raw)          # reliable for key=value records
-    if events:
-        return {"events": events, "provisional": False}
-    # No key=value parsed — positional records? Do NOT feed zone occupancy from a
-    # guessed order; surface as provisional so probe/humans confirm the layout.
-    provisional = any("," in ln and "=" not in ln for ln in raw.splitlines() if ln.strip())
-    return {"events": [], "provisional": provisional}
+    """Parse GetRTLog / GetRTLogExt text into events. Both documented formats
+    (positional comma + key=value tab) are handled authoritatively per the PULL SDK
+    protocol doc v2.0 (Appendix 7/8), so parsing is not a guess."""
+    return {"events": _parse_rtlog_text(raw), "provisional": False}
 
 
 class PullSDKClient:
@@ -140,9 +151,11 @@ class PullSDKClient:
     def get_rt_log_raw(self) -> str:
         import ctypes
         buf = ctypes.create_string_buffer(self.buffer_size)
-        n = self._lib.GetRTLog(self._h, buf, self.buffer_size)
+        # Prefer GetRTLogExt (explicit type=rtlog/rtstate key=value); fall back to GetRTLog.
+        fn = getattr(self._lib, "GetRTLogExt", None) or self._lib.GetRTLog
+        n = fn(self._h, buf, self.buffer_size)
         if n < 0:
-            raise IOError(f"GetRTLog returned {n}")
+            raise IOError(f"{getattr(fn, '__name__', 'GetRTLog')} returned {n}")
         return buf.value.decode("utf-8", errors="replace")
 
     def get_rt_log(self) -> List[C3Event]:

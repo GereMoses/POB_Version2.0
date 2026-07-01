@@ -77,3 +77,7 @@ backend/media/
 # Python compiled
 *.pyc
 *.pyo
+
+# Vendored ZKTeco PULL SDK (binaries — keep out of git)
+docs/Pull SDK-*.zip
+docs/pull_sdk_x/

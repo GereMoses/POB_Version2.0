@@ -11,6 +11,7 @@ totals and mustering stay consistent across both reader families.
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime
 from types import SimpleNamespace
 from typing import Dict, List
@@ -76,14 +77,36 @@ def _mock_rtlog(controller: AccessController, db: Session) -> List[C3Event]:
     )]
 
 
+def _fetch_via_sidecar(controller: AccessController, base_url: str) -> List[C3Event]:
+    """Fetch realtime events from a Windows PULL SDK sidecar (plcommpro.dll host).
+    The sidecar returns the RAW RTLog text; we parse it with the authoritative parser."""
+    import httpx
+    from ..services.zkteco.c3_controller import _parse_rtlog_text
+    payload = {"ip": controller.ip_address, "port": controller.port or 4370,
+               "passwd": controller.comm_password or ""}
+    headers = {}
+    token = os.environ.get("ZK_SDK_SIDECAR_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    with httpx.Client(timeout=15) as client:
+        resp = client.post(base_url.rstrip("/") + "/rtlog", json=payload, headers=headers)
+        resp.raise_for_status()
+        return _parse_rtlog_text(resp.json().get("raw", ""))
+
+
 def _fetch_rtlog(controller: AccessController, db: Session) -> List[C3Event]:
     """Read buffered realtime events. Order of preference:
     1. mock generator (simulated controllers);
-    2. the OFFICIAL ZKTeco PULL SDK (libplcommpro) if installed — the correct,
-       non-guessed path for real C3 panels;
-    3. the scaffold binary client (unverified) as a last resort."""
+    2. a Windows PULL SDK sidecar (ZK_SDK_SIDECAR_URL) — the real path when only the
+       Windows plcommpro.dll is available (no Linux .so);
+    3. the OFFICIAL ZKTeco PULL SDK loaded locally (libplcommpro.so), if present;
+    4. the scaffold binary client (unverified) as a last resort."""
     if _is_mock(controller):
         return _mock_rtlog(controller, db)
+
+    sidecar = os.environ.get("ZK_SDK_SIDECAR_URL")
+    if sidecar:
+        return _fetch_via_sidecar(controller, sidecar)
 
     from ..services.zkteco import c3_pull_sdk
     if c3_pull_sdk.sdk_available():

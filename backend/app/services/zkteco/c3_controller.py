@@ -90,55 +90,90 @@ class C3Config:
     timeout: float = 5.0
 
 
-def _parse_rtlog_text(blob: str) -> List[C3Event]:
-    """Parse RTLOG records. The C3 PULL SDK returns events as TEXT lines of
-    key=value pairs (comma- or tab-separated), e.g.:
-        time=2026-06-24 09:15:03,pin=1001,cardno=1234567,doorid=1,
-        eventtype=0,inoutstate=0,verifytype=1
-    This text shape is stable across firmware; only the transport that delivers
-    it needs hardware validation."""
-    events: List[C3Event] = []
-    for line in blob.replace("\r", "\n").split("\n"):
-        line = line.strip()
-        if not line or "=" not in line:
+def _parse_ts(v: str):
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(v, fmt)
+        except ValueError:
             continue
-        sep = "," if "," in line else "\t"
-        kv: Dict[str, str] = {}
-        for part in line.split(sep):
-            if "=" in part:
-                k, v = part.split("=", 1)
-                kv[k.strip().lower()] = v.strip()
+    return None
 
-        ts = None
-        for key in ("time", "logtime", "datetime"):
-            if kv.get(key):
-                for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
-                    try:
-                        ts = datetime.strptime(kv[key], fmt)
-                        break
-                    except ValueError:
-                        continue
-                break
 
-        def _int(*keys, default=0):
-            for k in keys:
-                if kv.get(k):
-                    try:
-                        return int(kv[k])
-                    except ValueError:
-                        pass
-            return default
+def _parse_rtlog_text(blob: str) -> List[C3Event]:
+    """Parse ZKTeco C3 PULL SDK realtime-log text into access events. Handles BOTH
+    documented formats (Pull SDK protocol doc v2.0, Appendix 7/8):
 
-        events.append(C3Event(
-            time=ts,
-            card_no=kv.get("cardno") or kv.get("card") or None,
-            pin=kv.get("pin") or kv.get("userid") or None,
-            door_id=_int("doorid", "door", default=1),
-            event_type=_int("eventtype", "event", default=0),
-            in_out=_int("inoutstate", "inout", default=0),
-            verify_type=_int("verifytype", "verify", default=0),
-            raw=kv,
-        ))
+      • GetRTLogExt — key=value, tab-separated, e.g.:
+          type=rtlog\\ttime=...\\tpin=1001\\tcardno=1234567\\teventaddr=1\\t
+          event=0\\tinoutstatus=0\\tverifytype=1
+        (type=rtstate rows are door/alarm status — skipped.)
+
+      • GetRTLog — POSITIONAL, comma-separated, records split by \\r\\n:
+          time, pin, cardno, eventaddr(door), eventtype, inoutstatus, verifytype
+        A record whose 5th field (index 4) == 255 is a door/alarm STATE record
+        (not an access event) and is skipped.
+
+    Mapping: door_id←eventaddr, event_type←event, in_out←inoutstatus
+    (0=in/ENTRY, 1=out/EXIT, 2=none), plus pin, cardno, verifytype, time.
+    """
+    events: List[C3Event] = []
+    for line in blob.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+
+        if "=" in line:                                   # key=value (GetRTLogExt/PUSH)
+            sep = "\t" if "\t" in line else ","
+            kv: Dict[str, str] = {}
+            for part in line.split(sep):
+                if "=" in part:
+                    k, v = part.split("=", 1)
+                    kv[k.strip().lower()] = v.strip()
+            if kv.get("type") == "rtstate":               # door/alarm state, not an event
+                continue
+
+            def _int(*keys, default=0):
+                for k in keys:
+                    if kv.get(k) not in (None, ""):
+                        try:
+                            return int(kv[k])
+                        except ValueError:
+                            pass
+                return default
+
+            events.append(C3Event(
+                time=_parse_ts(kv.get("time") or kv.get("logtime") or ""),
+                card_no=kv.get("cardno") or kv.get("card") or None,
+                pin=kv.get("pin") or kv.get("userid") or None,
+                door_id=_int("eventaddr", "doorid", "door", default=1),
+                event_type=_int("event", "eventtype", default=0),
+                in_out=_int("inoutstatus", "inoutstate", "inout", default=0),
+                verify_type=_int("verifytype", "verify", default=0),
+                raw=kv,
+            ))
+        elif "," in line:                                 # positional (GetRTLog)
+            f = [p.strip() for p in line.split(",")]
+            if len(f) < 7:
+                continue
+            if f[4] == "255":                             # door/alarm STATE record
+                continue
+
+            def _fi(v, default=0):
+                try:
+                    return int(v)
+                except (ValueError, TypeError):
+                    return default
+
+            events.append(C3Event(
+                time=_parse_ts(f[0]),
+                pin=f[1] or None,
+                card_no=f[2] or None,
+                door_id=_fi(f[3], 1),
+                event_type=_fi(f[4], 0),
+                in_out=_fi(f[5], 0),
+                verify_type=_fi(f[6], 0),
+                raw={"positional": line},
+            ))
     return events
 
 
