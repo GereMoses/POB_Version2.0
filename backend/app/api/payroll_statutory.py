@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from ..core.database import get_db
 from ..core.dependencies import get_current_user
-from ..models.payroll import PayEmployeeCompensation
+from ..models.payroll import PayEmployeeCompensation, PayAdjustment
 from ..services.payroll_statutory_ng import compute_statutory, StatutoryConfig
 from ..services.payroll_run_ng import (
     run_employee_payroll, run_period_payroll, get_active_compensation, build_schedule,
@@ -143,6 +143,46 @@ def run_bulk(period_id: int, cumulative: bool = True,
     if not res.get("success"):
         raise HTTPException(status_code=400, detail=res.get("error"))
     return res
+
+
+class AdjustmentRequest(BaseModel):
+    emp_id: int
+    period_id: int
+    name: str
+    amount: float
+    adj_type: str = Field("earning", pattern="^(earning|deduction)$")
+    is_taxable: bool = True
+    reason: Optional[str] = None
+
+
+@router.get("/adjustments", summary="List off-cycle adjustments for a period (optionally one employee)")
+def list_adjustments(period_id: int, emp_id: Optional[int] = None, db: Session = Depends(get_db)):
+    q = db.query(PayAdjustment).filter(PayAdjustment.period_id == period_id,
+                                       PayAdjustment.is_active == True)  # noqa: E712
+    if emp_id:
+        q = q.filter(PayAdjustment.emp_id == emp_id)
+    return [{"id": a.id, "emp_id": a.emp_id, "name": a.name, "amount": float(a.amount),
+             "adj_type": a.adj_type, "is_taxable": a.is_taxable, "reason": a.reason}
+            for a in q.order_by(PayAdjustment.id).all()]
+
+
+@router.post("/adjustments", summary="Add an off-cycle adjustment (arrears/bonus/deduction)")
+def add_adjustment(body: AdjustmentRequest, db: Session = Depends(get_db), user=Depends(get_current_user)):
+    adj = PayAdjustment(**body.model_dump(), created_by=user.id)
+    db.add(adj)
+    db.commit()
+    db.refresh(adj)
+    return {"id": adj.id, "message": "Adjustment added — re-run payroll for the period to apply"}
+
+
+@router.delete("/adjustments/{adj_id}", summary="Remove an adjustment")
+def delete_adjustment(adj_id: int, db: Session = Depends(get_db)):
+    adj = db.query(PayAdjustment).filter(PayAdjustment.id == adj_id).first()
+    if not adj:
+        raise HTTPException(status_code=404, detail="Adjustment not found")
+    adj.is_active = False
+    db.commit()
+    return {"message": "Adjustment removed — re-run payroll to reflect"}
 
 
 @router.get("/period/{period_id}/salaries", summary="Persisted salaries + approval status for a period")

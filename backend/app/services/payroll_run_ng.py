@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 
 from ..models.payroll import (
     PayPeriod, PaySalary, PaySalaryItem, PayLoan, PayLoanStatus,
-    PayEmployeeCompensation, PayItemType, PayCalcStatus,
+    PayEmployeeCompensation, PayItemType, PayCalcStatus, PayAdjustment,
 )
 from ..models.personnel import Personnel
 from .payroll_statutory_ng import compute_statutory, compute_statutory_cumulative, StatutoryConfig
@@ -40,6 +40,22 @@ def get_active_compensation(db: Session, emp_id: int, on: date) -> Optional[PayE
         .order_by(PayEmployeeCompensation.effective_date.desc().nullslast())
         .first()
     )
+
+
+def _proration(period: PayPeriod, emp: Personnel, comp: PayEmployeeCompensation):
+    """Return (factor, worked_days, days_in_period). Mid-period joiners (hire_date)
+    and leavers (compensation end_date) are prorated by calendar days worked."""
+    days_in_period = (period.end_date - period.start_date).days + 1
+    if days_in_period <= 0:
+        return Decimal("1"), 0, 0
+    hire = getattr(emp, "hire_date", None)
+    end = getattr(comp, "end_date", None)
+    work_start = max(period.start_date, hire) if hire else period.start_date
+    work_end = min(period.end_date, end) if end else period.end_date
+    worked = (work_end - work_start).days + 1
+    worked = max(0, min(worked, days_in_period))
+    factor = Decimal(worked) / Decimal(days_in_period)
+    return factor, worked, days_in_period
 
 
 def _active_loan_emi(db: Session, emp_id: int) -> List[Dict]:
@@ -103,31 +119,51 @@ def run_employee_payroll(db: Session, period_id: int, emp_id: int,
     cfg = cfg or StatutoryConfig()
     cfg.nhf_enabled = bool(comp.nhf_enabled)
 
+    # Proration for mid-period joiners/leavers
+    factor, worked_days, days_in_period = _proration(period, emp, comp)
+    p_basic = Decimal(str(comp.basic)) * factor
+    p_housing = Decimal(str(comp.housing)) * factor
+    p_transport = Decimal(str(comp.transport)) * factor
+    p_other = Decimal(str(comp.other_allowances)) * factor
+
+    # Off-cycle adjustments (arrears/bonus/one-off). Taxable earnings feed the PAYE base.
+    adjustments = db.query(PayAdjustment).filter(
+        PayAdjustment.emp_id == emp_id, PayAdjustment.period_id == period_id,
+        PayAdjustment.is_active == True).all()  # noqa: E712
+    taxable_adj = sum((Decimal(str(a.amount)) for a in adjustments
+                       if a.adj_type == "earning" and a.is_taxable), Decimal("0"))
+
     if use_cumulative:
         m = period.start_date.month
         ytd = _ytd_prior(db, emp_id, period.start_date.year, m)
         st = compute_statutory_cumulative(
-            basic=comp.basic, housing=comp.housing, transport=comp.transport,
-            other_taxable=comp.other_allowances, nhis=comp.nhis,
+            basic=p_basic, housing=p_housing, transport=p_transport,
+            other_taxable=p_other + taxable_adj, nhis=comp.nhis,
             life_assurance=comp.life_assurance, months_elapsed=m,
             ytd_gross_prior=ytd["gross"], ytd_pension_prior=ytd["pension"],
             ytd_nhf_prior=ytd["nhf"], ytd_paye_prior=ytd["paye"], cfg=cfg,
         )
     else:
         st = compute_statutory(
-            basic=comp.basic, housing=comp.housing, transport=comp.transport,
-            other_taxable=comp.other_allowances, nhis=comp.nhis,
+            basic=p_basic, housing=p_housing, transport=p_transport,
+            other_taxable=p_other + taxable_adj, nhis=comp.nhis,
             life_assurance=comp.life_assurance, cfg=cfg,
         )
 
-    # Build line items: earnings from comp components, deductions from statutory + loans
+    # Build line items: (prorated) comp components, then adjustments, then statutory + loans
+    def _lbl(base):
+        return base if factor == 1 else f"{base} ({worked_days}/{days_in_period} days)"
     earnings = [
-        ("Basic", Decimal(str(comp.basic))),
-        ("Housing Allowance", Decimal(str(comp.housing))),
-        ("Transport Allowance", Decimal(str(comp.transport))),
-        ("Other Allowances", Decimal(str(comp.other_allowances))),
+        (_lbl("Basic"), p_basic),
+        (_lbl("Housing Allowance"), p_housing),
+        (_lbl("Transport Allowance"), p_transport),
+        (_lbl("Other Allowances"), p_other),
     ]
-    deductions = [
+    deductions = []
+    for a in adjustments:
+        (earnings if a.adj_type == "earning" else deductions).append(
+            (a.name, Decimal(str(a.amount))))
+    deductions += [
         ("Pension (8%)", st.pension_employee),
         ("NHF (2.5%)", st.nhf),
         ("PAYE", st.paye),
@@ -188,6 +224,10 @@ def run_employee_payroll(db: Session, period_id: int, emp_id: int,
             "total_deductions": float(total_deductions),
             "net": float(net),
         },
+        "proration": {"factor": float(factor), "worked_days": worked_days,
+                      "days_in_period": days_in_period, "prorated": factor != 1},
+        "adjustments": [{"name": a.name, "amount": float(a.amount), "type": a.adj_type,
+                         "taxable": a.is_taxable} for a in adjustments],
         "statutory": st.as_dict(),
     })
     return result

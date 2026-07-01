@@ -425,6 +425,27 @@ class PayEmployeeCompensation(Base):
     employee = relationship("Personnel")
 
 
+class PayAdjustment(Base):
+    """Off-cycle / one-off pay adjustments: arrears (back-pay), bonuses, one-off
+    deductions. Picked up by the statutory run and added as payslip line items.
+    Taxable earnings feed the PAYE base; non-taxable ones only affect net."""
+    __tablename__ = "pay_adjustment"
+
+    id = Column(Integer, primary_key=True, index=True)
+    emp_id = Column(Integer, ForeignKey("personnel.id"), nullable=False, index=True)
+    period_id = Column(Integer, ForeignKey("pay_period.id"), nullable=False, index=True)
+    name = Column(String(80), nullable=False)            # "March arrears", "Bonus"
+    amount = Column(Numeric(14, 2), nullable=False)
+    adj_type = Column(String(10), nullable=False, default="earning")  # earning | deduction
+    is_taxable = Column(Boolean, default=True)           # taxable earning → adds to PAYE base
+    reason = Column(Text, nullable=True)
+    is_active = Column(Boolean, default=True)
+    created_by = Column(Integer, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    employee = relationship("Personnel")
+
+
 class PayAuditLog(Base):
     """Payroll audit trail"""
     __tablename__ = "pay_audit_log"

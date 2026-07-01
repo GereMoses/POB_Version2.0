@@ -8,7 +8,8 @@ from .department import Department, DepartmentPersonnel
 from .payroll import (
     PayStructure, PayItem, PayStructureAssign, PayPeriod, PaySalary, PaySalaryItem,
     PayLoan, PayLoanDeduction, PayZoneAllowance, PayContractorRate, PayAttendanceMapping,
-    PayPayslipTemplate, PayBankConfig, PayCalculationLog, PayAuditLog, PayEmployeeCompensation
+    PayPayslipTemplate, PayBankConfig, PayCalculationLog, PayAuditLog, PayEmployeeCompensation,
+    PayAdjustment
 )
 from .visitor import (
     VisitorType, Visitor, VisitorPreRegistration, VisitorVisitLog, VisitorBlacklist
