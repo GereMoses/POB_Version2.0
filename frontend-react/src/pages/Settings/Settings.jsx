@@ -2369,6 +2369,9 @@ const HRIntegrationTab = () => {
   const [previewDate, setPreviewDate] = useState('');
   const [previewData, setPreviewData] = useState(null);
   const [apiKeyEditing, setApiKeyEditing] = useState(false);
+  const [advOpen, setAdvOpen] = useState(false);
+  const [optionsText, setOptionsText] = useState('');
+  const [optionsErr, setOptionsErr] = useState('');
 
   const [form] = Form.useForm();
 
@@ -2405,15 +2408,25 @@ const HRIntegrationTab = () => {
         is_enabled:          cfgRaw.is_enabled           || false,
         sync_time:           cfgRaw.sync_time            || '00:00',
       });
+      if (cfgRaw.options) setOptionsText(JSON.stringify(cfgRaw.options, null, 2));
     }
   }, [cfgRaw, form]);
 
   const handleSave = async (values) => {
-    setSaving(true);
     const payload = { ...values };
     if (cfgRaw?.configured && !apiKeyEditing) {
       delete payload.api_key;
     }
+    // Attach advanced connector options (auth/payload/field mapping) if edited.
+    if (optionsText.trim()) {
+      try {
+        payload.options = JSON.parse(optionsText);
+        setOptionsErr('');
+      } catch (e) {
+        setOptionsErr('Invalid JSON in advanced options'); return;
+      }
+    }
+    setSaving(true);
     try {
       await apiService.put('/api/v1/hr-integration/config', payload);
       msg.success('Configuration saved');
@@ -2611,6 +2624,31 @@ const HRIntegrationTab = () => {
                   </Form.Item>
                 </Col>
               </Row>
+
+              {/* Advanced connector mapping — lets a new HR API be wired with no code change */}
+              <div style={{ margin: '4px 0 14px' }}>
+                <Button type="link" size="small" style={{ padding: 0 }}
+                  onClick={() => setAdvOpen(o => !o)}>
+                  {advOpen ? '▾' : '▸'} Advanced connector mapping (auth scheme, payload shape, field names)
+                </Button>
+                {advOpen && (
+                  <div style={{ marginTop: 8 }}>
+                    <div style={{ fontSize: 12, color: '#8c8c8c', marginBottom: 6 }}>
+                      JSON. Keys: <code>auth_type</code> (bearer|api_key|basic|oauth2),
+                      {' '}<code>payload_wrapper_key</code> ("" = bare array), <code>employee_id_source</code>
+                      {' '}(emp_code|badge_id|biotime_employee_id), <code>time_format</code> (iso|hms),
+                      {' '}<code>org_header_name</code>, <code>batch_size</code>, <code>http_method</code>,
+                      {' '}<code>field_map</code>, <code>extra_headers</code>, <code>oauth_token_url</code>,
+                      {' '}<code>oauth_client_id</code>, <code>oauth_scope</code>, <code>basic_user</code>.
+                    </div>
+                    <Input.TextArea rows={10} value={optionsText} spellCheck={false}
+                      style={{ fontFamily: 'monospace', fontSize: 12 }}
+                      onChange={e => { setOptionsText(e.target.value); setOptionsErr(''); }}
+                      placeholder='{ "auth_type": "bearer", "payload_wrapper_key": "records", "field_map": {} }' />
+                    {optionsErr && <div style={{ color: '#cf1322', fontSize: 12, marginTop: 4 }}>{optionsErr}</div>}
+                  </div>
+                )}
+              </div>
 
               <Form.Item name="is_enabled" valuePropName="checked">
                 <Switch checkedChildren="Sync Enabled" unCheckedChildren="Sync Disabled" />

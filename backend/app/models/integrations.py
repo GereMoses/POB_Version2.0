@@ -3,6 +3,7 @@ SQLAlchemy models for third-party integration configuration and sync logs.
 Covers SeamlessHR and Microsoft Business Central integrations.
 """
 from sqlalchemy import Column, Integer, String, Boolean, Text, Date, DateTime
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.sql import func
 from ..core.database import Base
 
@@ -19,6 +20,10 @@ class HRIntegrationConfig(Base):
     employee_endpoint    = Column(String(255), default="/v1/employees")
     is_enabled           = Column(Boolean, default=False)
     sync_time            = Column(String(10), default="00:00")
+    # Fully-configurable connector behaviour (auth scheme, payload shape, field
+    # names, formats, headers) so a new HR API can be wired WITHOUT code changes.
+    # Empty = the built-in defaults (see seamlesshr_service._DEFAULT_OPTIONS).
+    options              = Column(JSONB, nullable=True)
     updated_at           = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 

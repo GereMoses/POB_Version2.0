@@ -56,6 +56,37 @@ async def close_shr_client() -> None:
 
 logger = logging.getLogger(__name__)
 
+# ── Connector options (all tunable from the DB/UI — no code change needed) ─────
+# Defaults reproduce the original behaviour exactly, so an unconfigured `options`
+# column changes nothing. Any HR API's quirks are absorbed here.
+_DEFAULT_OPTIONS: Dict[str, Any] = {
+    "auth_type":          "bearer",              # bearer | api_key | basic | oauth2
+    "org_header_name":    "X-Organization-ID",
+    "payload_wrapper_key": "records",            # "" ⇒ send a bare JSON array
+    "batch_size":         50,
+    "http_method":        "POST",
+    "employee_id_source": "emp_code",            # emp_code | badge_id | biotime_employee_id
+    "time_format":        "iso",                 # iso | hms (HH:MM:SS)
+    "field_map":          {},                    # canonical → output key ("" ⇒ omit field)
+    "extra_headers":      {},                    # arbitrary static headers
+    # OAuth2 client-credentials (client_secret reuses the encrypted api_key):
+    "oauth_token_url":    "",
+    "oauth_client_id":    "",
+    "oauth_scope":        "",
+    "basic_user":         "",                    # for auth_type=basic
+}
+
+# Cached OAuth2 token: {"token": str, "exp": epoch_seconds}
+_oauth_cache: Dict[str, Any] = {"token": None, "exp": 0.0}
+
+
+def _merge_options(raw: Optional[Dict]) -> Dict[str, Any]:
+    opts = dict(_DEFAULT_OPTIONS)
+    if isinstance(raw, dict):
+        opts.update({k: v for k, v in raw.items() if v is not None})
+    return opts
+
+
 # ── Config helpers ────────────────────────────────────────────────────────────
 
 def get_config(db: Session) -> Optional[Dict[str, Any]]:
@@ -63,7 +94,7 @@ def get_config(db: Session) -> Optional[Dict[str, Any]]:
     try:
         row = db.execute(text(
             "SELECT api_base_url, api_key, org_id, auth_header_name, "
-            "       attendance_endpoint, employee_endpoint, is_enabled, sync_time "
+            "       attendance_endpoint, employee_endpoint, is_enabled, sync_time, options "
             "FROM hr_integration_config LIMIT 1"
         )).fetchone()
         if not row or not row[0] or not row[1]:
@@ -78,18 +109,74 @@ def get_config(db: Session) -> Optional[Dict[str, Any]]:
             "employee_endpoint":   row[5] or "/v1/employees",
             "is_enabled":          bool(row[6]),
             "sync_time":           row[7] or "00:00",  # Bug 2 fix: was missing
+            "options":             _merge_options(row[8] if len(row) > 8 else None),
         }
     except Exception as e:
         logger.warning(f"hr_integration_config read error: {e}")  # Bug 4 fix: WARNING not DEBUG
         return None
 
 
-def _auth_header(cfg: Dict) -> Dict[str, str]:
-    name = cfg["auth_header_name"]
+async def _get_oauth_token(cfg: Dict) -> str:
+    """Fetch + cache an OAuth2 client-credentials token (client_secret = api_key)."""
+    import time
+    opts = cfg["options"]
+    if _oauth_cache["token"] and _oauth_cache["exp"] > time.time() + 30:
+        return _oauth_cache["token"]
+    data = {"grant_type": "client_credentials",
+            "client_id": opts.get("oauth_client_id") or cfg.get("org_id") or "",
+            "client_secret": cfg["api_key"]}
+    if opts.get("oauth_scope"):
+        data["scope"] = opts["oauth_scope"]
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(opts["oauth_token_url"], data=data)
+    resp.raise_for_status()
+    body = resp.json()
+    _oauth_cache["token"] = body["access_token"]
+    _oauth_cache["exp"] = time.time() + int(body.get("expires_in", 3600))
+    return _oauth_cache["token"]
+
+
+async def build_auth_headers(cfg: Dict) -> Dict[str, str]:
+    """Build auth headers per the configured scheme. Async because OAuth2 fetches a token."""
+    opts = cfg["options"]
+    name = cfg["auth_header_name"] or "Authorization"
     key  = cfg["api_key"]
-    # Support both "Authorization: Bearer <key>" and raw "X-API-Key: <key>"
-    value = f"Bearer {key}" if name.lower() == "authorization" else key
-    return {name: value}
+    at   = opts.get("auth_type", "bearer")
+    if at == "api_key":
+        return {name: key}
+    if at == "basic":
+        import base64
+        tok = base64.b64encode(f"{opts.get('basic_user','')}:{key}".encode()).decode()
+        return {"Authorization": f"Basic {tok}"}
+    if at == "oauth2":
+        return {name: f"Bearer {await _get_oauth_token(cfg)}"}
+    # default: bearer
+    return {name: f"Bearer {key}"}
+
+
+def _to_payload(r: Dict, opts: Dict, emp_map: Dict[str, str]) -> Dict:
+    """Map an internal canonical record to the outbound JSON per configured field
+    names / employee-id source / time format. A field mapped to "" is omitted."""
+    fm = opts.get("field_map") or {}
+    tf = opts.get("time_format", "iso")
+    src = opts.get("employee_id_source", "emp_code")
+    emp_val = emp_map.get(r["employee_id"], r["employee_id"]) if (src != "emp_code" and emp_map) else r["employee_id"]
+
+    def _t(v):
+        if v and tf == "hms":
+            try: return datetime.fromisoformat(v).strftime("%H:%M:%S")
+            except ValueError: return v
+        return v
+
+    out: Dict[str, Any] = {}
+    for canon, val in (("employee_id", emp_val), ("date", r["date"]),
+                       ("clock_in", _t(r["clock_in"])), ("clock_out", _t(r["clock_out"])),
+                       ("total_minutes", r["total_minutes"]), ("overtime_minutes", r["overtime_minutes"]),
+                       ("source", r["source"]), ("idempotency_key", r["idempotency_key"])):
+        key = fm.get(canon, canon)
+        if key != "":
+            out[key] = val
+    return out
 
 
 # ── Core sync logic ───────────────────────────────────────────────────────────
@@ -201,23 +288,38 @@ async def push_attendance(
             _log_sync(db, result)
             return result
 
+    opts = cfg["options"]
     url     = cfg["api_base_url"] + cfg["attendance_endpoint"]
-    headers = {**_auth_header(cfg), "Content-Type": "application/json"}
-    if cfg["org_id"]:
-        headers["X-Organization-ID"] = cfg["org_id"]
+    headers = {**await build_auth_headers(cfg), "Content-Type": "application/json",
+               **(opts.get("extra_headers") or {})}
+    if cfg["org_id"] and opts.get("org_header_name"):
+        headers[opts["org_header_name"]] = cfg["org_id"]
+
+    # Translate emp_code → alternate employee identifier if configured
+    emp_map: Dict[str, str] = {}
+    if opts.get("employee_id_source", "emp_code") != "emp_code":
+        col = opts["employee_id_source"]
+        if col in ("badge_id", "biotime_employee_id"):
+            for erow in db.execute(text(f"SELECT emp_code, {col} FROM personnel WHERE emp_code IS NOT NULL")).fetchall():
+                if erow[1]:
+                    emp_map[erow[0]] = str(erow[1])
+
+    wrapper = opts.get("payload_wrapper_key", "records")
+    method  = (opts.get("http_method") or "POST").upper()
+    batch_size = int(opts.get("batch_size") or 50)
 
     failed = 0
     sent   = 0
 
     try:
         client = await _get_shr_client()
-        # Send in batches of 50 to avoid large payloads
-        batch_size = 50
         sent_codes = []
         for i in range(0, len(records), batch_size):
             batch = records[i : i + batch_size]
+            payload_list = [_to_payload(r, opts, emp_map) for r in batch]
+            body = payload_list if not wrapper else {wrapper: payload_list}
             try:
-                resp = await client.post(url, json={"records": batch}, headers=headers)
+                resp = await client.request(method, url, json=body, headers=headers)
                 if resp.status_code in (200, 201, 204):
                     sent += len(batch)
                     sent_codes.extend(r["employee_id"] for r in batch)
@@ -255,10 +357,12 @@ async def push_attendance(
 
 async def test_connection(cfg: Dict) -> Dict[str, Any]:
     """Verify API credentials by hitting the employee endpoint."""
+    opts = cfg.get("options") or _DEFAULT_OPTIONS
     url     = cfg["api_base_url"] + cfg.get("employee_endpoint", "/v1/employees")
-    headers = {**_auth_header(cfg), "Content-Type": "application/json"}
-    if cfg.get("org_id"):
-        headers["X-Organization-ID"] = cfg["org_id"]
+    headers = {**await build_auth_headers(cfg), "Content-Type": "application/json",
+               **(opts.get("extra_headers") or {})}
+    if cfg.get("org_id") and opts.get("org_header_name"):
+        headers[opts["org_header_name"]] = cfg["org_id"]
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(url, headers=headers)

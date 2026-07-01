@@ -48,6 +48,9 @@ class ConfigIn(BaseModel):
     employee_endpoint:   Optional[str] = "/v1/employees"
     is_enabled:          Optional[bool] = False
     sync_time:           Optional[str] = "00:00"
+    # Advanced connector mapping (auth scheme, payload shape, field names, formats).
+    # None = keep existing / use defaults.
+    options:             Optional[dict] = None
 
 
 class SyncIn(BaseModel):
@@ -64,10 +67,11 @@ async def get_integration_config(
     current_user=Depends(_require_admin),
 ):
 
+    from ..services.seamlesshr_service import _DEFAULT_OPTIONS, _merge_options
     try:
         row = db.execute(text("""
             SELECT api_base_url, api_key, org_id, auth_header_name,
-                   attendance_endpoint, employee_endpoint, is_enabled, sync_time
+                   attendance_endpoint, employee_endpoint, is_enabled, sync_time, options
             FROM hr_integration_config LIMIT 1
         """)).fetchone()
     except Exception:
@@ -84,6 +88,7 @@ async def get_integration_config(
             "employee_endpoint": "/v1/employees",
             "is_enabled": False,
             "sync_time": "00:00",
+            "options": dict(_DEFAULT_OPTIONS),
         }
 
     # Mask the API key — only show last 6 chars
@@ -100,6 +105,7 @@ async def get_integration_config(
         "employee_endpoint":     row[5],
         "is_enabled":            row[6],
         "sync_time":             row[7] or "00:00",
+        "options":               _merge_options(row[8] if len(row) > 8 else None),
     }
 
 
@@ -140,14 +146,22 @@ async def save_integration_config(
     # Encrypt at rest (idempotent: re-encrypting an already-encrypted value is a no-op).
     api_key = encrypt_secret(api_key)
 
+    # Preserve existing options if the caller didn't send any (partial saves).
+    import json as _json
+    if body.options is not None:
+        options_json = _json.dumps(body.options)
+    else:
+        prev = db.execute(text("SELECT options FROM hr_integration_config LIMIT 1")).fetchone()
+        options_json = _json.dumps(prev[0]) if (prev and prev[0]) else None
+
     db.execute(text("DELETE FROM hr_integration_config"))
     db.execute(text("""
         INSERT INTO hr_integration_config
           (api_base_url, api_key, org_id, auth_header_name,
-           attendance_endpoint, employee_endpoint, is_enabled, sync_time, updated_at)
+           attendance_endpoint, employee_endpoint, is_enabled, sync_time, options, updated_at)
         VALUES
           (:base_url, :api_key, :org_id, :auth_name,
-           :att_ep, :emp_ep, :enabled, :sync_time, NOW())
+           :att_ep, :emp_ep, :enabled, :sync_time, CAST(:options AS JSONB), NOW())
     """), {
         "base_url":  safe_base_url,
         "api_key":   api_key,
@@ -157,6 +171,7 @@ async def save_integration_config(
         "emp_ep":    body.employee_endpoint or "/v1/employees",
         "enabled":   body.is_enabled,
         "sync_time": body.sync_time or "00:00",
+        "options":   options_json,
     })
     db.commit()
     logger.info(f"HR integration config updated by {current_user.email}")

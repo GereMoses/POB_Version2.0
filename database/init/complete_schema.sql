@@ -20039,3 +20039,7 @@ CREATE TABLE IF NOT EXISTS public.pay_adjustment (
     created_at timestamptz DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS ix_pay_adjustment_period ON public.pay_adjustment (period_id, emp_id);
+
+
+-- HR-integration connector is fully config-driven (auth/payload/field mapping in JSONB).
+ALTER TABLE public.hr_integration_config ADD COLUMN IF NOT EXISTS options jsonb;
