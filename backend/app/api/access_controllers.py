@@ -187,6 +187,10 @@ def probe_controller(controller_id: int, db: Session = Depends(get_db)):
     ctrl = db.query(AccessController).filter(AccessController.id == controller_id).first()
     if not ctrl:
         raise HTTPException(status_code=404, detail="Controller not found")
+    # Prefer the pure-Python driver (the one actually used in prod); the Windows
+    # PULL-SDK probe is only a fallback for a mounted libplcommpro.
+    if c3_zkaccess.sdk_available():
+        return c3_zkaccess.probe(ctrl.ip_address, ctrl.port or 4370, ctrl.comm_password or "")
     return c3_pull_sdk.probe(ctrl.ip_address, ctrl.port or 4370, ctrl.comm_password or "")
 
 

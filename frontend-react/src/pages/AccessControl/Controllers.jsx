@@ -132,7 +132,7 @@ const ControllerCard = ({ ctrl, zones, api, qc }) => {
         </Tag>
         <span style={{ fontSize: 11, color: '#bfbfbf' }}>seen {fmtLastSeen(ctrl.last_seen)}</span>
         <Space>
-          <Tooltip title="Diagnose via ZKTeco PULL SDK (TCP → SDK → handshake → raw event sample)">
+          <Tooltip title="Diagnose the panel: TCP → C3 driver → connect → event sample">
             <Button size="small" icon={<ApiOutlined />} loading={probe.isPending} onClick={() => probe.mutate()}>Probe</Button>
           </Tooltip>
           <Tooltip title="Poll buffered events now → zone occupancy">
@@ -362,6 +362,12 @@ const Controllers = () => {
   });
   const zones = Array.isArray(zonesRaw) ? zonesRaw : (zonesRaw?.zones || zonesRaw?.items || []);
 
+  const { data: sdk } = useQuery({
+    queryKey: ['ac-sdk-status'],
+    queryFn: () => apiService.get(`${BASE}/sdk/status`),
+  });
+  const driverReady = sdk?.zkaccess_c3_available;
+
   const saveCtrl = useMutation({
     mutationFn: v => modal?.ctrl
       ? apiService.put(`${BASE}/${modal.ctrl.id}`, v)
@@ -402,9 +408,14 @@ const Controllers = () => {
     <div style={{ padding: 20, background: '#f0f2f5', minHeight: '100vh' }}>
       <div style={{ display: 'flex', alignItems: 'center', marginBottom: 16 }}>
         <div style={{ flex: 1 }}>
-          <h2 style={{ margin: 0, fontSize: 20 }}><ClusterOutlined /> Access Control Controllers</h2>
+          <h2 style={{ margin: 0, fontSize: 20 }}>
+            <ClusterOutlined /> Access Control Controllers{' '}
+            <Tag color={driverReady ? 'success' : 'default'} style={{ fontSize: 11, verticalAlign: 'middle' }}>
+              {driverReady ? 'C3 driver: ready' : 'C3 driver: n/a'}
+            </Tag>
+          </h2>
           <div style={{ color: '#8c8c8c', fontSize: 13 }}>
-            LAN panels (inBio / C3) with Wiegand readers. One IP per controller; assign each
+            LAN panels (ZKTeco C3 / inBio) with Wiegand readers. One IP per controller; assign each
             door's IN/OUT reader to a zone for entry/exit tracking.
           </div>
         </div>

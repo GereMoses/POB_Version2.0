@@ -113,3 +113,44 @@ def test_connection(ip: str, port: int = 4370, password: str = "") -> dict:
                 "events_buffered": len(events), **meta}
     except Exception as exc:  # noqa: BLE001
         return {"success": False, "error": str(exc)}
+
+
+def probe(ip: str, port: int = 4370, password: str = "") -> dict:
+    """Step-by-step diagnostics via the pure-Python driver (the real one in prod):
+    TCP reachable → C3 driver present → session handshake → realtime-log sample.
+    Never raises; returns the same shape the Probe modal renders."""
+    import socket
+    report = {"ip": ip, "port": port, "steps": [], "driver": "zkaccess-c3 (pure Python)"}
+
+    def step(name, ok, detail=""):
+        report["steps"].append({"step": name, "ok": ok, "detail": str(detail)[:400]})
+
+    try:
+        with socket.create_connection((ip, port), timeout=4):
+            step("tcp_connect", True, f"{ip}:{port} reachable")
+    except Exception as exc:  # noqa: BLE001
+        step("tcp_connect", False, exc)
+        report["summary"] = "Panel not reachable on the LAN — check IP/port/firewall."
+        return report
+
+    if not sdk_available():
+        step("c3_driver", False, "zkaccess-c3 not importable")
+        report["summary"] = "The pure-Python C3 driver is missing (unexpected — check the image build)."
+        return report
+    step("c3_driver", True, "pure-Python zkaccess-c3 driver available")
+
+    try:
+        with ZKAccessC3Client(ip, port, password) as c:
+            step("connect", True, "session established")
+            events = c.get_rt_log()
+            meta = c.info()
+            report["rtlog_parsed_count"] = len(events)
+            step("get_rtlog", True,
+                 f"{len(events)} event(s)"
+                 + (f"; device serial {meta.get('serial')}, fw {meta.get('firmware')}" if meta.get('serial') else ""))
+        report["summary"] = ("Connected via the pure-Python C3 driver. "
+                             "Present a card at a reader and re-probe to see live events.")
+    except Exception as exc:  # noqa: BLE001
+        step("connect", False, exc)
+        report["summary"] = f"Reachable, but the C3 session failed: {exc}"
+    return report
