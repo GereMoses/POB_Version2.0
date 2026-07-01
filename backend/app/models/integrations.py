@@ -53,6 +53,9 @@ class BCIntegrationConfig(Base):
     company_name   = Column(String(200))
     is_enabled     = Column(Boolean, default=False)
     sync_time      = Column(String(10), default="01:00")
+    # Real BC surface config (api route / company path / target entity / field map /
+    # static fields) so standard, custom-partner, and OData endpoints wire with no code.
+    options        = Column(JSONB, nullable=True)
     updated_at     = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 

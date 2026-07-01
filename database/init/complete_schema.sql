@@ -20043,3 +20043,7 @@ CREATE INDEX IF NOT EXISTS ix_pay_adjustment_period ON public.pay_adjustment (pe
 
 -- HR-integration connector is fully config-driven (auth/payload/field mapping in JSONB).
 ALTER TABLE public.hr_integration_config ADD COLUMN IF NOT EXISTS options jsonb;
+
+
+-- Business Central connector is config-driven (api route / company path / entity / field map).
+ALTER TABLE public.bc_integration_config ADD COLUMN IF NOT EXISTS options jsonb;

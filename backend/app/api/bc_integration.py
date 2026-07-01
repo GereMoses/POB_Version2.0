@@ -48,6 +48,8 @@ class BCConfigIn(BaseModel):
     company_name:  Optional[str] = None
     is_enabled:    Optional[bool] = False
     sync_time:     Optional[str] = "01:00"
+    # Advanced BC surface mapping (api route / company path / target entity / fields).
+    options:       Optional[dict] = None
 
 
 class SyncIn(BaseModel):
@@ -65,10 +67,11 @@ async def get_config(
 ):
 
     _ensure_bc_tables(db)
+    from ..services.business_central_service import _BC_DEFAULT_OPTIONS, _merge_bc_options
     try:
         row = db.execute(text("""
             SELECT tenant_id, client_id, client_secret, environment,
-                   company_id, company_name, is_enabled, sync_time
+                   company_id, company_name, is_enabled, sync_time, options
             FROM bc_integration_config LIMIT 1
         """)).fetchone()
     except Exception:
@@ -80,6 +83,7 @@ async def get_config(
             "tenant_id": "", "client_id": "", "client_secret_masked": "",
             "environment": "Production", "company_id": "", "company_name": "",
             "is_enabled": False, "sync_time": "01:00",
+            "options": dict(_BC_DEFAULT_OPTIONS),
         }
 
     secret = row[2] or ""
@@ -95,6 +99,7 @@ async def get_config(
         "company_name":      row[5],
         "is_enabled":        row[6],
         "sync_time":         row[7] or "01:00",
+        "options":           _merge_bc_options(row[8] if len(row) > 8 else None),
     }
 
 
@@ -127,14 +132,21 @@ async def save_config(
     # Encrypt at rest (idempotent for already-encrypted values; upgrades legacy plaintext).
     client_secret = encrypt_secret(client_secret)
 
+    import json as _json
+    if body.options is not None:
+        options_json = _json.dumps(body.options)
+    else:
+        prev = db.execute(text("SELECT options FROM bc_integration_config LIMIT 1")).fetchone()
+        options_json = _json.dumps(prev[0]) if (prev and prev[0]) else None
+
     db.execute(text("DELETE FROM bc_integration_config"))
     db.execute(text("""
         INSERT INTO bc_integration_config
           (tenant_id, client_id, client_secret, environment,
-           company_id, company_name, is_enabled, sync_time, updated_at)
+           company_id, company_name, is_enabled, sync_time, options, updated_at)
         VALUES
           (:tenant_id, :client_id, :client_secret, :environment,
-           :company_id, :company_name, :is_enabled, :sync_time, NOW())
+           :company_id, :company_name, :is_enabled, :sync_time, CAST(:options AS JSONB), NOW())
     """), {
         "tenant_id":     body.tenant_id.strip(),
         "client_id":     body.client_id.strip(),
@@ -144,6 +156,7 @@ async def save_config(
         "company_name":  body.company_name,
         "is_enabled":    body.is_enabled,
         "sync_time":     body.sync_time or "01:00",
+        "options":       options_json,
     })
     db.commit()
     logger.info(f"BC integration config updated by {current_user.email}")

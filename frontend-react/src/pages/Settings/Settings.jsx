@@ -2779,6 +2779,9 @@ const BCIntegrationTab = () => {
   const [secretEditing,  setSecretEditing]  = useState(false);
   const [previewDate,    setPreviewDate]    = useState('');
   const [previewData,    setPreviewData]    = useState(null);
+  const [bcAdvOpen,      setBcAdvOpen]      = useState(false);
+  const [bcOptionsText,  setBcOptionsText]  = useState('');
+  const [bcOptionsErr,   setBcOptionsErr]   = useState('');
   const [form] = Form.useForm();
 
   const token   = localStorage.getItem('token') || localStorage.getItem('authToken');
@@ -2799,6 +2802,7 @@ const BCIntegrationTab = () => {
         is_enabled:    cfgRaw.is_enabled    || false,
         sync_time:     cfgRaw.sync_time     || '01:00',
       });
+      if (cfgRaw.options) setBcOptionsText(JSON.stringify(cfgRaw.options, null, 2));
     }
   }, [cfgRaw, form]);
 
@@ -2817,12 +2821,16 @@ const BCIntegrationTab = () => {
   };
 
   const handleSave = async (values) => {
+    const payload = { ...values };
+    if (cfgRaw?.configured && !secretEditing) delete payload.client_secret;
+    const selected = companies.find(c => c.id === values.company_id);
+    if (selected) payload.company_name = selected.name;
+    if (bcOptionsText.trim()) {
+      try { payload.options = JSON.parse(bcOptionsText); setBcOptionsErr(''); }
+      catch { setBcOptionsErr('Invalid JSON in advanced options'); return; }
+    }
     setSaving(true);
     try {
-      const payload = { ...values };
-      if (cfgRaw?.configured && !secretEditing) delete payload.client_secret;
-      const selected = companies.find(c => c.id === values.company_id);
-      if (selected) payload.company_name = selected.name;
       await apiService.put('/api/v1/bc-integration/config', payload);
       msg.success('Configuration saved');
       setSecretEditing(false);
@@ -2990,6 +2998,30 @@ const BCIntegrationTab = () => {
                   </Form.Item>
                 </Col>
               </Row>
+
+              {/* Advanced BC surface mapping — standard API / custom partner API / OData V4 */}
+              <div style={{ margin: '4px 0 14px' }}>
+                <Button type="link" size="small" style={{ padding: 0 }}
+                  onClick={() => setBcAdvOpen(o => !o)}>
+                  {bcAdvOpen ? '▾' : '▸'} Advanced connector mapping (API route, target entity, field mapping)
+                </Button>
+                {bcAdvOpen && (
+                  <div style={{ marginTop: 8 }}>
+                    <div style={{ fontSize: 12, color: '#8c8c8c', marginBottom: 6 }}>
+                      JSON — real Business Central surfaces. <code>api_route</code>: <code>api/v2.0</code> (standard),
+                      {' '}<code>api/{'{publisher}/{group}/{version}'}</code> (custom/partner API), or <code>ODataV4</code>.
+                      {' '}<code>company_path</code>: <code>companies({'{company_id}'})</code> or <code>Company('{'{company_name}'}')</code> (OData).
+                      {' '}<code>target_entity</code> (e.g. <code>timeRegistrationEntries</code>, <code>journalLines</code>, or a custom page).
+                      {' '}<code>field_map</code> (rename to the target's fields, ""=omit), <code>static_fields</code> (e.g. <code>jobNumber</code>, <code>unitOfMeasureCode</code>).
+                    </div>
+                    <Input.TextArea rows={9} value={bcOptionsText} spellCheck={false}
+                      style={{ fontFamily: 'monospace', fontSize: 12 }}
+                      onChange={e => { setBcOptionsText(e.target.value); setBcOptionsErr(''); }}
+                      placeholder='{ "api_route": "api/v2.0", "target_entity": "timeRegistrationEntries", "field_map": {}, "static_fields": {} }' />
+                    {bcOptionsErr && <div style={{ color: '#cf1322', fontSize: 12, marginTop: 4 }}>{bcOptionsErr}</div>}
+                  </div>
+                )}
+              </div>
 
               <Form.Item name="is_enabled" valuePropName="checked">
                 <Switch checkedChildren="Sync Enabled" unCheckedChildren="Sync Disabled" />

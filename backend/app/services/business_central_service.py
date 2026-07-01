@@ -119,12 +119,68 @@ async def _get_token(cfg: Dict) -> Tuple[Optional[str], Optional[str]]:
         return await _fetch_token(cfg)
 
 
-def _bc_base(cfg: Dict) -> str:
+# ── Connector options (real BC surfaces — standard API / custom API / OData V4) ─
+# These map 1:1 to documented Business Central URL structures; nothing is invented.
+# Defaults are the standard v2.0 API and its real timeRegistrationEntries fields, so
+# an unconfigured `options` behaves exactly as before.
+#   Standard API:  .../{env}/api/v2.0/companies({id})/timeRegistrationEntries
+#   Custom API:    .../{env}/api/{publisher}/{group}/{version}/companies({id})/{entity}
+#   OData V4 page: .../{env}/ODataV4/Company('{name}')/{PageName}
+_BC_DEFAULT_OPTIONS: Dict[str, Any] = {
+    "api_route":     "api/v2.0",                    # standard; custom: "api/{publisher}/{group}/{version}"; OData: "ODataV4"
+    "company_path":  "companies({company_id})",     # standard/custom; OData: "Company('{company_name}')"
+    "target_entity": "timeRegistrationEntries",     # standard time entity; e.g. "journalLines" (GL) or a custom API entity
+    "field_map":     {},                            # rename output keys ("" ⇒ omit); default = real standard fields
+    "static_fields": {},                            # constants a target requires, e.g. {"unitOfMeasureCode":"HOUR","jobNumber":"..."}
+    "internal_prefix": "_",                          # local-only fields stripped before POST
+}
+
+
+def _merge_bc_options(raw: Optional[Dict]) -> Dict[str, Any]:
+    opts = dict(_BC_DEFAULT_OPTIONS)
+    if isinstance(raw, dict):
+        opts.update({k: v for k, v in raw.items() if v is not None})
+    return opts
+
+
+def _bc_root(cfg: Dict) -> str:
+    """`https://api.businesscentral.dynamics.com/v2.0/{tenant}/{env}` — the shared root."""
     env = cfg.get("environment") or "Production"
-    return (
-        f"https://api.businesscentral.dynamics.com/v2.0"
-        f"/{cfg['tenant_id']}/{env}/api/v2.0"
-    )
+    return f"https://api.businesscentral.dynamics.com/v2.0/{cfg['tenant_id']}/{env}"
+
+
+def _bc_base(cfg: Dict) -> str:
+    """Data-API base using the configured route (standard v2.0, a custom API, or OData V4)."""
+    route = (cfg.get("options") or _BC_DEFAULT_OPTIONS).get("api_route", "api/v2.0")
+    return f"{_bc_root(cfg)}/{route}"
+
+
+def _bc_base_standard(cfg: Dict) -> str:
+    """Always the standard v2.0 API — used for company discovery, which is a standard
+    entity even when data is posted to a custom/OData endpoint."""
+    return f"{_bc_root(cfg)}/api/v2.0"
+
+
+def _bc_company_path(cfg: Dict) -> str:
+    opts = cfg.get("options") or _BC_DEFAULT_OPTIONS
+    tmpl = opts.get("company_path", "companies({company_id})")
+    return tmpl.format(company_id=cfg.get("company_id") or "", company_name=cfg.get("company_name") or "")
+
+
+def _map_bc_payload(entry: Dict, opts: Dict) -> Dict:
+    """Strip local-only fields, rename to the target's real field names, add any
+    required static fields. Renaming a field to "" omits it."""
+    prefix = opts.get("internal_prefix", "_")
+    fm = opts.get("field_map") or {}
+    out: Dict[str, Any] = {}
+    for k, v in entry.items():
+        if k.startswith(prefix):
+            continue
+        key = fm.get(k, k)
+        if key != "":
+            out[key] = v
+    out.update(opts.get("static_fields") or {})
+    return out
 
 
 # ── Config helpers ────────────────────────────────────────────────────────────
@@ -143,9 +199,12 @@ def _ensure_bc_tables(db: Session) -> None:
                 company_name   VARCHAR(200),
                 is_enabled     BOOLEAN      DEFAULT FALSE,
                 sync_time      VARCHAR(10)  DEFAULT '01:00',
+                options        JSONB,
                 updated_at     TIMESTAMPTZ  DEFAULT NOW()
             )
         """))
+        # Upgrade path for existing installs
+        db.execute(text("ALTER TABLE bc_integration_config ADD COLUMN IF NOT EXISTS options JSONB"))
         db.execute(text("""
             CREATE TABLE IF NOT EXISTS bc_sync_log (
                 id              SERIAL PRIMARY KEY,
@@ -170,7 +229,7 @@ def get_bc_config(db: Session) -> Optional[Dict[str, Any]]:
     try:
         row = db.execute(text(
             "SELECT tenant_id, client_id, client_secret, environment, "
-            "       company_id, company_name, is_enabled, sync_time "
+            "       company_id, company_name, is_enabled, sync_time, options "
             "FROM bc_integration_config LIMIT 1"
         )).fetchone()
         if not row or not row[0] or not row[1] or not row[2]:
@@ -185,6 +244,7 @@ def get_bc_config(db: Session) -> Optional[Dict[str, Any]]:
             "company_name":  row[5],
             "is_enabled":    bool(row[6]),
             "sync_time":     row[7] or "01:00",
+            "options":       _merge_bc_options(row[8] if len(row) > 8 else None),
         }
     except Exception as e:
         logger.warning(f"bc_integration_config read error: {e}")
@@ -198,7 +258,9 @@ async def fetch_companies(cfg: Dict) -> Tuple[List[Dict], Optional[str]]:
     token, err = await _get_token(cfg)
     if err:
         return [], err
-    url = f"{_bc_base(cfg)}/companies"
+    # Company discovery always uses the standard v2.0 API (a standard entity),
+    # even when data is posted to a custom/OData endpoint.
+    url = f"{_bc_base_standard(cfg)}/companies"
     try:
         client = await _get_http_client()
         resp = await client.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=15)
@@ -330,15 +392,16 @@ async def push_attendance(
         _log_sync(db, result)
         return result
 
-    url     = f"{_bc_base(cfg)}/companies({cfg['company_id']})/timeRegistrationEntries"
+    opts    = cfg.get("options") or _BC_DEFAULT_OPTIONS
+    url     = f"{_bc_base(cfg)}/{_bc_company_path(cfg)}/{opts['target_entity']}"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
     sent = failed = 0
     sent_codes = []
     client = await _get_http_client()
     for entry in entries:
-        # Strip internal fields before sending
-        payload = {k: v for k, v in entry.items() if not k.startswith("_")}
+        # Strip local-only fields, rename to the target's real fields, add static fields.
+        payload = _map_bc_payload(entry, opts)
         try:
             resp = await client.post(url, json=payload, headers=headers)
             if resp.status_code in (200, 201, 204):
