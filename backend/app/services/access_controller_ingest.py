@@ -15,6 +15,7 @@ from datetime import datetime
 from types import SimpleNamespace
 from typing import Dict, List
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ..models.access_controller import AccessController, AccessReader
@@ -26,6 +27,78 @@ logger = logging.getLogger(__name__)
 def _direction_from_inout(in_out: int) -> str:
     """C3 inoutstate: 0 = entry side, 1 = exit side (panel-configured)."""
     return "EXIT" if int(in_out) == 1 else "ENTRY"
+
+
+# ── Mock / simulation mode ─────────────────────────────────────────────────────
+# A controller whose serial number starts with "MOCK" is a simulated panel: no TCP
+# connection is attempted; instead it emits one synthetic event per poll, rotating
+# through its doors so you can exercise learn-mode + zone assignment without real
+# hardware. Consistent with the existing mock-device patterns in this codebase.
+_MOCK_SEQ: Dict[int, int] = {}   # controller_id → rotation counter
+
+
+def _is_mock(controller: AccessController) -> bool:
+    sn = (controller.serial_number or "").upper()
+    return sn.startswith("MOCK")
+
+
+def _mock_emp_codes(db: Session) -> List[str]:
+    rows = db.execute(text(
+        "SELECT emp_code FROM personnel WHERE emp_code IS NOT NULL ORDER BY id LIMIT 6"
+    )).fetchall()
+    return [r.emp_code for r in rows] or ["EMP001"]
+
+
+def _mock_rtlog(controller: AccessController, db: Session) -> List[C3Event]:
+    """One synthetic event per call, cycling door1-IN, door1-OUT, … then a door
+    BEYOND door_count to demonstrate learn-mode auto-discovering an unmapped port."""
+    doors = max(1, controller.door_count or 1)
+    # (door_no, in_out): each door's entry then exit, plus one surprise door (doors+1)
+    seq = [(d, io) for d in range(1, doors + 1) for io in (0, 1)]
+    seq.append((doors + 1, 0))   # a port that wasn't seeded — fires "new port" in learn
+
+    n = _MOCK_SEQ.get(controller.id, 0)
+    _MOCK_SEQ[controller.id] = n + 1
+    door_no, in_out = seq[n % len(seq)]
+
+    emps = _mock_emp_codes(db)
+    emp = emps[n % len(emps)]
+
+    return [C3Event(
+        time=datetime.utcnow(),
+        card_no=None,
+        pin=emp,
+        door_id=door_no,
+        event_type=0,
+        in_out=in_out,
+        verify_type=1,
+        raw={"mock": "1"},
+    )]
+
+
+def _fetch_rtlog(controller: AccessController, db: Session) -> List[C3Event]:
+    """Read buffered realtime events. Order of preference:
+    1. mock generator (simulated controllers);
+    2. the OFFICIAL ZKTeco PULL SDK (libplcommpro) if installed — the correct,
+       non-guessed path for real C3 panels;
+    3. the scaffold binary client (unverified) as a last resort."""
+    if _is_mock(controller):
+        return _mock_rtlog(controller, db)
+
+    from ..services.zkteco import c3_pull_sdk
+    if c3_pull_sdk.sdk_available():
+        with c3_pull_sdk.PullSDKClient(
+            controller.ip_address, controller.port or 4370, controller.comm_password or ""
+        ) as c:
+            return c.get_rt_log()
+
+    from ..services.zkteco.c3_controller import C3Controller, C3Config
+    with C3Controller(C3Config(
+        ip=controller.ip_address,
+        port=controller.port or 4370,
+        password=controller.comm_password or "",
+    )) as c3:
+        return c3.get_rt_log()
 
 
 def ingest_event(controller: AccessController, event: C3Event, db: Session) -> Dict[int, int]:
@@ -87,17 +160,10 @@ def poll_controller_once(controller: AccessController, db: Session) -> Dict[str,
 
     Never raises: a transport/protocol failure marks the controller offline and
     is reported back, so a single bad panel can never take down the poller."""
-    from ..services.zkteco.c3_controller import C3Controller, C3Config
-
     result: Dict[str, object] = {"controller_id": controller.id, "events": 0, "zone_updates": {}}
     all_updates: Dict[int, int] = {}
     try:
-        with C3Controller(C3Config(
-            ip=controller.ip_address,
-            port=controller.port or 4370,
-            password=controller.comm_password or "",
-        )) as c3:
-            events: List[C3Event] = c3.get_rt_log()
+        events: List[C3Event] = _fetch_rtlog(controller, db)
         for ev in events:
             all_updates.update(ingest_event(controller, ev, db))
         controller.status = "online"
@@ -153,18 +219,11 @@ def learn_controller_ports(controller: AccessController, db: Session) -> Dict[st
     card to identify a reader must not move people in/out of zones. It auto-creates
     any reader port that fires but wasn't registered yet, so the operator literally
     *sees the ports the readers are wired to* as they badge at each one."""
-    from ..services.zkteco.c3_controller import C3Controller, C3Config
-
     result: Dict[str, object] = {"controller_id": controller.id, "events": [], "created": 0}
     fired: List[dict] = []
     created = 0
     try:
-        with C3Controller(C3Config(
-            ip=controller.ip_address,
-            port=controller.port or 4370,
-            password=controller.comm_password or "",
-        )) as c3:
-            events: List[C3Event] = c3.get_rt_log()
+        events: List[C3Event] = _fetch_rtlog(controller, db)
 
         for ev in events:
             door_no = int(ev.door_id)

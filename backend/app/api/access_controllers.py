@@ -20,6 +20,7 @@ from ..schemas.access_controller import (
     AccessReaderCreate, AccessReaderUpdate, AccessReaderOut,
 )
 from ..services.zkteco import c3_controller as c3
+from ..services.zkteco import c3_pull_sdk
 from ..services.access_controller_ingest import poll_controller_once, learn_controller_ports
 
 router = APIRouter(prefix="/access-controllers", tags=["Access Control Controllers"])
@@ -177,6 +178,22 @@ def delete_reader(reader_id: int, db: Session = Depends(get_db)):
 
 
 # ── operations (C3 PULL protocol — transport pending hardware verification) ─────
+@router.post("/{controller_id}/probe")
+def probe_controller(controller_id: int, db: Session = Depends(get_db)):
+    """Diagnose a real panel via the official ZKTeco PULL SDK: TCP reachability,
+    SDK library presence, session handshake, and a RAW realtime-log sample (so the
+    exact event format is confirmed against the device, not assumed)."""
+    ctrl = db.query(AccessController).filter(AccessController.id == controller_id).first()
+    if not ctrl:
+        raise HTTPException(status_code=404, detail="Controller not found")
+    return c3_pull_sdk.probe(ctrl.ip_address, ctrl.port or 4370, ctrl.comm_password or "")
+
+
+@router.get("/sdk/status", summary="Is the ZKTeco PULL SDK library available?")
+def sdk_status():
+    return {"pull_sdk_available": c3_pull_sdk.sdk_available()}
+
+
 @router.post("/{controller_id}/test")
 def test_controller(controller_id: int, db: Session = Depends(get_db)):
     """Probe LAN reachability + C3 handshake. Updates the controller's status."""

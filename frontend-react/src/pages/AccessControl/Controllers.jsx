@@ -82,11 +82,6 @@ const ControllerCard = ({ ctrl, zones, api, qc }) => {
     mutationFn: id => apiService.delete(`${BASE}/readers/${id}`),
     onSuccess: () => { message.success('Reader removed'); qc.invalidateQueries({ queryKey: ['ac-controllers'] }); },
   });
-  const testConn = useMutation({
-    mutationFn: () => apiService.post(`${BASE}/${ctrl.id}/test`),
-    onSuccess: r => { r?.success ? message.success(r.message || 'Connected') : message.warning(r?.error || 'Unreachable'); qc.invalidateQueries({ queryKey: ['ac-controllers'] }); },
-    onError: e => message.error(e.message || 'Test failed'),
-  });
   const poll = useMutation({
     mutationFn: () => apiService.post(`${BASE}/${ctrl.id}/poll`),
     onSuccess: r => { message.success(`Polled — ${r?.events ?? 0} event(s)`); qc.invalidateQueries({ queryKey: ['ac-controllers'] }); },
@@ -95,6 +90,12 @@ const ControllerCard = ({ ctrl, zones, api, qc }) => {
   const openDoor = useMutation({
     mutationFn: door => apiService.post(`${BASE}/${ctrl.id}/doors/${door}/open`),
     onSuccess: r => r?.success ? message.success(r.message) : message.warning(r?.error || 'Open failed'),
+  });
+  const [probeResult, setProbeResult] = React.useState(null);
+  const probe = useMutation({
+    mutationFn: () => apiService.post(`${BASE}/${ctrl.id}/probe`),
+    onSuccess: r => setProbeResult(r),
+    onError: e => message.error(e.message || 'Probe failed'),
   });
 
   const unassigned = ctrl.readers.filter(r => !r.zone_id).length;
@@ -131,8 +132,8 @@ const ControllerCard = ({ ctrl, zones, api, qc }) => {
         </Tag>
         <span style={{ fontSize: 11, color: '#bfbfbf' }}>seen {fmtLastSeen(ctrl.last_seen)}</span>
         <Space>
-          <Tooltip title="Test LAN connection (C3 handshake)">
-            <Button size="small" icon={<ApiOutlined />} loading={testConn.isPending} onClick={() => testConn.mutate()} />
+          <Tooltip title="Diagnose via ZKTeco PULL SDK (TCP → SDK → handshake → raw event sample)">
+            <Button size="small" icon={<ApiOutlined />} loading={probe.isPending} onClick={() => probe.mutate()}>Probe</Button>
           </Tooltip>
           <Tooltip title="Poll buffered events now → zone occupancy">
             <Button size="small" icon={<SyncOutlined />} loading={poll.isPending} onClick={() => poll.mutate()} />
@@ -181,6 +182,41 @@ const ControllerCard = ({ ctrl, zones, api, qc }) => {
           ),
         }]}
       />
+
+      <Modal
+        open={!!probeResult}
+        title={<span><ApiOutlined /> Probe — {ctrl.name}</span>}
+        onCancel={() => setProbeResult(null)}
+        footer={<Button onClick={() => setProbeResult(null)}>Close</Button>}
+        width={640}
+      >
+        {probeResult && (
+          <div>
+            <div style={{ marginBottom: 12 }}>
+              {(probeResult.steps || []).map((s, i) => (
+                <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'center', padding: '4px 0' }}>
+                  <Tag color={s.ok ? 'success' : 'error'}>{s.ok ? '✓' : '✗'}</Tag>
+                  <b style={{ minWidth: 110 }}>{s.step}</b>
+                  <span style={{ color: '#8c8c8c', fontSize: 12 }}>{s.detail}</span>
+                </div>
+              ))}
+            </div>
+            <div style={{ background: '#f6ffed', border: '1px solid #b7eb8f', borderRadius: 6, padding: '8px 12px', fontSize: 13 }}>
+              {probeResult.summary}
+            </div>
+            {probeResult.rtlog_raw && (
+              <div style={{ marginTop: 12 }}>
+                <div style={{ fontSize: 12, color: '#8c8c8c', marginBottom: 4 }}>
+                  Raw realtime-log sample{probeResult.rtlog_provisional ? ' (positional — confirm field order)' : ''}:
+                </div>
+                <pre style={{ background: '#0d1117', color: '#c9d1d9', padding: 10, borderRadius: 6, fontSize: 11, maxHeight: 200, overflow: 'auto' }}>
+                  {probeResult.rtlog_raw}
+                </pre>
+              </div>
+            )}
+          </div>
+        )}
+      </Modal>
     </Card>
   );
 };
