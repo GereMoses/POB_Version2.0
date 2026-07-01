@@ -38,6 +38,38 @@ const buildReaders = (model, doorCount, mode) => {
   return rows;
 };
 
+// A small illustration of a ZKTeco C3 access-control board (green PCB with
+// terminal strips, relays, an RJ45 jack) — looks like the real panel.
+const C3Board = ({ size = 34 }) => (
+  <svg width={size} height={size * 40 / 48} viewBox="0 0 48 40" xmlns="http://www.w3.org/2000/svg">
+    {/* PCB */}
+    <rect x="1" y="1" width="46" height="38" rx="3" fill="#0e7a3a" stroke="#0a5a2b" strokeWidth="1" />
+    {/* mounting holes */}
+    {[[5, 5], [43, 5], [5, 35], [43, 35]].map(([cx, cy], i) => (
+      <circle key={i} cx={cx} cy={cy} r="1.5" fill="#063b1c" />
+    ))}
+    {/* top + bottom terminal strips with screw terminals */}
+    {[3.5, 34.5].map((y, si) => (
+      <g key={si}>
+        <rect x="8" y={y} width="32" height="4.5" rx="1" fill="#0a5626" />
+        {[10, 14, 18, 22, 26, 30, 34, 38].map(x => (
+          <circle key={x} cx={x} cy={y + 2.25} r="0.95" fill="#e6e07a" />
+        ))}
+      </g>
+    ))}
+    {/* relays (lock outputs) */}
+    <rect x="9" y="12" width="8.5" height="7.5" rx="1" fill="#2158b0" />
+    <rect x="19.5" y="12" width="8.5" height="7.5" rx="1" fill="#2158b0" />
+    {/* microcontroller chip */}
+    <rect x="31" y="11.5" width="8.5" height="8.5" rx="1" fill="#141414" />
+    {/* RJ45 ethernet jack */}
+    <rect x="9" y="23" width="9.5" height="6.5" rx="0.8" fill="#d0d4d8" stroke="#868c92" strokeWidth="0.6" />
+    <rect x="12.5" y="22.2" width="2.5" height="1.4" fill="#868c92" />
+    {/* silkscreen label */}
+    <text x="24.5" y="28.5" fontSize="5.5" fontFamily="Arial, sans-serif" fontWeight="700" fill="#d8f0df">C3</text>
+  </svg>
+);
+
 const STATUS = {
   online:  { color: '#52c41a', icon: <WifiOutlined />,       label: 'Online'  },
   offline: { color: '#8c8c8c', icon: <DisconnectOutlined />, label: 'Offline' },
@@ -131,11 +163,12 @@ const ControllerCard = ({ ctrl, zones, api, qc }) => {
       {/* header */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '14px 16px' }}>
         <div style={{
-          width: 40, height: 40, borderRadius: 9, flexShrink: 0,
+          width: 46, height: 40, borderRadius: 8, flexShrink: 0,
           background: 'linear-gradient(135deg,#0d1117,#1a2332)',
           display: 'flex', alignItems: 'center', justifyContent: 'center',
+          border: '1px solid #22303f',
         }}>
-          <ClusterOutlined style={{ color: '#1890ff', fontSize: 18 }} />
+          <C3Board size={38} />
         </div>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontWeight: 700, fontSize: 14 }}>
