@@ -8,16 +8,24 @@ T&A protocol that pyzk (`from zk import ZK`) implements, and they are not ADMS
 push devices. They speak ZKTeco's access-control "PULL SDK" protocol — a binary
 request/response framing over TCP port 4370. POB therefore needs its own client.
 
+CONFIRMED HARDWARE (customer, 2026-07-01): ZKTeco **C3-200** (2-door) and
+**C3-400** (4-door). Both speak the C3 PULL SDK protocol over TCP 4370.
+
 SCOPE / STATUS
 --------------
 This is the Phase-2 scaffold. The architecture, connection management, realtime-
 log TEXT parsing and POB integration wiring are complete and correct. The BINARY
-FRAME ENCODING (`_build_frame` / `_parse_frame`) is a first cut against the
-documented C3 protocol and MUST be validated against a real controller on the LAN
-— the constants below are centralised and marked `# VERIFY` so iterating is a
-one-line change. Nothing here runs automatically: the poller is opt-in
-(`C3_POLL_ENABLED`) and every call is wrapped so a wrong frame can only ever
-return an error, never crash the backend.
+FRAME ENCODING (`_build_frame` / `_parse_frame`) below is a FIRST CUT and is NOT
+yet confirmed against the real C3 PULL SDK wire format — the constants are marked
+`# VERIFY`. Do NOT treat them as authoritative. To finalise correctly (and without
+guessing) use ONE of:
+  1. Test against the now-available C3-200/C3-400 on the LAN and capture the real
+     frames (a probe harness can be added), or
+  2. Implement against ZKTeco's official PULL SDK / C3 access-control protocol
+     document, or wrap the official PULL SDK (plcommpro) where a Windows host is
+     available.
+Nothing here runs automatically: the poller is opt-in and every call is wrapped so
+a wrong frame can only ever return an error, never crash the backend.
 
 Once verified against hardware we wire `poll_rt_events()` into a background task
 that feeds events through the SAME access-control plumbing the direct readers use

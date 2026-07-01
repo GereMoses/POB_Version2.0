@@ -14,6 +14,7 @@ import apiService from '../../services/api';
 
 const { Option } = Select;
 const BASE = '/api/v1/access-controllers';
+const C3_MODELS = { 'C3-100': 1, 'C3-200': 2, 'C3-400': 4 };  // door counts (datasheet)
 
 const STATUS = {
   online:  { color: '#52c41a', icon: <WifiOutlined />,       label: 'Online'  },
@@ -440,10 +441,23 @@ const Controllers = () => {
                 <Form.Item name="port" label="Port"><InputNumber min={1} max={65535} /></Form.Item>
               </Space>
               <Space style={{ display: 'flex' }} align="start">
-                <Form.Item name="model" label="Model" style={{ flex: 1 }}>
-                  <Input placeholder="inBio460 / C3-400" />
+                <Form.Item name="model" label="Model" style={{ flex: 1 }}
+                  tooltip="Picking a C3 model sets the door count and the correct reader layout">
+                  <Select
+                    placeholder="Select model"
+                    onChange={m => {
+                      const doors = C3_MODELS[m];
+                      if (doors) form.setFieldsValue({ door_count: doors });
+                    }}
+                    options={[
+                      { value: 'C3-100', label: 'ZKTeco C3-100 (1 door)' },
+                      { value: 'C3-200', label: 'ZKTeco C3-200 (2 doors)' },
+                      { value: 'C3-400', label: 'ZKTeco C3-400 (4 doors)' },
+                    ]}
+                  />
                 </Form.Item>
-                <Form.Item name="door_count" label="Doors" tooltip="Auto-seeds IN/OUT readers per door on create">
+                <Form.Item name="door_count" label="Doors"
+                  tooltip="C3-100/200 seed IN+OUT per door; C3-400 seeds entry-only per door (exit by button)">
                   <InputNumber min={1} max={8} />
                 </Form.Item>
               </Space>

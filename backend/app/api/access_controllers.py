@@ -25,6 +25,24 @@ from ..services.access_controller_ingest import poll_controller_once, learn_cont
 router = APIRouter(prefix="/access-controllers", tags=["Access Control Controllers"])
 
 
+# ── ZKTeco C3 model specs (from the official datasheet — not assumptions) ───────
+# reader_ports is the number of Wiegand reader ports on the panel. Note the real
+# constraint that shapes zone entry/exit tracking:
+#   • C3-100 / C3-200 have 2 reader ports PER door → IN + OUT reader per door
+#     (card-read on both entry AND exit → full bidirectional zone tracking).
+#   • C3-400 has 4 reader ports for 4 doors → 1 reader PER door (entry only);
+#     exits are by push-button/REX, so exit is NOT a card read. For bidirectional
+#     tracking on a C3-400 you must run it in 2-door mode (IN+OUT on 2 doors).
+C3_MODELS = {
+    "C3-100": {"doors": 1, "reader_ports": 2, "inputs": 2,  "outputs": 2,
+               "readers_per_door": 2, "card_capacity": 30000, "log_capacity": 100000},
+    "C3-200": {"doors": 2, "reader_ports": 4, "inputs": 6,  "outputs": 4,
+               "readers_per_door": 2, "card_capacity": 30000, "log_capacity": 100000},
+    "C3-400": {"doors": 4, "reader_ports": 4, "inputs": 12, "outputs": 8,
+               "readers_per_door": 1, "card_capacity": 30000, "log_capacity": 100000},
+}
+
+
 # ── serialization ─────────────────────────────────────────────────────────────
 def _reader_out(reader: AccessReader, db: Session) -> AccessReaderOut:
     out = AccessReaderOut.model_validate(reader)
@@ -40,13 +58,24 @@ def _controller_out(ctrl: AccessController, db: Session) -> AccessControllerOut:
     return out
 
 
-def _default_readers(door_count: int) -> List[AccessReader]:
-    """Auto-seed an ENTRY and EXIT reader for each door."""
+def _default_readers(door_count: int, model: str = None) -> List[AccessReader]:
+    """Auto-seed reader ports. Uses the real per-model layout for known C3 panels:
+    C3-100/200 → IN+OUT per door; C3-400 → 1 (entry) reader per door (exit by button).
+    Unknown models default to IN+OUT per door. Operators can add/remove ports or use
+    Learn mode to match the actual wiring."""
+    spec = C3_MODELS.get((model or "").upper())
+    per_door = spec["readers_per_door"] if spec else 2
     readers: List[AccessReader] = []
     for door in range(1, door_count + 1):
         readers.append(AccessReader(door_no=door, direction="ENTRY", name=f"Door {door} Entry"))
-        readers.append(AccessReader(door_no=door, direction="EXIT", name=f"Door {door} Exit"))
+        if per_door >= 2:
+            readers.append(AccessReader(door_no=door, direction="EXIT", name=f"Door {door} Exit"))
     return readers
+
+
+@router.get("/models", summary="Known ZKTeco C3 model specs (datasheet)")
+def list_models():
+    return C3_MODELS
 
 
 # ── controllers CRUD ──────────────────────────────────────────────────────────
@@ -65,7 +94,7 @@ def create_controller(body: AccessControllerCreate, db: Session = Depends(get_db
     if body.readers:
         ctrl.readers = [AccessReader(**r.model_dump()) for r in body.readers]
     else:
-        ctrl.readers = _default_readers(body.door_count)
+        ctrl.readers = _default_readers(body.door_count, body.model)
     db.add(ctrl)
     db.commit()
     db.refresh(ctrl)
