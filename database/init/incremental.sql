@@ -112,3 +112,14 @@ BEGIN
     ALTER TABLE public.bc_integration_config ADD COLUMN IF NOT EXISTS options jsonb;
   END IF;
 END $$;
+
+-- ── Visitor pre-registration: approval_by is the logged-in user (auth_user) ──
+-- The approve endpoint records current_user.id (auth_user), matching created_by.
+-- Older DBs still point this FK at personnel_employee; repoint it idempotently.
+-- The table is normally empty at upgrade; the UPDATE guards any legacy
+-- employee-id values so the new FK validates cleanly.
+ALTER TABLE public.vis_pre_registration DROP CONSTRAINT IF EXISTS vis_pre_registration_approval_by_fkey;
+UPDATE public.vis_pre_registration SET approval_by = NULL
+  WHERE approval_by IS NOT NULL AND approval_by NOT IN (SELECT id FROM public.auth_user);
+ALTER TABLE public.vis_pre_registration ADD CONSTRAINT vis_pre_registration_approval_by_fkey
+  FOREIGN KEY (approval_by) REFERENCES public.auth_user(id);

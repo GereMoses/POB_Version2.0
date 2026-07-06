@@ -24,6 +24,7 @@ const visitorAPI = {
   getPreRegistration:  (id)                 => apiService.get(`/api/visitor/pre-register/${id}`),
   getQRData:           (qrCode)             => apiService.get(`/api/visitor/qr/${qrCode}`),
   approvePreRegistration: (id, d)           => apiService.post(`/api/visitor/pre-register/${id}/approve`, d),
+  bulkApprovePreRegistrations: (d)          => apiService.post('/api/visitor/pre-register/bulk-approve', d),
   resendPreRegistration:  (id)              => apiService.post(`/api/visitor/pre-register/${id}/resend`),
 
   // Check-In / Check-Out

@@ -85,7 +85,7 @@ class VisitorPreRegistration(Base):
     qr_code = Column(String(100), nullable=False, index=True)  # UUID
     status = Column(SmallInteger, default=0, index=True)  # 0=pending,1=approved,2=rejected,3=checked_in,4=checked_out,5=expired
     approval_time = Column(DateTime(timezone=True), nullable=True)
-    approval_by = Column(Integer, ForeignKey("personnel_employee.id"), nullable=True)
+    approval_by = Column(Integer, ForeignKey("auth_user.id"), nullable=True)  # logged-in user (auth_user), matches created_by
     approval_note = Column(String(255), nullable=True)
     safety_induction_done = Column(Boolean, default=False)  # POB
     induction_doc = Column(String(255), nullable=True)  # POB
@@ -98,7 +98,7 @@ class VisitorPreRegistration(Base):
     visitor = relationship("Visitor", back_populates="pre_registrations")
     host_employee = relationship("PersonnelEmployee", foreign_keys=[host_emp_id])
     meeting_attendee = relationship("MeetingAttendee", back_populates="pre_registration", uselist=False)
-    approver = relationship("PersonnelEmployee", foreign_keys=[approval_by])
+    approver = relationship("AuthUser", foreign_keys=[approval_by])
     area = relationship("PersonnelArea")
     creator = relationship("AuthUser", foreign_keys=[created_by])
     visit_logs = relationship("VisitorVisitLog", back_populates="pre_registration")

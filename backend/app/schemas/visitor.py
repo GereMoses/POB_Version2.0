@@ -14,7 +14,8 @@ from app.schemas.base import APIResponse
 class EmployeeBasic(BaseModel):
     id: int
     first_name: Optional[str] = None
-    last_name: str
+    last_name: Optional[str] = None
+    full_name: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -155,6 +156,8 @@ class VisitorPreRegistration(VisitorPreRegistrationBase):
     created_time: datetime
     updated_time: datetime
     visitor: Optional[Visitor] = None
+    host_employee: Optional[EmployeeBasic] = None
+    area: Optional[AreaBasic] = None
 
     class Config:
         from_attributes = True
@@ -238,6 +241,12 @@ class VisitorBlacklist(VisitorBlacklistBase):
 
 # Approval Schemas
 class VisitorApprovalRequest(BaseModel):
+    status: int  # 1=approved, 2=rejected
+    note: Optional[str] = Field(None, max_length=255)
+
+
+class VisitorBulkApprovalRequest(BaseModel):
+    ids: List[int] = Field(..., min_length=1)
     status: int  # 1=approved, 2=rejected
     note: Optional[str] = Field(None, max_length=255)
 

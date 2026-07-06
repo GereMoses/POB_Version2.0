@@ -21,7 +21,6 @@ import {
     Menu,
     Layout,
     Typography,
-    Statistic,
     Badge,
     Spin,
     Checkbox,
@@ -1389,40 +1388,61 @@ const Reports = () => {
       .filter(([, v]) => v !== null && typeof v !== 'object')
       .map(([key, value]) => ({
         title: key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()),
-        value: typeof value === 'number' ? value : String(value),
+        value: typeof value === 'number' ? value.toLocaleString() : String(value),
         suffix: typeof value === 'number' && key.includes('rate') ? '%' : '',
       }));
     if (!summaryItems.length) return null;
+    const PALETTE = [
+      { color: '#2563eb', bg: '#eff6ff' }, { color: '#16a34a', bg: '#f0fdf4' },
+      { color: '#d97706', bg: '#fffbeb' }, { color: '#7c3aed', bg: '#ede9fe' },
+      { color: '#0891b2', bg: '#ecfeff' }, { color: '#dc2626', bg: '#fef2f2' },
+    ];
     return (
-      <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
-        {summaryItems.map((item, i) => (
-          <Col xs={12} sm={8} md={6} key={i}>
-            <Card size="small">
-              <Statistic
-                title={item.title}
-                value={item.value}
-                suffix={item.suffix}
-                valueStyle={{ fontSize: 20 }}
-              />
-            </Card>
-          </Col>
-        ))}
+      <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
+        {summaryItems.map((item, i) => {
+          const c = PALETTE[i % PALETTE.length];
+          return (
+            <Col xs={12} sm={8} md={6} key={i}>
+              <div style={{
+                background: '#fff', borderRadius: 12, padding: '14px 16px',
+                border: '1px solid #e2e8f0', boxShadow: '0 1px 3px rgba(0,0,0,0.04)',
+                display: 'flex', alignItems: 'center', gap: 12,
+              }}>
+                <div style={{
+                  width: 40, height: 40, borderRadius: 10, flexShrink: 0, background: c.bg,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', color: c.color, fontSize: 18,
+                }}>
+                  <BarChartOutlined />
+                </div>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 22, fontWeight: 800, color: '#0f172a', lineHeight: 1 }}>
+                    {item.value}{item.suffix}
+                  </div>
+                  <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 3, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {item.title}
+                  </div>
+                </div>
+              </div>
+            </Col>
+          );
+        })}
       </Row>
     );
   };
 
   return (
     <>
-    <Layout style={{ height: '100vh' }}>
+    <Layout className="reports-module" style={{ height: '100vh' }}>
       <Sider
         width={300}
         collapsible
         collapsed={sidebarCollapsed}
         onCollapse={setSidebarCollapsed}
-        style={{ background: '#fff', borderRight: '1px solid #f0f0f0' }}
+        style={{ background: '#fff', borderRight: '1px solid #e2e8f0' }}
       >
         <div style={{ padding: '16px 16px 8px' }}>
-          <Title level={4} style={{ marginBottom: 8 }}>Reports</Title>
+          <div style={{ fontWeight: 700, fontSize: 16, color: '#0f172a', marginBottom: 2 }}>Reports</div>
+          <div style={{ fontSize: 11, color: '#94a3b8', marginBottom: 10 }}>Browse, run, export & schedule reports</div>
           <Search
             placeholder="Search reports..."
             style={{ marginBottom: 4 }}
@@ -1438,15 +1458,15 @@ const Reports = () => {
       </Sider>
 
       <Layout>
-        <Header style={{ background: '#fff', padding: '0 24px', borderBottom: '1px solid #f0f0f0' }}>
+        <Header style={{ background: '#fff', padding: '0 24px', borderBottom: '1px solid #e2e8f0', height: 'auto', lineHeight: 1.4, paddingTop: 12, paddingBottom: 12 }}>
           <Row justify="space-between" align="middle">
             <Col>
-              <Title level={4} style={{ margin: 0 }}>
+              <div style={{ fontWeight: 700, fontSize: 16, color: '#0f172a' }}>
                 {selectedReport ? selectedReport.title : 'Select a Report'}
-              </Title>
-              {selectedReport && (
-                <Text type="secondary">{selectedReport.description}</Text>
-              )}
+              </div>
+              <div style={{ fontSize: 12, color: '#64748b', marginTop: 2 }}>
+                {selectedReport ? selectedReport.description : 'Choose a report from the sidebar to begin'}
+              </div>
             </Col>
             <Col>
               <Space>
@@ -2050,6 +2070,36 @@ const Reports = () => {
           </Form.Item>
         </Form>
       </Modal>
+
+      <style>{`
+        .reports-module .ant-card { border-radius: 12px; border-color: #e2e8f0; }
+        .reports-module .ant-card-small > .ant-card-body { border-radius: 12px; }
+        .reports-module .ant-table-thead > tr > th {
+          background: #f8fafc !important;
+          color: #64748b !important;
+          font-size: 11px !important;
+          font-weight: 700 !important;
+          text-transform: uppercase !important;
+          letter-spacing: 0.05em !important;
+          border-bottom: 2px solid #e2e8f0 !important;
+        }
+        .reports-module .ant-table-tbody > tr > td { border-bottom: 1px solid #f1f5f9 !important; }
+        .reports-module .ant-tabs-nav { margin-bottom: 12px !important; }
+        /* AG-Grid header themed to match the slate palette */
+        .reports-module .ag-theme-alpine {
+          --ag-header-background-color: #f8fafc;
+          --ag-header-foreground-color: #64748b;
+          --ag-border-color: #e2e8f0;
+          --ag-row-hover-color: #f8fafc;
+          --ag-font-size: 13px;
+        }
+        .reports-module .ag-theme-alpine .ag-header-cell-text {
+          text-transform: uppercase;
+          letter-spacing: 0.04em;
+          font-size: 11px;
+          font-weight: 700;
+        }
+      `}</style>
     </>
   );
 };

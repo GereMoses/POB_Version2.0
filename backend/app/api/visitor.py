@@ -21,7 +21,7 @@ from app.schemas.visitor import (
     VisitorPreRegistration, VisitorPreRegistrationCreate, VisitorPreRegistrationUpdate,
     VisitorVisitLog, VisitorCheckIn, VisitorCheckOut,
     VisitorBlacklist, VisitorBlacklistCreate, VisitorBlacklistUpdate,
-    VisitorApprovalRequest, VisitorQRResponse,
+    VisitorApprovalRequest, VisitorBulkApprovalRequest, VisitorQRResponse,
     VisitorDailyReport, VisitorOverstayReport,
     VisitorTypeResponse, VisitorTypeListResponse,
     VisitorResponse, VisitorListResponse,
@@ -372,16 +372,41 @@ async def approve_pre_registration(
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@router.post("/pre-register/bulk-approve")
+async def bulk_approve_pre_registrations(
+    payload: VisitorBulkApprovalRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Approve or reject multiple pre-registrations at once."""
+    try:
+        service = get_visitor_service(db)
+        result = service.bulk_approve_pre_registrations(
+            payload.ids, payload.status, payload.note, current_user.id
+        )
+        verb = "approved" if payload.status == 1 else "rejected"
+        return {
+            "success": True,
+            "message": f"{len(result['succeeded'])} of {result['total']} pre-registrations {verb}",
+            "data": result,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.post("/pre-register/{pre_reg_id}/resend")
 async def resend_pre_registration(
     pre_reg_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Resend pre-registration email/SMS"""
+    """Resend pre-registration notification email"""
     try:
-        # TODO: Implement email/SMS resend logic
-        return {"success": True, "message": "Pre-registration resent successfully"}
+        service = get_visitor_service(db)
+        result = service.resend_pre_registration(pre_reg_id)
+        return {"success": True, "message": "Pre-registration notification resent", "data": result}
+    except NotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 

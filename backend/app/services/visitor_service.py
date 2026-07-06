@@ -5,6 +5,8 @@ host approval, and mustering integration.
 """
 
 import uuid
+import logging
+import threading
 from datetime import date, datetime, time, timedelta
 from typing import Optional, List, Dict, Any
 from sqlalchemy.orm import Session
@@ -24,6 +26,8 @@ from app.schemas.visitor import (
     VisitorCheckIn, VisitorCheckOut, VisitorApprovalRequest
 )
 from app.core.exceptions import ValidationError, NotFoundError
+
+logger = logging.getLogger(__name__)
 
 
 class VisitorService:
@@ -176,26 +180,166 @@ class VisitorService:
         self.db.add(pre_reg)
         self.db.commit()
         self.db.refresh(pre_reg)
+
+        # Best-effort notifications: host approval request + visitor confirmation
+        self._notify_pre_registration_created(pre_reg)
         return pre_reg
-    
+
     def approve_pre_registration(self, pre_reg_id: int, approval_data: VisitorApprovalRequest,
                                approved_by: int) -> VisitorPreRegistration:
         """Approve or reject pre-registration"""
         pre_reg = self.db.query(VisitorPreRegistration).filter(
             VisitorPreRegistration.id == pre_reg_id
         ).first()
-        
+
         if not pre_reg:
             raise NotFoundError(f"Pre-registration {pre_reg_id} not found")
-        
+
+        # Safety screening: never let a blacklisted visitor be approved
+        if approval_data.status == 1 and pre_reg.visitor and self._is_blacklisted(pre_reg.visitor):
+            raise ValidationError(
+                "Visitor is blacklisted and cannot be approved. Remove them from the blacklist first."
+            )
+
         pre_reg.status = approval_data.status
         pre_reg.approval_time = datetime.utcnow()
         pre_reg.approval_by = approved_by
         pre_reg.approval_note = approval_data.note
-        
+
         self.db.commit()
         self.db.refresh(pre_reg)
+
+        # Best-effort notification to the visitor (approved / rejected)
+        self._notify_pre_registration_decided(pre_reg)
         return pre_reg
+
+    def bulk_approve_pre_registrations(self, pre_reg_ids: List[int], status: int,
+                                       note: Optional[str], approved_by: int) -> Dict[str, Any]:
+        """Approve or reject multiple pre-registrations in one call.
+
+        Returns a per-id summary; an individual failure (e.g. blacklisted visitor)
+        never aborts the rest.
+        """
+        approval = VisitorApprovalRequest(status=status, note=note)
+        succeeded, failed = [], []
+        for pid in pre_reg_ids:
+            try:
+                self.approve_pre_registration(pid, approval, approved_by)
+                succeeded.append(pid)
+            except (ValidationError, NotFoundError) as e:
+                self.db.rollback()
+                failed.append({"id": pid, "error": str(e)})
+        return {
+            "succeeded": succeeded,
+            "failed": failed,
+            "total": len(pre_reg_ids),
+        }
+
+    def resend_pre_registration(self, pre_reg_id: int) -> Dict[str, Any]:
+        """Re-send the relevant notification for a pre-registration."""
+        pre_reg = self.db.query(VisitorPreRegistration).filter(
+            VisitorPreRegistration.id == pre_reg_id
+        ).first()
+        if not pre_reg:
+            raise NotFoundError(f"Pre-registration {pre_reg_id} not found")
+
+        # Pending -> re-send host approval request + visitor confirmation.
+        # Decided -> re-send the approval/rejection outcome to the visitor.
+        if pre_reg.status == 0:
+            return self._send_pre_reg_emails(pre_reg, blocking=True)
+        return self._send_decision_email(pre_reg, blocking=True)
+
+    # ── Notification helpers ──────────────────────────────────────────────
+    def _build_notification_payloads(self, pre_reg: VisitorPreRegistration):
+        """Assemble the plain dicts the email service expects (no ORM in threads)."""
+        v = pre_reg.visitor
+        h = pre_reg.host_employee
+
+        def _name(emp):
+            if not emp:
+                return ""
+            return getattr(emp, "full_name", None) or " ".join(
+                p for p in [emp.first_name, emp.last_name] if p
+            )
+
+        visitor_data = {
+            "full_name": v.full_name if v else "",
+            "email": v.email if v else None,
+            "company": v.company if v else "",
+            "visit_date": pre_reg.visit_date.isoformat() if pre_reg.visit_date else "",
+            "visit_time_start": str(pre_reg.visit_time_start) if pre_reg.visit_time_start else "",
+            "visit_time_end": str(pre_reg.visit_time_end) if pre_reg.visit_time_end else "",
+            "purpose": pre_reg.purpose or "",
+        }
+        host_data = {
+            "full_name": _name(h),
+            # personnel_employee has no email column today; resolve defensively so
+            # host-side email is simply skipped rather than erroring the request.
+            "email": getattr(h, "email", None) if h else None,
+        }
+        return visitor_data, host_data
+
+    def _send_pre_reg_emails(self, pre_reg: VisitorPreRegistration, blocking: bool = False) -> Dict[str, Any]:
+        from app.services.email_service import VisitorEmailService
+        from app.core.config import settings
+
+        visitor_data, host_data = self._build_notification_payloads(pre_reg)
+        qr_code = pre_reg.qr_code
+        base = (getattr(settings, "FRONTEND_URL", "") or "").rstrip("/")
+        approval_url = f"{base}/visitor" if base else "the POB visitor portal"
+
+        def _run():
+            email = VisitorEmailService()
+            results = {}
+            try:
+                if host_data.get("email"):
+                    results["host"] = email.send_host_approval_email(host_data, visitor_data, approval_url)
+                if visitor_data.get("email"):
+                    results["visitor"] = email.send_visitor_registration_email(
+                        visitor_data, qr_code, host_data.get("full_name", "")
+                    )
+            except Exception as e:  # never let email break the request
+                logger.warning("Pre-registration email failed: %s", e)
+            return results
+
+        return _run() if blocking else self._fire(_run)
+
+    def _send_decision_email(self, pre_reg: VisitorPreRegistration, blocking: bool = False) -> Dict[str, Any]:
+        from app.services.email_service import VisitorEmailService
+
+        visitor_data, host_data = self._build_notification_payloads(pre_reg)
+        status_str = "approved" if pre_reg.status == 1 else "rejected"
+
+        def _run():
+            email = VisitorEmailService()
+            try:
+                if visitor_data.get("email"):
+                    return {"visitor": email.send_approval_notification_email(
+                        visitor_data, host_data, status_str
+                    )}
+            except Exception as e:
+                logger.warning("Approval notification email failed: %s", e)
+            return {}
+
+        return _run() if blocking else self._fire(_run)
+
+    def _notify_pre_registration_created(self, pre_reg: VisitorPreRegistration):
+        try:
+            self._send_pre_reg_emails(pre_reg)
+        except Exception as e:
+            logger.warning("Failed to dispatch pre-registration notifications: %s", e)
+
+    def _notify_pre_registration_decided(self, pre_reg: VisitorPreRegistration):
+        try:
+            self._send_decision_email(pre_reg)
+        except Exception as e:
+            logger.warning("Failed to dispatch approval notification: %s", e)
+
+    @staticmethod
+    def _fire(fn) -> Dict[str, Any]:
+        """Run a best-effort side effect in a daemon thread (never blocks the request)."""
+        threading.Thread(target=fn, daemon=True).start()
+        return {"queued": True}
     
     def get_pre_registration_by_qr(self, qr_code: str) -> Optional[VisitorPreRegistration]:
         """Get pre-registration by QR code (public endpoint)"""
