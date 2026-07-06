@@ -512,7 +512,7 @@ class VisitorEmailService:
                     msg.attach(part)
             
             # Send email
-            with smtplib.SMTP(self.smtp_server, self.smtp_port) as server:
+            with smtplib.SMTP(self.smtp_server, self.smtp_port, timeout=10) as server:
                 server.starttls()
                 server.login(self.smtp_username, self.smtp_password)
                 text = msg.as_string()
@@ -762,7 +762,7 @@ class ReportEmailService:
                     msg.attach(part)
             
             # Send email
-            with smtplib.SMTP(self.smtp_server, self.smtp_port) as server:
+            with smtplib.SMTP(self.smtp_server, self.smtp_port, timeout=10) as server:
                 server.starttls()
                 server.login(self.smtp_username, self.smtp_password)
                 text = msg.as_string()

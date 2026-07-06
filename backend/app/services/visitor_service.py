@@ -245,9 +245,11 @@ class VisitorService:
 
         # Pending -> re-send host approval request + visitor confirmation.
         # Decided -> re-send the approval/rejection outcome to the visitor.
+        # Non-blocking: dispatch in a daemon thread so a slow/unreachable SMTP
+        # server can never tie up a request worker (which would starve the pool).
         if pre_reg.status == 0:
-            return self._send_pre_reg_emails(pre_reg, blocking=True)
-        return self._send_decision_email(pre_reg, blocking=True)
+            return self._send_pre_reg_emails(pre_reg, blocking=False)
+        return self._send_decision_email(pre_reg, blocking=False)
 
     # ── Notification helpers ──────────────────────────────────────────────
     def _build_notification_payloads(self, pre_reg: VisitorPreRegistration):
