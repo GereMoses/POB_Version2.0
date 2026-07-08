@@ -786,8 +786,20 @@ def assign_reader(
 
     terminal_id = body.get("device_id")
     reader_purpose = body.get("reader_purpose", "ATTENDANCE").upper()
-    valid_purposes = {"ATTENDANCE", "ACCESS_ENTRY", "ACCESS_EXIT", "MUSTERING", "POB", "EMERGENCY"}
-    if reader_purpose not in valid_purposes:
+    # Zones take DIRECT readers only for STANDALONE (Horus H1 / ADMS) devices used
+    # for T&A and mustering. Access-control readers are NOT assigned to zones here —
+    # they are dumb readers wired to a controller, so the mapping is
+    #   controller port → door → zone  (Access Control → Controllers), never
+    # reader → zone directly.
+    standalone_purposes = {"ATTENDANCE", "MUSTERING", "POB", "EMERGENCY"}
+    if reader_purpose in {"ACCESS_ENTRY", "ACCESS_EXIT"}:
+        raise HTTPException(
+            status_code=400,
+            detail=("Access readers are not assigned to zones directly. They are "
+                    "controller ports mapped as controller port → door → zone under "
+                    "Access Control → Controllers."),
+        )
+    if reader_purpose not in standalone_purposes:
         reader_purpose = "ATTENDANCE"
 
     terminal = db.execute(text(
