@@ -27,6 +27,7 @@ class EmergencyScope(enum.Enum):
     GLOBAL = 0
     ZONE = 1
     DOOR = 2
+    LOCATION = 3
 
 class EmergencyInitiatedType(enum.Enum):
     MANUAL_UI = 0

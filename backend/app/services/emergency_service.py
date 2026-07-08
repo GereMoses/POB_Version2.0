@@ -185,7 +185,7 @@ class EmergencyService:
                 target_doors = db.query(AccDoor).join(IClockTerminal).filter(
                     IClockTerminal.area_id.in_(location_ids)
                 ).all()
-                scope_enum = "location"
+                scope_enum = EmergencyScope.LOCATION.value
             elif scope == "door" and door_ids:
                 target_doors = db.query(AccDoor).filter(
                     AccDoor.id.in_(door_ids)
@@ -354,7 +354,7 @@ class EmergencyService:
 
             # Scope: location (personnel_area) > zone > global
             if location_id:
-                fire_scope = "location"
+                fire_scope = EmergencyScope.LOCATION.value
             elif zone_id:
                 fire_scope = EmergencyScope.ZONE.value
             else:

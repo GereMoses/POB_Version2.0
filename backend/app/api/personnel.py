@@ -660,19 +660,23 @@ async def update_personnel(
     db.commit()
     db.refresh(person)
 
-    # Record who changed which fields (old → new). Best-effort: never fail the update.
+    # Record who changed which fields (old → new) in the operation log
+    # (base_operationlog — the durable audit table). Best-effort: never fail the update.
     if changed:
         try:
-            await audit_trail_service.create_audit_entry(
-                personnel_id=person.id,
-                event_type="PROFILE_UPDATE",
-                description=f"Updated {len(changed)} field(s): {', '.join(changed.keys())}",
-                old_values={k: v[0] for k, v in changed.items()},
-                new_values={k: v[1] for k, v in changed.items()},
+            import json as _json
+            from ..models.biotime_models import BaseOperationLog
+            db.add(BaseOperationLog(
                 user_id=getattr(current_user, "id", None),
-                db=db,
-            )
+                action="PROFILE_UPDATE",
+                table_name="personnel",
+                record_id=person.id,
+                old_values=_json.dumps({k: v[0] for k, v in changed.items()}),
+                new_values=_json.dumps({k: v[1] for k, v in changed.items()}),
+            ))
+            db.commit()
         except Exception as e:
+            db.rollback()
             import logging
             logging.getLogger(__name__).warning("Audit log for personnel %s failed: %s", person.id, e)
 
