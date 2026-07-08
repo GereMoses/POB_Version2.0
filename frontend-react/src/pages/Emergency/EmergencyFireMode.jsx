@@ -12,11 +12,13 @@ import { api } from '../../services/api';
 
 const EmergencyFireMode = () => {
   const [zones, setZones] = useState([]);
+  const [locations, setLocations] = useState([]);
   const [activeFireMode, setActiveFireMode] = useState(null);
   const [fireModeHistory, setFireModeHistory] = useState([]);
   const [loading, setLoading] = useState(true);
   const [actionInProgress, setActionInProgress] = useState(false);
   const [selectedZone, setSelectedZone] = useState('');
+  const [selectedLocation, setSelectedLocation] = useState('');
   const [fireModeReason, setFireModeReason] = useState('');
   const [showConfirmModal, setShowConfirmModal] = useState(false);
   const [pendingAction, setPendingAction] = useState(null);
@@ -35,6 +37,12 @@ const EmergencyFireMode = () => {
       ]);
       
       setZones(zonesRes.data.data || []);
+      // Locations = personnel areas (for location-scoped fire mode, action #13).
+      try {
+        const areasRes = await api.get('/api/device/areas');
+        const rows = areasRes.data?.data ?? areasRes.data ?? [];
+        setLocations(Array.isArray(rows) ? rows.map(a => ({ id: a.id, name: a.area_name || a.name || `Area ${a.id}` })) : []);
+      } catch (_) { setLocations([]); }
       setFireModeHistory(historyRes.data.data || []);
       
       // Check for active fire mode
@@ -50,7 +58,7 @@ const EmergencyFireMode = () => {
     }
   };
 
-  const handleFireModeAction = (action, zoneId = null) => {
+  const handleFireModeAction = (action, zoneId = null, locationId = null) => {
     if (actionInProgress) return;
     
     if (action === 'activate' && !fireModeReason.trim()) {
@@ -58,7 +66,7 @@ const EmergencyFireMode = () => {
       return;
     }
 
-    setPendingAction({ action, zoneId });
+    setPendingAction({ action, zoneId, locationId });
     setShowConfirmModal(true);
   };
 
@@ -70,6 +78,7 @@ const EmergencyFireMode = () => {
       
       const requestData = {
         zone_id: pendingAction.zoneId,
+        location_id: pendingAction.locationId,
         action: pendingAction.action,
         reason: pendingAction.action === 'activate' ? fireModeReason : 'Fire emergency cleared'
       };
@@ -183,6 +192,24 @@ const EmergencyFireMode = () => {
             
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">
+                Location (optional - personnel area)
+              </label>
+              <select
+                value={selectedLocation}
+                onChange={(e) => setSelectedLocation(e.target.value)}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="">All locations</option>
+                {locations.map((loc) => (
+                  <option key={loc.id} value={loc.id}>
+                    {loc.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
                 Reason for Activation
               </label>
               <textarea
@@ -195,7 +222,7 @@ const EmergencyFireMode = () => {
             </div>
             
             <button
-              onClick={() => handleFireModeAction('activate', selectedZone ? parseInt(selectedZone) : null)}
+              onClick={() => handleFireModeAction('activate', selectedZone ? parseInt(selectedZone) : null, selectedLocation ? parseInt(selectedLocation) : null)}
               disabled={actionInProgress || !!activeFireMode}
               className="w-full px-4 py-3 bg-orange-600 text-white rounded-md hover:bg-orange-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors duration-200"
             >

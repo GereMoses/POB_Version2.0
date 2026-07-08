@@ -13,8 +13,10 @@ import { api } from '../../services/api';
 const EmergencyLockdown = () => {
   const [zones, setZones] = useState([]);
   const [doors, setDoors] = useState([]);
+  const [locations, setLocations] = useState([]);
   const [selectedDoors, setSelectedDoors] = useState([]);
   const [selectedZones, setSelectedZones] = useState([]);
+  const [selectedLocations, setSelectedLocations] = useState([]);
   const [loading, setLoading] = useState(true);
   const [actionInProgress, setActionInProgress] = useState(false);
   const [lockdownReason, setLockdownReason] = useState('');
@@ -38,6 +40,12 @@ const EmergencyLockdown = () => {
       
       setZones(zonesRes.data.data || []);
       setDoors(doorsRes.data.data || []);
+      // Locations = personnel areas (for location-scoped lockdown, action #13).
+      try {
+        const areasRes = await api.get('/api/device/areas');
+        const rows = areasRes.data?.data ?? areasRes.data ?? [];
+        setLocations(Array.isArray(rows) ? rows.map(a => ({ id: a.id, name: a.area_name || a.name || `Area ${a.id}` })) : []);
+      } catch (_) { setLocations([]); }
       setLockdownHistory(historyRes.data.data || []);
     } catch (error) {
       console.error('Error fetching lockdown data:', error);
@@ -74,6 +82,9 @@ const EmergencyLockdown = () => {
       } else if (pendingAction.scope === 'zone') {
         requestData.scope = 'zone';
         requestData.zone_ids = selectedZones;
+      } else if (pendingAction.scope === 'location') {
+        requestData.scope = 'location';
+        requestData.location_ids = selectedLocations;
       } else {
         requestData.scope = 'door';
         requestData.door_ids = selectedDoors.length > 0 ? selectedDoors : doors.map(d => d.id);
@@ -135,10 +146,22 @@ const EmergencyLockdown = () => {
   };
 
   const handleZoneSelection = (zoneId) => {
-    setSelectedZones(prev => 
-      prev.includes(zoneId) 
+    setSelectedZones(prev =>
+      prev.includes(zoneId)
         ? prev.filter(id => id !== zoneId)
         : [...prev, zoneId]
+    );
+  };
+
+  const handleSelectAllLocations = () => {
+    setSelectedLocations(
+      selectedLocations.length === locations.length ? [] : locations.map(l => l.id)
+    );
+  };
+
+  const handleLocationSelection = (locId) => {
+    setSelectedLocations(prev =>
+      prev.includes(locId) ? prev.filter(id => id !== locId) : [...prev, locId]
     );
   };
 
@@ -207,7 +230,17 @@ const EmergencyLockdown = () => {
             <span className="font-semibold">Zone Lockdown</span>
             <span className="text-xs opacity-90">Lock selected zones</span>
           </button>
-          
+
+          <button
+            onClick={() => handleLockdownAction('lock', 'location')}
+            disabled={actionInProgress}
+            className="flex flex-col items-center justify-center p-4 bg-amber-600 text-white rounded-lg hover:bg-amber-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors duration-200"
+          >
+            <MapPin className="w-6 h-6 mb-2" />
+            <span className="font-semibold">Location Lockdown</span>
+            <span className="text-xs opacity-90">Lock selected locations</span>
+          </button>
+
           <button
             onClick={() => handleLockdownAction('lock', 'door')}
             disabled={actionInProgress}
@@ -218,6 +251,49 @@ const EmergencyLockdown = () => {
             <span className="text-xs opacity-90">Lock selected doors</span>
           </button>
         </div>
+      </div>
+
+      {/* Location Selection (personnel areas) — action #13 */}
+      <div className="bg-white shadow rounded-lg p-6">
+        <div className="flex justify-between items-center mb-4">
+          <h3 className="text-lg font-semibold text-gray-900">Location Selection</h3>
+          <button onClick={handleSelectAllLocations} className="text-blue-600 hover:text-blue-800 text-sm">
+            {selectedLocations.length === locations.length && locations.length > 0 ? 'Deselect All' : 'Select All'}
+          </button>
+        </div>
+        {locations.length === 0 ? (
+          <p className="text-sm text-gray-500">No locations configured.</p>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {locations.map((loc) => {
+              const isSelected = selectedLocations.includes(loc.id);
+              return (
+                <div
+                  key={loc.id}
+                  className={`border rounded-lg p-4 cursor-pointer transition-colors duration-200 ${
+                    isSelected ? 'border-blue-500 bg-blue-50' : 'border-gray-300 hover:border-gray-400'
+                  }`}
+                  onClick={() => handleLocationSelection(loc.id)}
+                >
+                  <div className="flex items-center justify-between">
+                    <h4 className="font-medium text-gray-900">{loc.name}</h4>
+                    <input
+                      type="checkbox"
+                      checked={isSelected}
+                      onChange={() => handleLocationSelection(loc.id)}
+                      className="rounded border-gray-300"
+                    />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+        {selectedLocations.length > 0 && (
+          <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded">
+            <p className="text-sm text-blue-800">Selected {selectedLocations.length} location(s)</p>
+          </div>
+        )}
       </div>
 
       {/* Zone Selection */}

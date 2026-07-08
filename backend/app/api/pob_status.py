@@ -303,6 +303,63 @@ async def get_rotation_overdue(db: Session = Depends(get_db)):
     return {"data": data, "total": len(data), "rotation_max_days": _ROTATION_MAX_DAYS}
 
 
+# ── Last activity (time since last badge event) ────────────────────────────────
+
+# On-site personnel with no badge/reader event for longer than this are surfaced
+# as a potential safety concern — earlier than the rotation-overdue (days) view.
+_STALE_MINUTES = 120
+
+
+@router.get("/last-activity")
+async def get_last_activity(
+    limit: int = Query(100, ge=1, le=500),
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """On-site personnel ranked by time since their last badge/reader event
+    (longest-idle first) so potentially missing people surface early."""
+    try:
+        rows = db.execute(text("""
+            SELECT
+              p.id, p.emp_code,
+              COALESCE(p.full_name, TRIM(p.first_name||' '||p.last_name)) AS name,
+              COALESCE(p.department, '—') AS dept,
+              COALESCE(NULLIF(TRIM(p.current_location), ''), 'Unassigned') AS loc,
+              t.last_punch
+            FROM personnel p
+            LEFT JOIN LATERAL (
+              SELECT MAX(punch_time) AS last_punch
+              FROM iclock_transaction
+              WHERE emp_code = p.emp_code
+            ) t ON TRUE
+            WHERE p.is_onboard = TRUE AND p.is_active = TRUE
+            ORDER BY t.last_punch ASC NULLS FIRST
+            LIMIT :limit
+        """), {"limit": limit}).fetchall()
+    except Exception as e:
+        logger.warning(f"Last-activity query failed: {e}")
+        return {"data": [], "total": 0, "stale_count": 0, "stale_minutes": _STALE_MINUTES}
+
+    now, data, stale = datetime.now(timezone.utc), [], 0
+    for r in rows:
+        lp   = _norm_tz(r[5])
+        mins = int((now - lp).total_seconds() // 60) if lp else None
+        is_stale = mins is None or mins >= _STALE_MINUTES
+        stale += 1 if is_stale else 0
+        data.append({
+            "id":            r[0],
+            "emp_code":      r[1],
+            "name":          r[2],
+            "department":    r[3],
+            "location":      r[4],
+            "last_event":    r[5].isoformat() if r[5] else None,
+            "minutes_since": mins,
+            "never_seen":    lp is None,
+            "stale":         is_stale,
+        })
+    return {"data": data, "total": len(data), "stale_count": stale, "stale_minutes": _STALE_MINUTES}
+
+
 # ── Attendance trend ───────────────────────────────────────────────────────────
 
 @router.get("/attendance-trend")

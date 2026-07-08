@@ -152,8 +152,9 @@ class EmergencyService:
 
     async def execute_lockdown(
         self, 
-        scope: str, 
+        scope: str,
         zone_ids: Optional[List[int]] = None,
+        location_ids: Optional[List[int]] = None,
         door_ids: Optional[List[int]] = None,
         action: str = "lock",
         reason: Optional[str] = None,
@@ -179,6 +180,12 @@ class EmergencyService:
                     IClockTerminal.zone_id.in_(zone_ids)
                 ).all()
                 scope_enum = EmergencyScope.ZONE.value
+            elif scope == "location" and location_ids:
+                # Location = personnel_area: lock every door on terminals in those areas.
+                target_doors = db.query(AccDoor).join(IClockTerminal).filter(
+                    IClockTerminal.area_id.in_(location_ids)
+                ).all()
+                scope_enum = "location"
             elif scope == "door" and door_ids:
                 target_doors = db.query(AccDoor).filter(
                     AccDoor.id.in_(door_ids)
@@ -322,6 +329,7 @@ class EmergencyService:
     async def activate_fire_mode(
         self,
         zone_id: Optional[int] = None,
+        location_id: Optional[int] = None,
         action: str = "activate",
         reason: Optional[str] = None,
         initiated_by: Optional[int] = None,
@@ -343,12 +351,20 @@ class EmergencyService:
                     raise ValueError(f"Zone {zone_id} not found")
             else:
                 zone = None
-            
+
+            # Scope: location (personnel_area) > zone > global
+            if location_id:
+                fire_scope = "location"
+            elif zone_id:
+                fire_scope = EmergencyScope.ZONE.value
+            else:
+                fire_scope = EmergencyScope.GLOBAL.value
+
             # Create emergency event
             emergency_event = EmergencyEvent(
                 event_type=EmergencyEventType.FIRE.value,
                 status=EmergencyStatus.ACTIVE.value if action == "activate" else EmergencyStatus.RESOLVED.value,
-                scope=EmergencyScope.ZONE.value if zone_id else EmergencyScope.GLOBAL.value,
+                scope=fire_scope,
                 zone_ids=[zone_id] if zone_id else [],
                 initiated_by=initiated_by,
                 initiated_type=EmergencyInitiatedType.MANUAL_UI.value,
@@ -373,10 +389,11 @@ class EmergencyService:
             }
 
             if action == "activate":
-                # 1. Unlock fire exits (emergency_action=2)
-                fire_exit_doors = db.query(AccDoor).filter(
-                    AccDoor.emergency_action == 2
-                ).all()
+                # 1. Unlock fire exits (emergency_action=2) — scoped to the location's readers when given
+                _fe_q = db.query(AccDoor).filter(AccDoor.emergency_action == 2)
+                if location_id:
+                    _fe_q = _fe_q.join(IClockTerminal).filter(IClockTerminal.area_id == location_id)
+                fire_exit_doors = _fe_q.all()
 
                 for door in fire_exit_doors:
                     sp = db.begin_nested()
@@ -396,10 +413,11 @@ class EmergencyService:
                     "timestamp": datetime.now(timezone.utc).isoformat()
                 })
 
-                # 2. Lock danger zones (emergency_action=1)
-                danger_zone_doors = db.query(AccDoor).filter(
-                    AccDoor.emergency_action == 1
-                ).all()
+                # 2. Lock danger zones (emergency_action=1) — scoped to the location's readers when given
+                _dz_q = db.query(AccDoor).filter(AccDoor.emergency_action == 1)
+                if location_id:
+                    _dz_q = _dz_q.join(IClockTerminal).filter(IClockTerminal.area_id == location_id)
+                danger_zone_doors = _dz_q.all()
 
                 for door in danger_zone_doors:
                     sp = db.begin_nested()

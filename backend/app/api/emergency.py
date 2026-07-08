@@ -50,14 +50,16 @@ emergency_manager = emergency_websocket_manager
 
 # Pydantic Models
 class LockdownRequest(BaseModel):
-    scope: str = Field(..., description="global, zone, or door")
+    scope: str = Field(..., description="global, zone, location, or door")
     zone_ids: Optional[List[int]] = Field(None, description="Zone IDs for zone scope")
+    location_ids: Optional[List[int]] = Field(None, description="Area/location IDs for location scope")
     door_ids: Optional[List[int]] = Field(None, description="Door IDs for door scope")
     action: str = Field(..., description="lock or unlock")
     reason: Optional[str] = Field(None, description="Reason for lockdown")
 
 class FireModeRequest(BaseModel):
     zone_id: Optional[int] = Field(None, description="Zone ID (optional for global)")
+    location_id: Optional[int] = Field(None, description="Area/location ID (optional for location scope)")
     action: str = Field(..., description="activate or clear")
     reason: Optional[str] = Field(None, description="Reason for fire mode")
 
@@ -143,6 +145,7 @@ async def emergency_lockdown(
         result = await emergency_service.execute_lockdown(
             scope=request.scope,
             zone_ids=request.zone_ids,
+            location_ids=request.location_ids,
             door_ids=request.door_ids,
             action=request.action,
             reason=request.reason,
@@ -192,6 +195,7 @@ async def fire_mode_control(
             )
         result = await emergency_service.activate_fire_mode(
             zone_id=request.zone_id,
+            location_id=request.location_id,
             action=request.action,
             reason=request.reason,
             initiated_by=current_user.id,

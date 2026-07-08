@@ -108,7 +108,7 @@ function FlightList({ onSelectFlight }) {
       notes: values.notes,
     }),
     onSuccess: () => {
-      message.success('Flight created');
+      message.success('Journey created');
       qc.invalidateQueries({ queryKey: ['transport-flights'] });
       flightForm.resetFields();
       setShowCreate(false);
@@ -117,10 +117,12 @@ function FlightList({ onSelectFlight }) {
   });
 
   const flights = data?.flights ?? [];
+  // Known locations for the From/To combo boxes (from existing journeys); free text still allowed.
+  const locOpts = [...new Set(flights.flatMap(f => [f.departure_location, f.arrival_location]).filter(Boolean))].map(v => ({ value: v }));
 
   const columns = [
     {
-      title: 'Flight',
+      title: 'Journey',
       render: (_, row) => (
         <div>
           <div style={{ fontWeight: 700, color: '#1e293b' }}>{row.transport?.identifier ?? '—'}</div>
@@ -210,13 +212,13 @@ function FlightList({ onSelectFlight }) {
         <Button icon={<ReloadOutlined />} size="small" onClick={() => refetch()} />
         <div style={{ marginLeft: 'auto' }}>
           <Button type="primary" icon={<PlusOutlined />} onClick={() => setShowCreate(true)}>
-            New Flight
+            New Journey
           </Button>
         </div>
       </div>
 
       <div style={{ display: 'flex', gap: 10, marginBottom: 14 }}>
-        <StatCard label="Total Flights" value={flights.length} color="#64748b" />
+        <StatCard label="Total Journeys" value={flights.length} color="#64748b" />
         <StatCard label="Scheduled" value={flights.filter(f => f.status === 'SCHEDULED').length} color="#2563eb" icon={<AuditOutlined />} />
         <StatCard label="In Transit" value={flights.filter(f => f.status === 'IN_TRANSIT').length} color="#d97706" icon={<SyncOutlined />} />
         <StatCard label="Completed" value={flights.filter(f => f.status === 'COMPLETED').length} color="#16a34a" icon={<CheckCircleOutlined />} />
@@ -241,7 +243,7 @@ function FlightList({ onSelectFlight }) {
       </div>
 
       <Modal
-        title="Create Flight / Voyage"
+        title="New Journey"
         open={showCreate}
         onCancel={() => setShowCreate(false)}
         onOk={() => flightForm.submit()}
@@ -263,10 +265,12 @@ function FlightList({ onSelectFlight }) {
               <Input type="number" min={1} />
             </Form.Item>
             <Form.Item name="departure_location" label="From" rules={[{ required: true }]}>
-              <Input placeholder="e.g. Base Airport" />
+              <AutoComplete options={locOpts} placeholder="Select or type a location"
+                filterOption={(i, o) => (o?.value ?? '').toLowerCase().includes(i.toLowerCase())} />
             </Form.Item>
             <Form.Item name="arrival_location" label="To" rules={[{ required: true }]}>
-              <Input placeholder="e.g. Platform Alpha" />
+              <AutoComplete options={locOpts} placeholder="Select or type a location"
+                filterOption={(i, o) => (o?.value ?? '').toLowerCase().includes(i.toLowerCase())} />
             </Form.Item>
             <Form.Item name="departure_time" label="Departure Time" rules={[{ required: true }]}>
               <DatePicker showTime style={{ width: '100%' }} />
@@ -803,7 +807,7 @@ export default function TransportManifest() {
       <Card
         title={
           <div>
-            <div style={{ fontWeight: 700, fontSize: 16 }}>Transport Manifest &amp; Reconciliation</div>
+            <div style={{ fontWeight: 700, fontSize: 16 }}>Journey Management &amp; Reconciliation</div>
             <div style={{ fontSize: 12, color: '#64748b', fontWeight: 400, marginTop: 2 }}>
               Helideck / gangway check-in — maintain accurate POB count
             </div>

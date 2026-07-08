@@ -556,18 +556,8 @@ export default function POBStatus() {
             <Empty description="No attendance data available" style={{ padding: '32px 0' }} />
           ) : (
             <ResponsiveContainer width="100%" height={260}>
-              <AreaChart data={trendData} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
-                <defs>
-                  <linearGradient id="gradCI" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%"  stopColor={C.onshore}  stopOpacity={0.25} />
-                    <stop offset="95%" stopColor={C.onshore}  stopOpacity={0.02} />
-                  </linearGradient>
-                  <linearGradient id="gradCO" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%"  stopColor={C.overdue}  stopOpacity={0.25} />
-                    <stop offset="95%" stopColor={C.overdue}  stopOpacity={0.02} />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="#F0F0F0" />
+              <BarChart data={trendData} margin={{ top: 8, right: 16, left: 0, bottom: 0 }} barGap={2}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#F0F0F0" vertical={false} />
                 <XAxis
                   dataKey="day"
                   tick={{ fontSize: 11 }}
@@ -577,9 +567,9 @@ export default function POBStatus() {
                 <YAxis tick={{ fontSize: 11 }} />
                 <RechartTooltip content={<TrendTooltip />} />
                 <Legend />
-                <Area type="monotone" dataKey="check_ins"  name="Check Ins"  stroke={C.onshore} fill="url(#gradCI)" strokeWidth={2} dot={false} />
-                <Area type="monotone" dataKey="check_outs" name="Check Outs" stroke={C.overdue} fill="url(#gradCO)" strokeWidth={2} dot={false} />
-              </AreaChart>
+                <Bar dataKey="check_ins"  name="Check Ins"  fill={C.onshore} radius={[3, 3, 0, 0]} maxBarSize={18} />
+                <Bar dataKey="check_outs" name="Check Outs" fill={C.overdue} radius={[3, 3, 0, 0]} maxBarSize={18} />
+              </BarChart>
             </ResponsiveContainer>
           )}
         </Card>

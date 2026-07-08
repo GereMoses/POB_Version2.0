@@ -603,6 +603,7 @@ async def update_personnel(
     personnel_id: int,
     personnel_data: PersonnelUpdate,
     db: Session = Depends(get_db),
+    current_user = Depends(get_current_user),
 ) -> Dict[str, Any]:
     """Update employee — BioTime-standard fields"""
     person = db.query(Personnel).filter(Personnel.id == personnel_id).first()
@@ -640,9 +641,15 @@ async def update_personnel(
         "passport_number": "passport_number",
     }
 
+    # Snapshot the old value of each field about to change, for the audit trail (#1).
+    _to_j = lambda v: v if isinstance(v, (str, int, float, bool, type(None))) else str(v)
+    changed = {}
     for schema_field, db_field in field_map.items():
         if schema_field in data:
-            setattr(person, db_field, data[schema_field])
+            old, new = getattr(person, db_field, None), data[schema_field]
+            if old != new:
+                changed[db_field] = (_to_j(old), _to_j(new))
+            setattr(person, db_field, new)
 
     # Keep derived fields in sync
     if "first_name" in data or "last_name" in data:
@@ -652,6 +659,23 @@ async def update_personnel(
 
     db.commit()
     db.refresh(person)
+
+    # Record who changed which fields (old → new). Best-effort: never fail the update.
+    if changed:
+        try:
+            await audit_trail_service.create_audit_entry(
+                personnel_id=person.id,
+                event_type="PROFILE_UPDATE",
+                description=f"Updated {len(changed)} field(s): {', '.join(changed.keys())}",
+                old_values={k: v[0] for k, v in changed.items()},
+                new_values={k: v[1] for k, v in changed.items()},
+                user_id=getattr(current_user, "id", None),
+                db=db,
+            )
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning("Audit log for personnel %s failed: %s", person.id, e)
+
     return _person_to_dict(person)
 
 

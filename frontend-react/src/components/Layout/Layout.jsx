@@ -76,16 +76,19 @@ const NAV_GROUPS = [
           { key: '/personnel/disciplinary-management',icon: <WarningOutlined />,          label: 'Disciplinary' },
           { key: '/personnel/promotion-transfer',     icon: <SwapOutlined />,             label: 'Promotion/Transfer' },
           { key: '/personnel/employment-contract',    icon: <FileTextOutlined />,         label: 'Contracts' },
-          { key: '/personnel/benefits-management',    icon: <GiftOutlined />,             label: 'Benefits' },
+          // Hidden per Netcom walkthrough action #6 — benefits handled in SeamlessHR:
+          // { key: '/personnel/benefits-management',    icon: <GiftOutlined />,             label: 'Benefits' },
           { key: '/personnel/departments',            icon: <ApartmentOutlined />,        label: 'Departments' },
           { key: '/personnel/positions',              icon: <TeamOutlined />,             label: 'Positions' },
           { key: '/personnel/resignation',            icon: <FileTextOutlined />,         label: 'Resignation' },
           { key: '/personnel/custom-attributes',      icon: <SettingOutlined />,          label: 'Custom Attributes' },
           { key: '/personnel/onboarding',             icon: <SafetyCertificateOutlined />,label: 'Onboarding' },
-          { key: '/personnel/vendors',                icon: <ToolOutlined />,             label: 'Contractor/Vendor' },
+          // Hidden per Netcom walkthrough action #8 — vendor master lives in Business Central:
+          // { key: '/personnel/vendors',                icon: <ToolOutlined />,             label: 'Contractor/Vendor' },
         ],
       },
-      { key: '/payroll', icon: <DollarOutlined />, label: 'Payroll', permission: 'payroll.view' },
+      // Hidden per Netcom walkthrough action #6 — payroll handled in SeamlessHR:
+      // { key: '/payroll', icon: <DollarOutlined />, label: 'Payroll', permission: 'payroll.view' },
     ],
   },
   {
@@ -93,9 +96,10 @@ const NAV_GROUPS = [
     items: [
       { key: '/attendance',          icon: <ClockCircleOutlined />, label: 'Attendance',            permission: 'attendance.view' },
       { key: '/zones',               icon: <GlobalOutlined />,      label: 'Zones' },
-      { key: '/transport-manifest',  icon: <IdcardOutlined />,      label: 'Transport Manifest' },
+      { key: '/transport-manifest',  icon: <IdcardOutlined />,      label: 'Journey Management' },
       { key: '/emergency-response',  icon: <AlertOutlined />,       label: 'Emergency & Mustering', permission: 'emergency.view' },
-      { key: '/mtd',                 icon: <MedicineBoxOutlined />, label: 'MTD' },
+      // Hidden per Netcom walkthrough action #7 — MTD is outside client scope / duplicates existing systems:
+      // { key: '/mtd',                 icon: <MedicineBoxOutlined />, label: 'MTD' },
     ],
   },
   {

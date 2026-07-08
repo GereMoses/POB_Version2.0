@@ -46,6 +46,7 @@ if (!document.getElementById(CSS_ID)) {
     .t-loc    { grid-column:span 4; }
     .t-zone   { grid-column:span 4; }
     .t-net    { grid-column:span 4; }
+    .t-stale  { grid-column:span 4; }
 
     .apex-blob { position:absolute; border-radius:50%; filter:blur(72px); opacity:.5; pointer-events:none; z-index:0; }
     .apex-blob-1 { width:380px; height:380px; top:-90px; left:-50px; background:radial-gradient(circle,#22d3ee,transparent 70%); }
@@ -56,7 +57,7 @@ if (!document.getElementById(CSS_ID)) {
       .apex-bento{ grid-template-columns:repeat(8,1fr); }
       .t-hero{grid-column:span 4;} .t-kpi{grid-column:span 2;}
       .t-trend,.t-24h,.t-feed{grid-column:span 8;}
-      .t-methods,.t-dev,.t-comp,.t-emerg,.t-loc,.t-zone,.t-net{grid-column:span 4;}
+      .t-methods,.t-dev,.t-comp,.t-emerg,.t-loc,.t-zone,.t-net,.t-stale{grid-column:span 4;}
     }
     @media (max-width:760px){
       .apex-bento{ grid-template-columns:1fr; }
@@ -198,6 +199,10 @@ export default function Dashboard() {
     queryKey: ['dash-zones'], queryFn: () => apiService.get('/api/v1/zones/dashboard'),
     refetchInterval: POLL, refetchOnWindowFocus: false,
   });
+  const { data: lastActRaw } = useQuery({
+    queryKey: ['dash-last-activity'], queryFn: () => apiService.get('/api/v1/pob-status/last-activity?limit=50'),
+    refetchInterval: POLL, refetchOnWindowFocus: false,
+  });
 
   const [alertDismissed, setAlertDismissed] = useState(false);
 
@@ -206,6 +211,7 @@ export default function Dashboard() {
   // /api/device/terminals/ returns { data: [...], total } — not a bare array.
   const devices = Array.isArray(devRaw) ? devRaw : (devRaw?.data ?? []);
   const tx = txRaw?.data ?? [];
+  const lastSeen = lastActRaw?.data ?? [];
   const totalPersonnel = persRaw?.count ?? pob.total_personnel ?? 0;
   const online = devices.filter(d => d.state === 1 || d.status === 'online');
   const offline = devices.filter(d => d.state !== 1 && d.status !== 'online');
@@ -426,24 +432,14 @@ export default function Dashboard() {
           <div style={{ flex: 1, minHeight: 200 }}>
             {trend30.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No data" style={{ marginTop: 50 }} /> : (
               <ResponsiveContainer width="100%" height={210}>
-                <AreaChart data={trend30} margin={{ top: 6, right: 8, left: -18, bottom: 0 }}>
-                  <defs>
-                    <linearGradient id="gIn" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="#22c55e" stopOpacity={0.35} />
-                      <stop offset="100%" stopColor="#22c55e" stopOpacity={0} />
-                    </linearGradient>
-                    <linearGradient id="gOut" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="#3b82f6" stopOpacity={0.3} />
-                      <stop offset="100%" stopColor="#3b82f6" stopOpacity={0} />
-                    </linearGradient>
-                  </defs>
+                <BarChart data={trend30} margin={{ top: 6, right: 8, left: -18, bottom: 0 }} barGap={2}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#eef2f7" vertical={false} />
                   <XAxis dataKey="day" tick={{ fontSize: 10, fill: '#94a3b8' }} axisLine={false} tickLine={false} interval="preserveStartEnd" minTickGap={24} />
                   <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }} axisLine={false} tickLine={false} width={34} />
                   <Tooltip {...chartTooltip} />
-                  <Area type="monotone" dataKey="checkIn" name="Check In" stroke="#22c55e" strokeWidth={2.5} fill="url(#gIn)" />
-                  <Area type="monotone" dataKey="checkOut" name="Check Out" stroke="#3b82f6" strokeWidth={2.5} fill="url(#gOut)" />
-                </AreaChart>
+                  <Bar dataKey="checkIn" name="Check In" fill="#22c55e" radius={[3, 3, 0, 0]} maxBarSize={14} />
+                  <Bar dataKey="checkOut" name="Check Out" fill="#3b82f6" radius={[3, 3, 0, 0]} maxBarSize={14} />
+                </BarChart>
               </ResponsiveContainer>
             )}
           </div>
@@ -586,6 +582,32 @@ export default function Dashboard() {
                       {m.icon} {m.label}
                     </Tag>
                     <div style={{ fontSize: 11, color: '#cbd5e1', width: 60, textAlign: 'right', flexShrink: 0 }}>{relativeTime(t.punch_time)}</div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+        </div>
+
+        {/* ── Longest since last seen (early missing-person signal) ── */}
+        <div className="apex-tile t-stale click" onClick={() => navigate('/pob-status')}>
+          <TileHead title="Longest Since Last Seen" sub="On-site · idle 2h+ flagged" navigate={navigate} path="/pob-status" />
+          <div className="apex-scroll" style={{ flex: 1, overflowY: 'auto', maxHeight: 340 }}>
+            {lastSeen.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No on-site personnel" style={{ marginTop: 60 }} /> : (
+              lastSeen.slice(0, 20).map((r, i) => {
+                const col = r.stale ? '#dc2626' : '#64748b';
+                return (
+                  <div key={r.id || i} className="apex-feed-row" style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '8px 8px' }}>
+                    <Avatar size={36} src={r.photo_url} style={{ background: `${col}1a`, color: col, flexShrink: 0 }}>
+                      {(r.name?.[0] || '?').toUpperCase()}
+                    </Avatar>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: '#0f172a', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{r.name}</div>
+                      <div style={{ fontSize: 11, color: '#94a3b8' }}>{r.location}{r.department && r.department !== '—' ? ` · ${r.department}` : ''}</div>
+                    </div>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: col, width: 82, textAlign: 'right', flexShrink: 0 }}>
+                      {r.never_seen ? 'never seen' : relativeTime(r.last_event)}
+                    </div>
                   </div>
                 );
               })
