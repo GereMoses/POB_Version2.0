@@ -123,3 +123,9 @@ UPDATE public.vis_pre_registration SET approval_by = NULL
   WHERE approval_by IS NOT NULL AND approval_by NOT IN (SELECT id FROM public.auth_user);
 ALTER TABLE public.vis_pre_registration ADD CONSTRAINT vis_pre_registration_approval_by_fkey
   FOREIGN KEY (approval_by) REFERENCES public.auth_user(id);
+
+-- ── Access-control doors: reference a controller + port (not just a terminal) ──
+-- Access-control readers are dumb readers wired to a controller, so a door is a
+-- (controller, port) unit. Additive columns; terminal_sn kept for legacy T&A doors.
+ALTER TABLE public.acc_door ADD COLUMN IF NOT EXISTS controller_id integer REFERENCES public.access_controllers(id);
+ALTER TABLE public.acc_door ADD COLUMN IF NOT EXISTS port integer;

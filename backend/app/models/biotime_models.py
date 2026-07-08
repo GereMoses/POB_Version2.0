@@ -229,7 +229,9 @@ class AccDoor(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(50), nullable=False)
-    terminal_sn = Column(String(20), ForeignKey("iclock_terminal.sn"))
+    terminal_sn = Column(String(20), ForeignKey("iclock_terminal.sn"))  # legacy: standalone/T&A door
+    controller_id = Column(Integer, ForeignKey("access_controllers.id"), nullable=True, index=True)  # C3/inBio panel
+    port = Column(Integer, nullable=True)  # door_no / reader port on the controller
     acc_level_id = Column(Integer, ForeignKey("acc_level.id"))
     mustering_mode = Column(Boolean, default=False)
     emergency_action = Column(SmallInteger, default=0)  # 0=none, 1=lock, 2=unlock

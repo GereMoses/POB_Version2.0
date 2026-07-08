@@ -117,6 +117,14 @@ const DoorSettings = () => {
   });
   const terminals = termData?.data || (Array.isArray(termData) ? termData : []);
 
+  // Access controllers (C3/inBio panels) — a door is a port on a controller.
+  const { data: ctrlData } = useQuery({
+    queryKey: ['ac-controllers'],
+    queryFn: () => apiService.get('/api/v1/access-controllers'),
+    refetchInterval: 60_000,
+  });
+  const controllers = Array.isArray(ctrlData) ? ctrlData : (ctrlData?.data || []);
+
   // Recent events for the selected door
   const { data: eventsData, isFetching: eventsFetching } = useQuery({
     queryKey: ['acc-door-events', selId],
@@ -405,71 +413,45 @@ const DoorSettings = () => {
           <Form.Item name="door_name" label="Door Name" rules={[{ required: true, message: 'Required' }]}>
             <Input size="large" placeholder="e.g. Main Entrance" />
           </Form.Item>
-          <Form.Item name="terminal_sn" label="Device / Terminal" rules={[{ required: true, message: 'Select a terminal' }]}>
+          <Form.Item name="controller_id" label="Controller" rules={[{ required: true, message: 'Select a controller' }]}>
             <Select
-              showSearch
-              optionFilterProp="label"
-              size="large"
-              disabled={!adding}
-              placeholder="Select terminal"
-              notFoundContent={
-                terminals.length === 0
-                  ? <div style={{ padding: '12px 16px', color: '#8c8c8c', textAlign: 'center' }}>
-                      <InfoCircleOutlined style={{ marginRight: 6 }} />
-                      No terminals registered yet. Approve a device in the Devices section first.
-                    </div>
-                  : <Empty description="No match" />
-              }
+              showSearch optionFilterProp="label" size="large" disabled={!adding}
+              placeholder="Select controller"
+              onChange={() => form.setFieldsValue({ port: undefined })}
+              notFoundContent={controllers.length === 0
+                ? <div style={{ padding: '12px 16px', color: '#8c8c8c', textAlign: 'center' }}>
+                    <InfoCircleOutlined style={{ marginRight: 6 }} />
+                    No controllers yet. Add one under Access Control &rarr; Controllers.
+                  </div>
+                : <Empty description="No match" />}
             >
-              {terminals.map(t => {
-                const rpInfo = READER_PURPOSE_LABELS[t.reader_purpose];
-                const inUse  = !!t.door_name;
-                return (
-                  <Option
-                    key={t.sn}
-                    value={t.sn}
-                    label={`${t.alias || t.sn} ${t.sn}`}
-                  >
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '2px 0' }}>
-                      {/* Online dot */}
-                      <div style={{
-                        width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
-                        background: t.is_online ? '#52c41a' : '#d9d9d9',
-                      }} />
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontWeight: 600, fontSize: 13 }}>
-                          {t.alias || t.sn}
-                          <span style={{ fontFamily: 'monospace', fontSize: 11, color: '#8c8c8c', marginLeft: 6 }}>
-                            {t.sn}
-                          </span>
-                        </div>
-                        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 2 }}>
-                          {t.is_online
-                            ? <Tag color="success" style={{ fontSize: 10, padding: '0 4px', margin: 0 }}>Online</Tag>
-                            : <Tag color="error"   style={{ fontSize: 10, padding: '0 4px', margin: 0 }}>
-                                Offline {t.last_seen ? `· ${fmtLastSeen(t.last_seen)}` : ''}
-                              </Tag>
-                          }
-                          {rpInfo && (
-                            <Tag style={{ fontSize: 10, padding: '0 4px', margin: 0, color: rpInfo.color, borderColor: rpInfo.color }}>
-                              {rpInfo.label}
-                            </Tag>
-                          )}
-                          {t.zone_name && (
-                            <Tag color="blue" style={{ fontSize: 10, padding: '0 4px', margin: 0 }}>{t.zone_name}</Tag>
-                          )}
-                          {inUse && (
-                            <Tag color="warning" style={{ fontSize: 10, padding: '0 4px', margin: 0 }}>
-                              In use: {t.door_name}
-                            </Tag>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  </Option>
-                );
-              })}
+              {controllers.map(c => (
+                <Option key={c.id} value={c.id} label={`${c.name} ${c.serial_number || ''}`}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '2px 0' }}>
+                    <div style={{ width: 8, height: 8, borderRadius: '50%', flexShrink: 0, background: c.status === 'online' ? '#52c41a' : '#d9d9d9' }} />
+                    <span style={{ fontWeight: 600, fontSize: 13 }}>{c.name}</span>
+                    <span style={{ fontFamily: 'monospace', fontSize: 11, color: '#8c8c8c' }}>{c.model || c.serial_number || ''}</span>
+                    <Tag style={{ fontSize: 10, marginLeft: 'auto' }}>{c.door_count || 0} doors</Tag>
+                  </div>
+                </Option>
+              ))}
             </Select>
+          </Form.Item>
+          <Form.Item noStyle dependencies={['controller_id']}>
+            {({ getFieldValue }) => {
+              const cid = getFieldValue('controller_id');
+              const ctrl = controllers.find(c => c.id === cid);
+              const doorCount = ctrl?.door_count || 0;
+              return (
+                <Form.Item name="port" label="Terminal / Port" rules={[{ required: true, message: 'Select a port' }]}>
+                  <Select size="large" disabled={!cid || !adding} placeholder={cid ? 'Select port' : 'Select a controller first'}>
+                    {Array.from({ length: doorCount }, (_, k) => k + 1).map(p => (
+                      <Option key={p} value={p}>Port {p}</Option>
+                    ))}
+                  </Select>
+                </Form.Item>
+              );
+            }}
           </Form.Item>
         </div>
 

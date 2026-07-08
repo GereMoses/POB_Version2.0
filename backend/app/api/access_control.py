@@ -100,7 +100,9 @@ class LevelBody(BaseModel):
     is_active: bool = True
 
 class DoorBody(BaseModel):
-    terminal_sn: str
+    terminal_sn: Optional[str] = None      # legacy standalone/T&A door
+    controller_id: Optional[int] = None    # C3/inBio panel the reader is wired to
+    port: Optional[int] = None             # door_no / port on that controller
     door_name: str
     relay_time: int = 5
     door_sensor_type: int = 0
@@ -490,6 +492,8 @@ async def get_ac_terminals(db: Session = Depends(get_db), current_user=Depends(g
 
 _DOOR_COLS = """
     d.id, d.name AS door_name, d.terminal_sn, d.acc_level_id,
+    d.controller_id, d.port,
+    (SELECT name FROM access_controllers ac WHERE ac.id = d.controller_id) AS controller_name,
     d.relay_time, d.door_sensor_type, d.alarm_delay, d.open_duration,
     d.anti_passback, d.first_card_open, d.interlock_group,
     d.emergency_action, d.mustering_mode, d.fire_linkage,
@@ -516,19 +520,32 @@ async def get_doors(db: Session = Depends(get_db), current_user=Depends(get_curr
 
 @router.post("/doors/")
 async def create_door(body: DoorBody, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
-    term = db.execute(text("SELECT sn FROM iclock_terminal WHERE sn = :sn"), {"sn": body.terminal_sn}).fetchone()
-    if not term:
-        raise HTTPException(404, "Terminal not found")
+    # A door belongs to a controller port (preferred) or a legacy standalone terminal.
+    if body.controller_id is not None:
+        ctrl = db.execute(text("SELECT id FROM access_controllers WHERE id = :id"),
+                          {"id": body.controller_id}).fetchone()
+        if not ctrl:
+            raise HTTPException(404, "Controller not found")
+        if body.port is None:
+            raise HTTPException(400, "Select the controller port for this door")
+    elif body.terminal_sn:
+        term = db.execute(text("SELECT sn FROM iclock_terminal WHERE sn = :sn"),
+                          {"sn": body.terminal_sn}).fetchone()
+        if not term:
+            raise HTTPException(404, "Terminal not found")
+    else:
+        raise HTTPException(400, "Select a controller and port (or a terminal) for the door")
     row = db.execute(text("""
         INSERT INTO acc_door
-          (name, terminal_sn, relay_time, door_sensor_type, alarm_delay,
+          (name, terminal_sn, controller_id, port, relay_time, door_sensor_type, alarm_delay,
            open_duration, anti_passback, first_card_open, interlock_group,
            emergency_action, mustering_mode, fire_linkage)
         VALUES
-          (:name, :tsn, :rt, :dst, :ad, :od, :apb, :fco, :ig, :ea, :mm, :fl)
+          (:name, :tsn, :cid, :port, :rt, :dst, :ad, :od, :apb, :fco, :ig, :ea, :mm, :fl)
         RETURNING *
     """), {
         "name": body.door_name, "tsn": body.terminal_sn,
+        "cid": body.controller_id, "port": body.port,
         "rt": body.relay_time, "dst": body.door_sensor_type,
         "ad": body.alarm_delay, "od": body.open_duration,
         "apb": body.anti_passback, "fco": body.first_card_open,
@@ -559,13 +576,15 @@ async def update_door(door_id: int, body: DoorBody, db: Session = Depends(get_db
         raise HTTPException(404, "Door not found")
     row = db.execute(text("""
         UPDATE acc_door SET
-          name=:name, relay_time=:rt, door_sensor_type=:dst, alarm_delay=:ad,
+          name=:name, controller_id=:cid, port=:port,
+          relay_time=:rt, door_sensor_type=:dst, alarm_delay=:ad,
           open_duration=:od, anti_passback=:apb, first_card_open=:fco,
           interlock_group=:ig, emergency_action=:ea, mustering_mode=:mm,
           fire_linkage=:fl, updated_at=NOW()
         WHERE id=:id RETURNING *
     """), {
-        "name": body.door_name, "rt": body.relay_time, "dst": body.door_sensor_type,
+        "name": body.door_name, "cid": body.controller_id, "port": body.port,
+        "rt": body.relay_time, "dst": body.door_sensor_type,
         "ad": body.alarm_delay, "od": body.open_duration, "apb": body.anti_passback,
         "fco": body.first_card_open, "ig": body.interlock_group, "ea": body.emergency_action,
         "mm": body.mustering_mode, "fl": body.fire_linkage, "id": door_id,
