@@ -335,6 +335,29 @@ def get_available_devices(db: Session = Depends(get_db), _=Depends(get_current_u
     ]
 
 
+@router.get("/available-doors")
+def get_available_doors(db: Session = Depends(get_db), _=Depends(get_current_user)):
+    """All controller doors, with their controller and current zone (if any).
+    A door is a (controller, door_no) unit; access-control zones are fed by doors,
+    not readers directly (controller port → door → zone)."""
+    rows = db.execute(text("""
+        SELECT ar.controller_id, ac.name AS controller_name, ar.door_no,
+               MAX(ar.zone_id) AS zone_id
+        FROM access_readers ar
+        JOIN access_controllers ac ON ac.id = ar.controller_id
+        GROUP BY ar.controller_id, ac.name, ar.door_no
+        ORDER BY ac.name, ar.door_no
+    """)).fetchall()
+    return [{
+        "controller_id": r.controller_id,
+        "controller_name": r.controller_name,
+        "door_no": r.door_no,
+        "label": f"{r.controller_name} — Door {r.door_no}",
+        "zone_id": r.zone_id,
+        "already_assigned": r.zone_id is not None,
+    } for r in rows]
+
+
 @router.get("/hierarchy")
 def get_hierarchy(db: Session = Depends(get_db), _=Depends(get_current_user)):
     zones = db.query(Zone).filter(Zone.is_active == True).order_by(Zone.name).all()
@@ -743,6 +766,63 @@ def _sync_zone_to_access_control(zone_id: int, db: Session) -> None:
               WHERE t.zone_id = :zid
           )
     """), {"azid": acc_zone_id, "zid": zone_id})
+
+
+# ── Zone ↔ Door assignment (controller port → door → zone) ─────────────────────
+# Access-control zones are fed by DOORS, not readers directly. A door is a
+# (controller, door_no) unit on a C3/inBio panel; assigning it to a zone maps that
+# door's reader ports (access_readers) to the zone.
+
+@router.get("/{zone_id}/doors")
+def get_zone_doors(zone_id: int, db: Session = Depends(get_db), _=Depends(get_current_user)):
+    """Doors mapped to this zone (grouped controller/door_no)."""
+    rows = db.execute(text("""
+        SELECT ar.controller_id, ac.name AS controller_name, ar.door_no
+        FROM access_readers ar
+        JOIN access_controllers ac ON ac.id = ar.controller_id
+        WHERE ar.zone_id = :zid
+        GROUP BY ar.controller_id, ac.name, ar.door_no
+        ORDER BY ac.name, ar.door_no
+    """), {"zid": zone_id}).fetchall()
+    return [{
+        "controller_id": r.controller_id,
+        "controller_name": r.controller_name,
+        "door_no": r.door_no,
+        "label": f"{r.controller_name} — Door {r.door_no}",
+    } for r in rows]
+
+
+@router.post("/{zone_id}/assign-door")
+def assign_door(zone_id: int, body: dict, db: Session = Depends(get_db), _=Depends(get_current_user)):
+    """Assign a controller door to this zone (maps its reader ports to the zone)."""
+    zone = db.query(Zone).filter(Zone.id == zone_id).first()
+    if not zone:
+        raise HTTPException(status_code=404, detail="Zone not found")
+    cid, dn = body.get("controller_id"), body.get("door_no")
+    if cid is None or dn is None:
+        raise HTTPException(status_code=400, detail="controller_id and door_no are required")
+    n = db.execute(text(
+        "UPDATE access_readers SET zone_id = :zid, updated_at = now() "
+        "WHERE controller_id = :cid AND door_no = :dn"
+    ), {"zid": zone_id, "cid": cid, "dn": dn}).rowcount
+    db.commit()
+    if not n:
+        raise HTTPException(status_code=404, detail="Door not found on that controller")
+    return {"message": "Door assigned to zone", "zone_id": zone_id,
+            "controller_id": cid, "door_no": dn, "ports_updated": n}
+
+
+@router.delete("/{zone_id}/doors")
+def remove_zone_door(zone_id: int, controller_id: int = Query(...), door_no: int = Query(...),
+                     db: Session = Depends(get_db), _=Depends(get_current_user)):
+    """Unassign a door from this zone."""
+    n = db.execute(text(
+        "UPDATE access_readers SET zone_id = NULL, updated_at = now() "
+        "WHERE controller_id = :cid AND door_no = :dn AND zone_id = :zid"
+    ), {"cid": controller_id, "dn": door_no, "zid": zone_id}).rowcount
+    db.commit()
+    return {"message": "Door removed from zone" if n else "Door was not assigned to this zone",
+            "ports_updated": n}
 
 
 @router.get("/{zone_id}/readers")

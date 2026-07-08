@@ -322,7 +322,7 @@ const ZoneCard = ({ zone, onView, onEdit, onAssignReader, onDelete, onStatusChan
         {[
           { icon: <EyeOutlined />, label: 'Detail', color: '#0078D4', onClick: () => onView(zone) },
           { icon: <EditOutlined />, label: 'Edit', color: '#10B981', onClick: () => onEdit(zone) },
-          { icon: <ApiOutlined />, label: 'Readers', color: '#7C3AED', onClick: () => onAssignReader(zone) },
+          { icon: <ApiOutlined />, label: 'Doors', color: '#7C3AED', onClick: () => onAssignReader(zone) },
         ].map(btn => (
           <button key={btn.label} onClick={btn.onClick} style={{
             all: 'unset', textAlign: 'center', padding: '9px 4px',
@@ -2580,9 +2580,22 @@ const ZoneManagement = () => {
     enabled:  isReaderModalOpen && !!readerZone?.id,
   });
 
+  const { data: doorsData } = useQuery({
+    queryKey: ['available-doors'],
+    queryFn:  () => apiService.get('/api/v1/zones/available-doors'),
+    enabled: isReaderModalOpen,
+  });
+  const { data: modalDoorsData, isLoading: modalDoorsLoading } = useQuery({
+    queryKey: ['zone-doors', readerZone?.id],
+    queryFn:  () => apiService.get(`/api/v1/zones/${readerZone?.id}/doors`),
+    enabled:  isReaderModalOpen && !!readerZone?.id,
+  });
+
   const zones = Array.isArray(dashData) ? dashData : [];
   const devices = Array.isArray(devicesData) ? devicesData : [];
   const currentModalReaders = Array.isArray(modalReadersData) ? modalReadersData : [];
+  const availableDoors = Array.isArray(doorsData) ? doorsData : [];
+  const currentModalDoors = Array.isArray(modalDoorsData) ? modalDoorsData : [];
 
   const musterPoints = useMemo(() => zones.filter(z => z.zone_type === 'MUSTER_POINT'), [zones]);
 
@@ -2698,6 +2711,36 @@ const ZoneManagement = () => {
       queryClient.invalidateQueries({ queryKey: ['available-devices'] });
     },
     onError: err => message.error(err?.message || 'Failed to remove reader'),
+  });
+
+  const assignDoorMutation = useMutation({
+    mutationFn: (values) => {
+      const keys = Array.isArray(values.door) ? values.door : [values.door];
+      return Promise.all(keys.map(k => {
+        const [cid, dn] = String(k).split(':').map(Number);
+        return apiService.post(`/api/v1/zones/${readerZone?.id}/assign-door`, { controller_id: cid, door_no: dn });
+      }));
+    },
+    onSuccess: () => {
+      message.success('Door(s) assigned to zone');
+      readerForm.resetFields();
+      queryClient.invalidateQueries({ queryKey: ['zones-dashboard'] });
+      queryClient.invalidateQueries({ queryKey: ['zone-doors', readerZone?.id] });
+      queryClient.invalidateQueries({ queryKey: ['available-doors'] });
+    },
+    onError: err => message.error(err?.message || 'Assignment failed'),
+  });
+
+  const removeDoorMutation = useMutation({
+    mutationFn: ({ zoneId, controllerId, doorNo }) =>
+      apiService.delete(`/api/v1/zones/${zoneId}/doors?controller_id=${controllerId}&door_no=${doorNo}`),
+    onSuccess: () => {
+      message.success('Door removed from zone');
+      queryClient.invalidateQueries({ queryKey: ['zone-doors', readerZone?.id] });
+      queryClient.invalidateQueries({ queryKey: ['zones-dashboard'] });
+      queryClient.invalidateQueries({ queryKey: ['available-doors'] });
+    },
+    onError: err => message.error(err?.message || 'Failed to remove door'),
   });
 
   const patchStatusM = useMutation({
@@ -3622,60 +3665,53 @@ const ZoneManagement = () => {
 
       {/* ── Assign Reader Modal ── */}
       <Modal
-        title={<Space><ApiOutlined style={{ color: '#7C3AED' }} />Readers — {readerZone?.name}</Space>}
+        title={<Space><ApiOutlined style={{ color: '#7C3AED' }} />Doors — {readerZone?.name}</Space>}
         open={isReaderModalOpen}
-        onOk={() => readerForm.validateFields().then(assignReaderMutation.mutate).catch(() => {})}
+        onOk={() => readerForm.validateFields().then(assignDoorMutation.mutate).catch(() => {})}
         onCancel={() => { setIsReaderModalOpen(false); readerForm.resetFields(); }}
-        okText="Assign Selected" confirmLoading={assignReaderMutation.isPending}
+        okText="Assign Selected" confirmLoading={assignDoorMutation.isPending}
         width={620} destroyOnHidden
       >
-        {/* ── Currently assigned readers ── */}
+        {/* ── Currently assigned doors ── */}
         <div style={{ marginBottom: 20 }}>
           <div style={{ fontWeight: 600, fontSize: 13, color: '#374151', marginBottom: 10, display: 'flex', alignItems: 'center', gap: 6 }}>
             <ApiOutlined style={{ color: '#7C3AED' }} />
-            Assigned Readers
-            <Tag color="purple" style={{ marginLeft: 4, fontSize: 11 }}>{currentModalReaders.length}</Tag>
+            Assigned Doors
+            <Tag color="purple" style={{ marginLeft: 4, fontSize: 11 }}>{currentModalDoors.length}</Tag>
           </div>
-          {modalReadersLoading ? (
+          {modalDoorsLoading ? (
             <div style={{ textAlign: 'center', padding: '16px 0', color: '#9CA3AF', fontSize: 12 }}>Loading…</div>
-          ) : currentModalReaders.length === 0 ? (
+          ) : currentModalDoors.length === 0 ? (
             <div style={{ background: '#F9FAFB', border: '1px dashed #D1D5DB', borderRadius: 8, padding: '14px 16px', textAlign: 'center', color: '#9CA3AF', fontSize: 12 }}>
-              No readers assigned to this zone yet
+              No doors assigned to this zone yet
             </div>
           ) : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {currentModalReaders.map(r => {
-                const purposeColors = { ACCESS_ENTRY: '#10B981', ACCESS_EXIT: '#EF4444', MUSTERING: '#F59E0B', ATTENDANCE: '#6B7280', POB: '#3B82F6', EMERGENCY: '#DC2626' };
-                const purposeLabels = { ACCESS_ENTRY: 'Entry', ACCESS_EXIT: 'Exit', MUSTERING: 'Muster', ATTENDANCE: 'T&A', POB: 'POB', EMERGENCY: 'Emergency' };
-                const color = purposeColors[r.reader_purpose] || '#6B7280';
-                return (
-                  <div key={r.reader_id} style={{ display: 'flex', alignItems: 'center', gap: 10, background: '#F9FAFB', border: '1px solid #E5E7EB', borderRadius: 8, padding: '8px 12px' }}>
-                    <div style={{ width: 8, height: 8, borderRadius: '50%', background: r.status === 'online' ? '#10B981' : '#D1D5DB', flexShrink: 0 }} />
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <span style={{ fontWeight: 600, fontSize: 13 }}>{r.alias}</span>
-                      <code style={{ fontSize: 11, color: '#9CA3AF', marginLeft: 8 }}>{r.sn}</code>
-                    </div>
-                    <Tag color={color} style={{ fontSize: 11, flexShrink: 0 }}>{purposeLabels[r.reader_purpose] || r.reader_purpose}</Tag>
-                    <Popconfirm
-                      title="Remove this reader from the zone?"
-                      onConfirm={() => removeReaderModalMutation.mutate({ zoneId: readerZone.id, readerId: r.reader_id })}
-                      okText="Remove" cancelText="Cancel" okButtonProps={{ danger: true }}
-                    >
-                      <Button type="text" danger size="small" icon={<DeleteOutlined />} loading={removeReaderModalMutation.isPending} />
-                    </Popconfirm>
+              {currentModalDoors.map(d => (
+                <div key={`${d.controller_id}:${d.door_no}`} style={{ display: 'flex', alignItems: 'center', gap: 10, background: '#F9FAFB', border: '1px solid #E5E7EB', borderRadius: 8, padding: '8px 12px' }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <span style={{ fontWeight: 600, fontSize: 13 }}>Door {d.door_no}</span>
+                    <span style={{ fontSize: 11, color: '#9CA3AF', marginLeft: 8 }}>{d.controller_name}</span>
                   </div>
-                );
-              })}
+                  <Popconfirm
+                    title="Remove this door from the zone?"
+                    onConfirm={() => removeDoorMutation.mutate({ zoneId: readerZone.id, controllerId: d.controller_id, doorNo: d.door_no })}
+                    okText="Remove" cancelText="Cancel" okButtonProps={{ danger: true }}
+                  >
+                    <Button type="text" danger size="small" icon={<DeleteOutlined />} loading={removeDoorMutation.isPending} />
+                  </Popconfirm>
+                </div>
+              ))}
             </div>
           )}
         </div>
 
         <Divider style={{ margin: '0 0 16px' }} />
 
-        {/* ── Assign new readers ── */}
+        {/* ── Assign new doors ── */}
         <div style={{ fontWeight: 600, fontSize: 13, color: '#374151', marginBottom: 12, display: 'flex', alignItems: 'center', gap: 6 }}>
           <PlusOutlined style={{ color: '#7C3AED' }} />
-          Add Readers to Zone
+          Add Doors to Zone
         </div>
         <div style={{
           background: 'linear-gradient(135deg,#F5F3FF,#EDE9FE)',
@@ -3684,46 +3720,32 @@ const ZoneManagement = () => {
           display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#6D28D9',
         }}>
           <WifiOutlined />
-          Assigned readers automatically update this zone's POB count in real time via ADMS.
+          Access doors map controller events to this zone (controller port → door → zone). Standalone Horus H1 readers go to mustering points, not here.
         </div>
         <Form form={readerForm} layout="vertical">
-          <Form.Item name="device_id" label="Select Readers (one or more)" rules={[{ required: true, message: 'Please select at least one device' }]}>
+          <Form.Item name="door" label="Select Doors (one or more)" rules={[{ required: true, message: 'Please select at least one door' }]}>
             <Select
-              mode="multiple" placeholder="Choose devices to assign" showSearch
+              mode="multiple" placeholder="Choose doors to assign" showSearch
               optionFilterProp="label" size="large" maxTagCount={4}
             >
-              {devices
-                .filter(d => !currentModalReaders.some(r => r.reader_id === d.id))
+              {availableDoors
+                .filter(d => !currentModalDoors.some(cd => cd.controller_id === d.controller_id && cd.door_no === d.door_no))
                 .map(d => (
-                  <Select.Option key={d.id} value={d.id} label={`${d.alias} ${d.sn}`}>
+                  <Select.Option key={`${d.controller_id}:${d.door_no}`} value={`${d.controller_id}:${d.door_no}`} label={d.label}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                       <div style={{
                         width: 24, height: 24, borderRadius: 5, flexShrink: 0,
-                        background: d.state === 1 ? 'linear-gradient(135deg,#059669,#10B981)' : 'linear-gradient(135deg,#6B7280,#9CA3AF)',
+                        background: 'linear-gradient(135deg,#7C3AED,#A78BFA)',
                         display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'white', fontSize: 11,
                       }}><ApiOutlined /></div>
-                      <span style={{ fontWeight: 500 }}>{d.alias}</span>
-                      <code style={{ fontSize: 11, color: '#9CA3AF' }}>{d.sn}</code>
+                      <span style={{ fontWeight: 500 }}>Door {d.door_no}</span>
+                      <code style={{ fontSize: 11, color: '#9CA3AF' }}>{d.controller_name}</code>
                       {d.already_assigned && (
                         <Tag color="orange" style={{ marginLeft: 'auto', fontSize: 10 }}>In another zone</Tag>
                       )}
                     </div>
                   </Select.Option>
                 ))}
-            </Select>
-          </Form.Item>
-          <Form.Item
-            name="reader_purpose" label="Reader Role" initialValue="ACCESS_ENTRY"
-            rules={[{ required: true, message: 'Select reader role' }]}
-            tooltip="Applied to all selected readers"
-          >
-            <Select size="large">
-              <Select.Option value="ACCESS_ENTRY"><span style={{ color: '#10B981', fontWeight: 600 }}>▶ Entry Reader</span><span style={{ color: '#6B7280', fontSize: 11, marginLeft: 8 }}>Person entering zone</span></Select.Option>
-              <Select.Option value="ACCESS_EXIT"><span style={{ color: '#EF4444', fontWeight: 600 }}>◀ Exit Reader</span><span style={{ color: '#6B7280', fontSize: 11, marginLeft: 8 }}>Person leaving zone</span></Select.Option>
-              <Select.Option value="ATTENDANCE"><span style={{ color: '#6B7280', fontWeight: 600 }}>⏱ T&amp;A Reader</span><span style={{ color: '#6B7280', fontSize: 11, marginLeft: 8 }}>Time &amp; Attendance only</span></Select.Option>
-              <Select.Option value="MUSTERING"><span style={{ color: '#F59E0B', fontWeight: 600 }}>🔔 Muster Reader</span><span style={{ color: '#6B7280', fontSize: 11, marginLeft: 8 }}>Emergency mustering</span></Select.Option>
-              <Select.Option value="POB"><span style={{ color: '#3B82F6', fontWeight: 600 }}>⚓ POB Reader</span><span style={{ color: '#6B7280', fontSize: 11, marginLeft: 8 }}>Personnel on board tracking</span></Select.Option>
-              <Select.Option value="EMERGENCY"><span style={{ color: '#DC2626', fontWeight: 600 }}>🚨 Emergency Reader</span><span style={{ color: '#6B7280', fontSize: 11, marginLeft: 8 }}>Emergency response only</span></Select.Option>
             </Select>
           </Form.Item>
         </Form>
