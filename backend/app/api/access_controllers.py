@@ -7,7 +7,7 @@ different hardware, different protocol (C3 PULL, not ADMS push), different topol
 (one IP → many door readers).
 """
 
-from typing import List
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
@@ -233,6 +233,42 @@ def open_door(controller_id: int, door_no: int, duration: int = 5, db: Session =
         except Exception as exc:  # noqa: BLE001
             return {"success": False, "error": str(exc)}
     return c3.open_door(ctrl.ip_address, door_no, duration, ctrl.port or 4370, ctrl.comm_password or "")
+
+
+@router.post("/{controller_id}/enroll", summary="Push personnel (users + cards) to the controller")
+def enroll_personnel(controller_id: int, body: Optional[dict] = None, db: Session = Depends(get_db)):
+    """Enrol personnel onto this access panel so they can badge at its doors.
+
+    Body may include ``{"emp_codes": [...]}`` to limit the set; default = all
+    active employees that have an emp_code. The employee's ``emp_code`` is used as
+    the C3 'pin' (kept identical to the biometric/SeamlessHR identity), ``card_no``
+    as the card, and every door on the controller is authorised.
+    """
+    ctrl = db.query(AccessController).filter(AccessController.id == controller_id).first()
+    if not ctrl:
+        raise HTTPException(status_code=404, detail="Controller not found")
+    if not c3_zkaccess.sdk_available():
+        raise HTTPException(status_code=503, detail="C3 driver (zkaccess-c3) unavailable")
+
+    from ..models.biotime_models import PersonnelEmployee
+    q = db.query(PersonnelEmployee).filter(PersonnelEmployee.emp_code.isnot(None))
+    emp_codes = (body or {}).get("emp_codes")
+    if emp_codes:
+        q = q.filter(PersonnelEmployee.emp_code.in_(emp_codes))
+    people = q.limit(5000).all()
+    users = [{
+        "pin": p.emp_code,
+        "card_no": p.card_no,
+        "name": (f"{p.first_name or ''} {p.last_name or ''}".strip())[:24],
+    } for p in people]
+
+    door_nos = list(range(1, (ctrl.door_count or 1) + 1))
+    result = c3_zkaccess.enroll_users(
+        ctrl.ip_address, users, door_nos=door_nos,
+        port=ctrl.port or 4370, password=ctrl.comm_password or "",
+    )
+    result["prepared"] = len(users)
+    return result
 
 
 @router.post("/{controller_id}/poll")

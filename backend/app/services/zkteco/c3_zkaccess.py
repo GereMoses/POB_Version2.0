@@ -23,6 +23,26 @@ from .c3_controller import C3Event
 
 logger = logging.getLogger(__name__)
 
+# C3 PULL "SetDeviceData" write op. The pure-Python library implements GETDATA (8)
+# but not the write; this is the control code that follows it in the protocol.
+# VERIFY the write framing against the customer's C3-200/C3-400 before production
+# enrolment — until then every write is guarded so a wrong frame only fails a record.
+_C3_CMD_SETDATA = 9
+
+
+def _encode_field(ftype: str, value) -> bytes:
+    """Encode one field value as [size_byte][value_bytes] — the same field-size
+    framing the panel uses when it returns data (see the library's get_device_data)."""
+    if ftype == "i":
+        try:
+            iv = int(value)
+        except (TypeError, ValueError):
+            iv = 0
+        b = iv.to_bytes(4, "little").rstrip(b"\x00") or b"\x00"
+        return bytes([len(b)]) + b
+    s = str(value if value is not None else "").encode("ascii", errors="ignore")
+    return bytes([len(s)]) + s
+
 
 def sdk_available() -> bool:
     """True if the pure-Python zkaccess-c3 library is importable."""
@@ -97,6 +117,60 @@ class ZKAccessC3Client:
         )
         return True
 
+    # ── Enrolment: push users/cards so personnel can badge (write path) ────────
+    def push_users(self, users, door_nos=None, timezone_id: int = 1) -> dict:
+        """Upload user + card records to the panel so they can badge at its doors.
+
+        users: iterable of dicts {pin, card_no, name?, group?}. door_nos: door
+        numbers to authorise (default = door 1). Returns {pushed, failed:[...]}.
+
+        The pure-Python driver has no write op, so this issues SetDeviceData over the
+        library transport against the `user` and `userauthorize` data tables (read
+        live from the panel's own config), encoding records in the panel's field-size
+        format. Every record is guarded: a rejected/mis-framed write fails only that
+        record and is reported — it can never crash the backend.
+        """
+        cfgs = {cf.name.lower(): cf for cf in self._c3._get_device_data_cfg()}
+        ucfg = cfgs.get("user")
+        acfg = cfgs.get("userauthorize")
+        if ucfg is None:
+            raise RuntimeError("panel exposes no 'user' data table (has: %s)" % ",".join(cfgs) or "none")
+        pushed, failed = 0, []
+        for u in users:
+            pin = str(u.get("pin") or "").strip()
+            if not pin:
+                continue
+            try:
+                self._set_record(ucfg, {
+                    "pin": pin,
+                    "cardno": str(u.get("card_no") or ""),
+                    "name": str(u.get("name") or "")[:24],
+                    "group": u.get("group") or 1,
+                })
+                if acfg is not None:
+                    for dn in (door_nos or [1]):
+                        self._set_record(acfg, {
+                            "pin": pin,
+                            "authorizetimezoneid": int(timezone_id),
+                            "authorizedoorid": int(dn),
+                        })
+                pushed += 1
+            except Exception as exc:  # noqa: BLE001
+                failed.append({"pin": pin, "error": str(exc)[:200]})
+        return {"pushed": pushed, "failed": failed}
+
+    def _set_record(self, cfg, values: dict) -> None:
+        """SetDeviceData for one record. `values` are keyed by lowercased field name;
+        only fields the panel actually exposes are sent. VERIFY framing on hardware."""
+        fields = sorted((f for f in cfg.fields if f.name.lower() in values), key=lambda f: f.index)
+        if not fields:
+            raise RuntimeError("no writable fields matched on table '%s'" % cfg.name)
+        payload = bytearray([cfg.index, len(fields)])
+        payload += bytes(f.index for f in fields)
+        for f in fields:
+            payload += _encode_field(f.type, values[f.name.lower()])
+        self._c3._send_receive(_C3_CMD_SETDATA, list(payload))
+
     def info(self) -> dict:
         c = self._c3
         return {"serial": getattr(c, "serial_number", None), "name": getattr(c, "device_name", None),
@@ -113,6 +187,20 @@ def test_connection(ip: str, port: int = 4370, password: str = "") -> dict:
                 "events_buffered": len(events), **meta}
     except Exception as exc:  # noqa: BLE001
         return {"success": False, "error": str(exc)}
+
+
+def enroll_users(ip: str, users, door_nos=None, port: int = 4370, password: str = "",
+                 timezone_id: int = 1) -> dict:
+    """Connect and push user/card records to a panel so personnel can badge.
+    Never raises — returns {success, pushed, failed} or {success: False, error}."""
+    try:
+        with ZKAccessC3Client(ip, port, password) as c:
+            res = c.push_users(users, door_nos=door_nos, timezone_id=timezone_id)
+        return {"success": True, **res}
+    except Exception as exc:  # noqa: BLE001
+        return {"success": False, "error": str(exc),
+                "note": "C3 SetDeviceData write is verify-on-hardware — confirm the write "
+                        "framing against the C3-200/C3-400 panel."}
 
 
 def probe(ip: str, port: int = 4370, password: str = "") -> dict:
