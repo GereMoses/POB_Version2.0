@@ -26,6 +26,7 @@ from ..models.biotime_models import (
     AuthUser, PersonnelEmployee, BaseOperationLog
 )
 from ..models.zone import Zone
+from ..models.access_controller import AccessController, AccessReader
 from ..core.database import get_db
 from ..services.zkteco.biometric_service import ZKTecoBiometricService
 from ..services.emergency_websocket import emergency_websocket_manager
@@ -150,6 +151,72 @@ class EmergencyService:
             logger.error(f"Error getting emergency dashboard: {str(e)}")
             raise
 
+    @staticmethod
+    def _dedupe_doors(doors: List[AccDoor]) -> List[AccDoor]:
+        """Preserve order, drop duplicate AccDoor rows by id."""
+        seen, out = set(), []
+        for d in doors:
+            if d.id not in seen:
+                seen.add(d.id)
+                out.append(d)
+        return out
+
+    def _controller_doors_for_zones(self, db: Session, zone_ids: List[int]) -> List[AccDoor]:
+        """Access-control doors whose controller port maps to a reader in `zone_ids`.
+
+        A door is a (controller_id, port) unit; a zone owns controller ports via
+        AccessReader (controller_id, door_no, zone_id). Match port == door_no.
+        """
+        if not zone_ids:
+            return []
+        reader_ports = db.query(
+            AccessReader.controller_id, AccessReader.door_no
+        ).filter(AccessReader.zone_id.in_(zone_ids)).distinct().all()
+        pairs = {(c, d) for c, d in reader_ports}
+        if not pairs:
+            return []
+        candidates = db.query(AccDoor).filter(
+            AccDoor.controller_id.in_({c for c, _ in pairs}),
+            AccDoor.port.isnot(None),
+        ).all()
+        return [d for d in candidates if (d.controller_id, d.port) in pairs]
+
+    async def _command_controller_door(
+        self, db: Session, door: AccDoor, action: str
+    ) -> Tuple[bool, Optional[str]]:
+        """Emergency-command an access-control door via its C3 controller.
+
+        Run off the event loop so a blocking panel connect can never starve the
+        request workers. Uses the proven ControlDeviceOutput verb: duration 255
+        holds the door open for egress (unlock); duration 0 returns it to the
+        fail-secure locked state (lock). An unreachable panel is reported as a
+        failed door — it is never silently treated as done.
+        """
+        from ..services.zkteco import c3_zkaccess
+        ctrl = db.query(AccessController).filter(
+            AccessController.id == door.controller_id
+        ).first()
+        if not ctrl:
+            return False, "Controller not found"
+
+        duration = 255 if action == "unlock" else 0
+
+        def _send():
+            with c3_zkaccess.ZKAccessC3Client(
+                ctrl.ip_address, ctrl.port or 4370, ctrl.comm_password or ""
+            ) as c:
+                return c.open_door(int(door.port), duration)
+
+        try:
+            await asyncio.to_thread(_send)
+            return True, None
+        except Exception as e:  # noqa: BLE001 — panel error must not abort the lockdown
+            logger.error(
+                f"Controller door {door.id} (ctrl {door.controller_id} port {door.port}) "
+                f"{action} failed: {e}"
+            )
+            return False, str(e)
+
     async def execute_lockdown(
         self, 
         scope: str,
@@ -176,12 +243,20 @@ class EmergencyService:
                 target_doors = db.query(AccDoor).all()
                 scope_enum = EmergencyScope.GLOBAL.value
             elif scope == "zone" and zone_ids:
-                target_doors = db.query(AccDoor).join(IClockTerminal).filter(
+                # Two door kinds map to a zone: legacy T&A/standalone doors via their
+                # terminal's zone_id, and access-control doors via a controller port
+                # (controller_id + port) mapped to an AccessReader in the zone.
+                terminal_doors = db.query(AccDoor).join(IClockTerminal).filter(
                     IClockTerminal.zone_id.in_(zone_ids)
                 ).all()
+                target_doors = self._dedupe_doors(
+                    terminal_doors + self._controller_doors_for_zones(db, zone_ids)
+                )
                 scope_enum = EmergencyScope.ZONE.value
             elif scope == "location" and location_ids:
                 # Location = personnel_area: lock every door on terminals in those areas.
+                # (Controllers carry a free-text location, not an area_id, so
+                # location scope stays terminal-based; use zone or global for panels.)
                 target_doors = db.query(AccDoor).join(IClockTerminal).filter(
                     IClockTerminal.area_id.in_(location_ids)
                 ).all()
@@ -225,16 +300,33 @@ class EmergencyService:
             
             for door in target_doors:
                 try:
+                    # Access-control door (controller + port): command the C3 panel
+                    # directly (off-thread), honouring the door's emergency_action.
+                    if getattr(door, "controller_id", None) and door.port is not None:
+                        want = 1 if action == "lock" else 2
+                        if door.emergency_action != want:
+                            continue  # this door isn't configured for this action
+                        ok, err = await self._command_controller_door(db, door, action)
+                        if ok:
+                            processed_doors.append(door.id)
+                        else:
+                            failed_doors.append({
+                                "door_id": door.id,
+                                "door_name": door.name,
+                                "error": err,
+                            })
+                        continue
+
                     # Queue command to ZKTeco device
                     terminal = door.terminal
                     if not terminal:
                         failed_doors.append({
                             "door_id": door.id,
-                            "door_name": door.door_name,
+                            "door_name": door.name,
                             "error": "No terminal associated"
                         })
                         continue
-                    
+
                     # Determine command based on action and door emergency_action
                     if action == "lock":
                         # Lock doors with emergency_action=1 (LOCK)
@@ -247,7 +339,7 @@ class EmergencyService:
                             else:
                                 failed_doors.append({
                                     "door_id": door.id,
-                                    "door_name": door.door_name,
+                                    "door_name": door.name,
                                     "error": cmd_result.get("error", "Command failed")
                                 })
                     elif action == "unlock":
@@ -261,14 +353,14 @@ class EmergencyService:
                             else:
                                 failed_doors.append({
                                     "door_id": door.id,
-                                    "door_name": door.door_name,
+                                    "door_name": door.name,
                                     "error": cmd_result.get("error", "Command failed")
                                 })
                     
                 except Exception as e:
                     failed_doors.append({
                         "door_id": door.id,
-                        "door_name": door.door_name,
+                        "door_name": door.name,
                         "error": str(e)
                     })
                     logger.error(f"Error processing door {door.id}: {str(e)}")
@@ -401,6 +493,10 @@ class EmergencyService:
                         if door.terminal:
                             await self.zkteco_queue_command(door.terminal.sn, "RELAY_ON")
                             results["unlocked_doors"] += 1
+                        elif door.controller_id and door.port is not None:
+                            ok, _err = await self._command_controller_door(db, door, "unlock")
+                            if ok:
+                                results["unlocked_doors"] += 1
                         sp.commit()
                     except Exception as e:
                         logger.error(f"Error unlocking fire exit {door.id}: {str(e)}")
@@ -425,6 +521,10 @@ class EmergencyService:
                         if door.terminal:
                             await self.zkteco_queue_command(door.terminal.sn, "RELAY_OFF")
                             results["locked_doors"] += 1
+                        elif door.controller_id and door.port is not None:
+                            ok, _err = await self._command_controller_door(db, door, "lock")
+                            if ok:
+                                results["locked_doors"] += 1
                         sp.commit()
                     except Exception as e:
                         logger.error(f"Error locking danger zone {door.id}: {str(e)}")
