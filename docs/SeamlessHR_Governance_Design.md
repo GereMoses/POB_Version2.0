@@ -3,7 +3,7 @@
 **Project:** Marconi.NG EPC POB & Mustering (MARC/SA/69/2026)
 **Prepared for:** Netcom Africa Limited follow-up review
 **Prepared by:** Tekktopia
-**Status:** Draft for review · Version 0.1
+**Status:** Draft for review · Version 0.2 (adds Appendix A — SeamlessHR API alignment)
 **Addresses walkthrough actions:** #2, #3, #4, #5, #8, #15
 
 ---
@@ -133,7 +133,7 @@ Remaining employee write paths (`update_employee`, status/location endpoints) ar
 
 | # | Decision | Owner | Blocks |
 |---|---|---|---|
-| D1 | SeamlessHR API credentials + base URL + field mapping | Netcom / Client | #2, #4, #5, #15 |
+| D1 | SeamlessHR **sandbox `x-client-id` / `x-client-secret`** to enumerate the full employee schema and confirm the field map (see Appendix A) | Netcom / Client | #2, #4, #5, #15 |
 | D2 | Confirm conflict‑resolution UX (per‑field prompt as in §6) | Netcom + Tekktopia | #3 |
 | D3 | Which entities are pulled read‑only vs. allowed as local supplements (shifts?) | Client | #2 |
 | D4 | Business Central API access for the vendor pool | Netcom / Client | #8 |
@@ -154,4 +154,63 @@ Remaining employee write paths (`update_employee`, status/location endpoints) ar
 
 ---
 
-*End of design — v0.1. Once D1–D5 are answered, this converts into a build plan with firm estimates for Sprint 3.*
+## Appendix A — SeamlessHR API alignment (researched July 2026)
+
+Sourced from the official SeamlessHR API docs (`docs.seamlesshr.com`). The public reference exposes the endpoints and identity fields but **not the full employee field schema** — a sandbox credential is required to enumerate it (see the checklist at A.6).
+
+### A.1 API facts
+| | |
+|---|---|
+| Base URLs | Production `https://api.seamlesshr.app` · Sandbox `https://api-sandbox.seamlesshr.app` · version prefix `/v1/` |
+| Auth | Custom request headers **`x-client-id`** + **`x-client-secret`** (not OAuth / bearer); provisioned by SeamlessHR support |
+| Transport | REST / HTTPS, JSON |
+| Change feed | **Polling only** — no webhooks documented, and **no "updated-since" filter** (only `date` = *creation* date, plus employment/exit-date ranges) |
+| Pagination | `?page=` + `?limit=` (default 10); `q` searches firstname / lastname / employee_code / email |
+
+### A.2 Endpoints we consume
+- **Employees:** `GET /v1/employees`, `GET /v1/employees/{id}`, `PUT /v1/employees/{id}`, `…/activate`, `…/deactivate`, `…/exit`
+- **HRIS masters (pull read-only):** `GET /v1/departments`, `GET /v1/job-roles` (designations → positions), `GET /v1/contract-types`
+- Adjacent groups: `/v1/leave`, `/v1/payroll`, `/v1/performance` (leave is the read-only entity of interest)
+
+### A.3 Identity alignment (the linchpin)
+> **SeamlessHR `employee_code` ≡ Apex `emp_code` ≡ ZKTeco device user id.**
+
+If these three agree, the employee table is a clean read-only mirror. If Apex auto-generated its own `emp_code`s for locally-created staff, those become duplicate/merge cases at the reconciliation import (§6, decision D5).
+
+### A.4 Field mapping (SHR → Apex `personnel`)
+| SeamlessHR | Source | Apex field | Owner |
+|---|---|---|---|
+| `employee_code` | /v1/employees | `emp_code` (join key) | SHR |
+| `firstname` / `lastname` | /v1/employees | `first_name` / `last_name` | SHR |
+| `email`, `phone` | /v1/employees | `email`, `phone` | SHR |
+| department | /v1/departments | `department` / `department_id` | SHR |
+| job-role / designation | /v1/job-roles | `position` | SHR |
+| `employment_date` | /v1/employees | `hire_date` | SHR |
+| `exit_status` / `exit_date`, activate/deactivate | /v1/employees + …/exit | `is_active` (+ auto-revoke access) | SHR |
+| contract-type | /v1/contract-types | Contracts module | SHR |
+| gender, DOB, nationality, ID / passport, grade | /v1/employees/{id} | `nationality`, `id_number`, `passport_number`, … (confirm on probe) | SHR |
+| — (not in SHR) | — | `is_onboard`, `current_location`, `current_zone_id`, `pob_since`, `badge_id`, biometric templates, mustering / attendance | **Apex (operational)** |
+
+**Ownership split:** SeamlessHR owns *who they are*; Apex POB owns *where they are and whether they're safe*.
+
+### A.5 Alignment / finetuning actions
+1. Add a `source` column to `personnel` (`seamlesshr` / `business_central` / `local`) to drive read-only enforcement (§7) — no such column exists today (`personnel_type` may carry the pool distinction).
+2. Pull `departments` + `job-roles` from SHR **before** employees, so Apex stores SHR IDs, not free text.
+3. **Verify `emp_code` == device user id** on the ZKTeco readers — the highest-risk item; misalignment breaks attendance reconciliation.
+4. Sync engine: full paginated pulls + local diff (no updated-since / webhooks); use `date` / `exit_date` filters to catch new / exited employees.
+5. Write to `personnel` and let the existing `sync_personnel_to_employee()` DB trigger mirror to `personnel_employee`.
+
+### A.6 Sandbox-probe checklist (run once credentials arrive — decision D1)
+1. Obtain sandbox `x-client-id` / `x-client-secret` from SeamlessHR support.
+2. `GET {sandbox}/v1/employees?limit=1` → capture the **full JSON of one employee** and enumerate every field + type.
+3. `GET {sandbox}/v1/employees/{id}` → confirm any extra fields on the single-employee object.
+4. `GET /v1/departments`, `/v1/job-roles`, `/v1/contract-types` → capture their id / name shapes.
+5. Confirm the response envelope + pagination meta (total / last_page).
+6. Compare a sample of `employee_code`s against the emp_codes enrolled on the readers.
+7. Finalise the §A.4 mapping and populate the connector's `options` JSONB config — no code change needed to onboard (the connector is config-driven).
+
+**Sources:** docs.seamlesshr.com — /reference/introduction, /reference/authentication, /reference/api-structure, /reference/fetch-employees, /llms.txt
+
+---
+
+*End of design — v0.2. Once D1–D5 are answered, this converts into a build plan with firm estimates for Sprint 3.*
