@@ -70,18 +70,25 @@ const NAV_GROUPS = [
         key: 'personnel-group', icon: <TeamOutlined />, label: 'Personnel', permission: 'personnel.view',
         children: [
           { key: '/personnel',                        icon: <UserOutlined />,             label: 'Employees' },
-          { key: '/personnel/leave-management',       icon: <CalendarOutlined />,         label: 'Leave Management' },
+          // Hidden per Netcom review (#6 — leave handled in SeamlessHR):
+          // { key: '/personnel/leave-management',       icon: <CalendarOutlined />,         label: 'Leave Management' },
           { key: '/personnel/training-management',    icon: <BookOutlined />,             label: 'Training' },
-          { key: '/personnel/performance-management', icon: <StarOutlined />,             label: 'Performance' },
-          { key: '/personnel/disciplinary-management',icon: <WarningOutlined />,          label: 'Disciplinary' },
-          { key: '/personnel/promotion-transfer',     icon: <SwapOutlined />,             label: 'Promotion/Transfer' },
-          { key: '/personnel/employment-contract',    icon: <FileTextOutlined />,         label: 'Contracts' },
+          // Hidden per Netcom review (2026-07-08):
+          // { key: '/personnel/performance-management', icon: <StarOutlined />,             label: 'Performance' },
+          // Hidden per Netcom review (2026-07-08):
+          // { key: '/personnel/disciplinary-management',icon: <WarningOutlined />,          label: 'Disciplinary' },
+          // Hidden per Netcom review (2026-07-08):
+          // { key: '/personnel/promotion-transfer',     icon: <SwapOutlined />,             label: 'Promotion/Transfer' },
+          // Hidden per Netcom review (2026-07-08):
+          // { key: '/personnel/employment-contract',    icon: <FileTextOutlined />,         label: 'Contracts' },
           // Hidden per Netcom walkthrough action #6 — benefits handled in SeamlessHR:
           // { key: '/personnel/benefits-management',    icon: <GiftOutlined />,             label: 'Benefits' },
           { key: '/personnel/departments',            icon: <ApartmentOutlined />,        label: 'Departments' },
           { key: '/personnel/positions',              icon: <TeamOutlined />,             label: 'Positions' },
-          { key: '/personnel/resignation',            icon: <FileTextOutlined />,         label: 'Resignation' },
-          { key: '/personnel/custom-attributes',      icon: <SettingOutlined />,          label: 'Custom Attributes' },
+          // Hidden per Netcom review (2026-07-08):
+          // { key: '/personnel/resignation',            icon: <FileTextOutlined />,         label: 'Resignation' },
+          // Hidden per Netcom review (2026-07-08):
+          // { key: '/personnel/custom-attributes',      icon: <SettingOutlined />,          label: 'Custom Attributes' },
           { key: '/personnel/onboarding',             icon: <SafetyCertificateOutlined />,label: 'Onboarding' },
           // Hidden per Netcom walkthrough action #8 — vendor master lives in Business Central:
           // { key: '/personnel/vendors',                icon: <ToolOutlined />,             label: 'Contractor/Vendor' },
