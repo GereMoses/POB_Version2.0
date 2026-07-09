@@ -1237,6 +1237,16 @@ def _ensure_access_control_records(
         ), {"sn": sn}).fetchone()
 
         if not door_row:
+            # acc_door.terminal_sn FKs to iclock_terminal.sn. Controller-wired
+            # readers use a synthetic sn (e.g. "AC3-D1-E") that has no terminal —
+            # their occupancy is tracked via zone_personnel_tracking + current_zone_id,
+            # not this legacy acc_door/ACZones view. Skip (no FK error, no rollback)
+            # when there's no matching terminal to attach the door to.
+            term = db.execute(text(
+                "SELECT 1 FROM iclock_terminal WHERE sn = :sn LIMIT 1"
+            ), {"sn": sn}).fetchone()
+            if not term:
+                return None
             door_name = f"{terminal_alias or sn} ({'Entry' if direction == 'ENTRY' else 'Exit'})"[:50]
             door_row = db.execute(text("""
                 INSERT INTO acc_door (name, terminal_sn)

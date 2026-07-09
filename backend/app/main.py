@@ -915,6 +915,13 @@ async def startup_event():
         _background_tasks.append(asyncio.create_task(_supervised("device_poller", poller_loop)))
         logger.info("✅ ZKTeco device poller started (leader, auto-restart on crash)")
 
+        # C3/inBio access controllers are PULL-only (no ADMS push) — this loop pulls
+        # their realtime events into the shared zone engine so controller badges
+        # update current_zone_id + occupancy just like ADMS readers do.
+        from .services.access_controller_ingest import controller_poller_loop
+        _background_tasks.append(asyncio.create_task(_supervised("controller_poller", controller_poller_loop)))
+        logger.info("✅ Access-controller poller started (leader, auto-restart on crash)")
+
         from .services.zkteco.live_capture import live_capture_supervisor
         _background_tasks.append(asyncio.create_task(_supervised("live_capture_supervisor", live_capture_supervisor)))
         logger.info("✅ ZKTeco live capture supervisor started (leader, auto-restart on crash)")

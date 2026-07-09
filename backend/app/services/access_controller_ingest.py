@@ -10,8 +10,10 @@ totals and mustering stay consistent across both reader families.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+import time as _time
 from datetime import datetime
 from types import SimpleNamespace
 from typing import Dict, List
@@ -209,6 +211,64 @@ def poll_controller_once(controller: AccessController, db: Session) -> Dict[str,
     db.commit()
     result["zone_updates"] = all_updates
     return result
+
+
+def _poll_controller_by_id(controller_id: int) -> Dict[str, object]:
+    """Fresh-session poll of one controller — safe to run in a worker thread.
+
+    Each poll owns its own Session so a blocking C3 connect can run off the event
+    loop without sharing a session across threads.
+    """
+    from ..core.database import SessionLocal
+    db = SessionLocal()
+    try:
+        ctrl = db.query(AccessController).filter(AccessController.id == controller_id).first()
+        if not ctrl:
+            return {"controller_id": controller_id, "error": "not found"}
+        return poll_controller_once(ctrl, db)
+    finally:
+        db.close()
+
+
+async def controller_poller_loop() -> None:
+    """Leader-only loop: poll every ``poll_enabled`` access controller for buffered
+    C3/inBio events on its own ``poll_interval_sec``, feeding the SAME zone engine
+    the ADMS readers use. This is what makes a badge at a controller-wired reader
+    update ``personnel.current_zone_id`` + zone occupancy in near-real time — the
+    pull-side equivalent of the ADMS push path.
+
+    Each due controller is polled off the event loop (``asyncio.to_thread``) with a
+    fresh session, so a slow or offline panel can neither block the loop nor corrupt
+    a shared session. Runs under ``_supervised`` so a crash auto-restarts.
+    """
+    logger.info("Access-controller poller started — first check in 5s, then per-controller interval")
+    last_polled: Dict[int, float] = {}
+    first = True
+    while True:
+        await asyncio.sleep(5 if first else 2)  # base tick; per-controller interval gates actual polls
+        first = False
+        try:
+            from ..core.database import SessionLocal
+            db = SessionLocal()
+            try:
+                enabled = db.query(
+                    AccessController.id, AccessController.poll_interval_sec
+                ).filter(AccessController.poll_enabled == True).all()  # noqa: E712
+            finally:
+                db.close()
+        except Exception as exc:  # noqa: BLE001 — a listing hiccup must not kill the loop
+            logger.error("controller poller: could not list controllers: %s", exc)
+            continue
+
+        now = _time.monotonic()
+        for cid, interval in enabled:
+            interval = interval or 5
+            if now - last_polled.get(cid, 0.0) >= interval:
+                last_polled[cid] = now
+                try:
+                    await asyncio.to_thread(_poll_controller_by_id, cid)
+                except Exception as exc:  # noqa: BLE001 — isolate per-controller failures
+                    logger.warning("controller %s poll error: %s", cid, exc)
 
 
 # Sanity bound — a real panel won't address more doors than this; protects against

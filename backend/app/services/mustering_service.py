@@ -16,7 +16,7 @@ from app.models.biotime_models import (
     PersonnelEmployee, IClockTerminal, AccDoor, AuthUser, PersonnelDepartment,
     IClockTransaction,
 )
-from app.models.zone import Zone
+from app.models.zone import Zone, ZonePersonnelAssignment
 from app.models.personnel import Personnel
 
 logger = logging.getLogger(__name__)
@@ -411,6 +411,7 @@ class MusteringService:
                 existing_log.device_sn = device_sn
                 existing_log.device_alias = device.alias
                 existing_log.status = 1  # Safe
+                existing_log.last_punch_area = zone.name  # credit the muster point they scanned at
                 
                 # Update event counts atomically
                 if old_status == 0:  # Was missing
@@ -432,7 +433,8 @@ class MusteringService:
                     check_time=check_time,
                     device_sn=device_sn,
                     device_alias=device.alias,
-                    status=1  # Safe
+                    status=1,  # Safe
+                    last_punch_area=zone.name,  # credit the muster point they scanned at
                 )
                 self.db.add(log)
                 
@@ -874,14 +876,16 @@ class MusteringService:
     def _calculate_expected_personnel(self, zone_ids: List[int]) -> List[Dict[str, Any]]:
         """Return personnel expected to muster for the given work zones.
 
-        Strategy (two-tier):
-        1. Primary: personnel whose current_zone_id is in the selected zones — set
-           by access-control readers when someone badges through a zone gate.
-        2. Fallback: if no zone-assigned personnel are found (readers not yet
-           updating current_zone_id, or zone IDs are muster points), fall back to
-           ALL personnel with is_onboard=True.  This ensures the expected list is
-           never empty on a live offshore installation where people are present but
-           readers haven't been fully configured.
+        Strategy (three-tier — first tier that yields anyone wins):
+        1. Live location: personnel whose current_zone_id is in the selected zones —
+           set by access-control readers (ADMS or C3 controller) when someone badges
+           through a zone gate. Accurate once readers are connected.
+        2. Roster: personnel with an ACTIVE zone_personnel_assignments row for the
+           selected zones. Lets zone selection scope the muster BEFORE live readers
+           are populating current_zone_id (assign people to zones administratively).
+        3. Fallback: ALL personnel with is_onboard=True. Safety net so the expected
+           list is never empty on a live installation where people are present but
+           zones aren't wired/assigned yet.
         """
         try:
             def _build_rows(filter_clause):
@@ -894,16 +898,33 @@ class MusteringService:
                 )
 
             rows = _build_rows(Personnel.current_zone_id.in_(zone_ids))
+            used_source = "live_location"
 
             used_fallback = False
             if not rows:
+                # Tier 2 — administrative roster (works without live readers).
+                assigned_pids = [
+                    r[0] for r in self.db.query(ZonePersonnelAssignment.personnel_id)
+                    .filter(
+                        ZonePersonnelAssignment.zone_id.in_(zone_ids),
+                        ZonePersonnelAssignment.status == "ACTIVE",
+                        ZonePersonnelAssignment.unassigned_at.is_(None),
+                    ).distinct().all()
+                ]
+                if assigned_pids:
+                    rows = _build_rows(Personnel.id.in_(assigned_pids))
+                    if rows:
+                        used_source = "zone_assignment"
+
+            if not rows:
                 logger.warning(
-                    "Zones %s: no personnel have current_zone_id set — "
+                    "Zones %s: no personnel by current_zone_id or zone assignment — "
                     "falling back to all is_onboard=True personnel",
                     zone_ids,
                 )
                 rows = _build_rows(Personnel.is_onboard == True)
                 used_fallback = True
+                used_source = "all_onboard_fallback"
 
             expected = []
             for person, bio_emp, zone in rows:
