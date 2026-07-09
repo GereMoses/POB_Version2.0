@@ -562,6 +562,15 @@ const MusteringManagement = ({ embedded = false, onSectionSwitch }) => {
   const selectedEvent = events.find(e => e.id === selectedEventId) || activeEvents.find(e => e.id === selectedEventId);
   const elapsed = useElapsed(selectedEvent?.start_time, selectedEvent?.status === 0);
 
+  // Live map/panel shows only the zones THIS event involves — its affected/source
+  // zones plus the chosen target muster point — not every zone in the system.
+  const eventScopeIds = (selectedEvent && selectedEvent.status === 0)
+    ? new Set([...(selectedEvent.zone_ids || []), selectedEvent.muster_zone_id].filter(v => v != null))
+    : null;
+  const mapZones = (eventScopeIds && eventScopeIds.size)
+    ? zones.filter(z => eventScopeIds.has(z.id))
+    : zones;
+
   const filteredLogs = allLogs
     .filter(l => {
       if (!searchLog) return true;
@@ -1331,8 +1340,8 @@ const MusteringManagement = ({ embedded = false, onSectionSwitch }) => {
             {/* Right: Live Leaflet map */}
             <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
               <MusteringLiveMap
-                zones={zones}
-                activeZoneId={selectedEvent?.zone_id ?? null}
+                zones={mapZones}
+                activeZoneId={selectedEvent?.muster_zone_id ?? selectedEvent?.zone_id ?? null}
                 allLogs={allLogs}
                 isEventActive={selectedEvent?.status === 0}
                 zoneLiveCounts={zoneLiveCounts}
