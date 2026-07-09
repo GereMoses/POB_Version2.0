@@ -155,6 +155,10 @@ async def list_mustering_zones(
                 "evac_point": zone.evac_point,
                 "evac_gps": zone.evac_gps,
                 "zone_type": _MUSTER_ZONE_STR_MAP.get(zone.zone_type, 0),
+                # Raw zones.zone_type string (e.g. MUSTER_POINT, LOCATION) — the int
+                # zone_type above collapses several kinds to 0, so callers that need to
+                # tell a muster point from a work zone must use this.
+                "zone_kind": zone.zone_type,
                 "reader_sn": zone.reader_sn,
                 "description": zone.description,
                 "map_x": zone.map_x,

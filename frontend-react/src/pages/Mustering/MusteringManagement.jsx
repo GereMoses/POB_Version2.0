@@ -1950,13 +1950,13 @@ const MusteringManagement = ({ embedded = false, onSectionSwitch }) => {
               maxTagCount="responsive"
             >
               {zones
-                .filter(z => z.zone_type !== 'MUSTER_POINT')
+                .filter(z => z.zone_kind !== 'MUSTER_POINT')
                 .map(z => (
                   <Select.Option key={z.id} value={z.id} label={z.name}>
                     <span>{z.name}</span>
-                    {z.zone_type && (
+                    {z.zone_kind && (
                       <span style={{ marginLeft: 6, fontSize: 11, color: '#8c8c8c' }}>
-                        [{z.zone_type}]
+                        [{z.zone_kind}]
                       </span>
                     )}
                   </Select.Option>
@@ -1977,7 +1977,7 @@ const MusteringManagement = ({ embedded = false, onSectionSwitch }) => {
               placeholder="Select the muster point people evacuate to"
             >
               {zones
-                .filter(z => z.zone_type === 'MUSTER_POINT')
+                .filter(z => z.zone_kind === 'MUSTER_POINT')
                 .map(z => (
                   <Select.Option key={z.id} value={z.id} label={z.name}>{z.name}</Select.Option>
                 ))
