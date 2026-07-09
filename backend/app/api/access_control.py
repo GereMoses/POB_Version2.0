@@ -163,7 +163,7 @@ async def get_timezones(db: Session = Depends(get_db), current_user=Depends(get_
     return {"success": True, "data": _rows(rows)}
 
 
-@router.post("/timezones/")
+@router.post("/timezones")
 async def create_timezone(body: TimeZoneBody, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     fields = body.dict()
     cols = ", ".join(fields.keys())
@@ -230,7 +230,7 @@ async def get_levels(db: Session = Depends(get_db), current_user=Depends(get_cur
     return {"success": True, "data": _rows(rows)}
 
 
-@router.post("/levels/")
+@router.post("/levels")
 async def create_level(body: LevelBody, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     row = db.execute(text("""
         INSERT INTO acc_level (name, description, mustering_only, is_active)
@@ -299,7 +299,7 @@ async def get_level_doors(level_id: int, db: Session = Depends(get_db), current_
     return {"success": True, "data": _rows(rows)}
 
 
-@router.post("/levels/{level_id}/doors/")
+@router.post("/levels/{level_id}/doors")
 async def add_level_door(level_id: int, body: LevelDoorBody, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     existing = db.execute(text(
         "SELECT id FROM acc_level_door WHERE level_id=:l AND door_id=:d AND timezone_id=:t"
@@ -321,7 +321,7 @@ async def remove_level_door(level_id: int, pair_id: int, db: Session = Depends(g
     return {"success": True, "message": "Door removed from access level"}
 
 
-@router.post("/levels/{level_id}/copy/")
+@router.post("/levels/{level_id}/copy")
 async def copy_level(level_id: int, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     level = db.execute(text("SELECT * FROM acc_level WHERE id = :id"), {"id": level_id}).fetchone()
     if not level:
@@ -366,7 +366,7 @@ async def get_level_users(level_id: int, db: Session = Depends(get_db), current_
     return {"success": True, "data": _rows(rows)}
 
 
-@router.post("/levels/{level_id}/assign/")
+@router.post("/levels/{level_id}/assign")
 async def assign_level(level_id: int, body: UserLevelBody, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     level = db.execute(text("SELECT id FROM acc_level WHERE id = :id"), {"id": level_id}).fetchone()
     if not level:
@@ -518,7 +518,7 @@ async def get_doors(db: Session = Depends(get_db), current_user=Depends(get_curr
     return {"success": True, "data": _rows(rows)}
 
 
-@router.post("/doors/")
+@router.post("/doors")
 async def create_door(body: DoorBody, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     # A door belongs to a controller port (preferred) or a legacy standalone terminal.
     if body.controller_id is not None:
@@ -614,7 +614,7 @@ async def delete_door(
     return {"success": True, "message": "Door deleted"}
 
 
-@router.post("/doors/{door_id}/open/")
+@router.post("/doors/{door_id}/open")
 async def remote_open_door(door_id: int, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     # Require explicit access-control permission — authentication alone is not enough
     if not getattr(current_user, "is_superuser", False):
@@ -663,7 +663,7 @@ def _require_ac_permission(current_user, db) -> None:
         raise HTTPException(status_code=403, detail="Permission denied: access_control.change required")
 
 
-@router.post("/doors/{door_id}/sync/")
+@router.post("/doors/{door_id}/sync")
 async def sync_door(door_id: int, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     _require_ac_permission(current_user, db)
     row = db.execute(text("SELECT id FROM acc_door WHERE id=:id"), {"id": door_id}).fetchone()
@@ -672,7 +672,7 @@ async def sync_door(door_id: int, db: Session = Depends(get_db), current_user=De
     return {"success": True, "message": "Door configuration sync queued"}
 
 
-@router.post("/doors/set-mustering-mode/")
+@router.post("/doors/set-mustering-mode")
 async def set_mustering_mode(body: MusteringBody, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     _require_ac_permission(current_user, db)
     if body.door_ids:
@@ -774,7 +774,7 @@ async def get_antipassback(db: Session = Depends(get_db), current_user=Depends(g
     return {"success": True, "data": _rows(rows)}
 
 
-@router.put("/antipassback/")
+@router.put("/antipassback")
 async def update_antipassback(
     settings: List[Dict[str, Any]],
     db: Session = Depends(get_db),
@@ -808,7 +808,7 @@ async def get_first_card(db: Session = Depends(get_db), current_user=Depends(get
     return {"success": True, "data": _rows(rows)}
 
 
-@router.put("/first-card/")
+@router.put("/first-card")
 async def update_first_card(
     settings: List[Dict[str, Any]],
     db: Session = Depends(get_db),
@@ -843,7 +843,7 @@ async def get_multi_card(db: Session = Depends(get_db), current_user=Depends(get
     return {"success": True, "data": _rows(rows)}
 
 
-@router.post("/multi-card/")
+@router.post("/multi-card")
 async def create_multi_card(body: MultiCardBody, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     door = db.execute(text("SELECT id FROM acc_door WHERE id=:id"), {"id": body.door_id}).fetchone()
     if not door:
@@ -902,7 +902,7 @@ async def get_interlock_groups(db: Session = Depends(get_db), current_user=Depen
     return {"success": True, "data": result}
 
 
-@router.post("/interlock/")
+@router.post("/interlock")
 async def create_interlock_group(body: InterlockBody, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     if len(body.door_ids) < 2:
         raise HTTPException(400, "Interlock group requires at least 2 doors")
@@ -963,7 +963,7 @@ async def get_linkages(db: Session = Depends(get_db), current_user=Depends(get_c
     return {"success": True, "data": data}
 
 
-@router.post("/linkage/")
+@router.post("/linkage")
 async def create_linkage(body: LinkageBody, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     row = db.execute(text("""
         INSERT INTO acc_linkage (terminal_sn, input_type, output_action, output_door_id, output_terminal_sn)
@@ -1018,7 +1018,7 @@ async def get_emergency_status(db: Session = Depends(get_db), current_user=Depen
     }}
 
 
-@router.post("/emergency/action/")
+@router.post("/emergency/action")
 async def emergency_action(body: EmergencyBody, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     if body.action not in ("lock", "unlock"):
         raise HTTPException(400, "Action must be 'lock' or 'unlock'")
@@ -1052,7 +1052,7 @@ class EmergencyLockBody(BaseModel):
     reason: str
 
 
-@router.post("/emergency/lock-all/")
+@router.post("/emergency/lock-all")
 async def emergency_lock_all(
     body: EmergencyLockBody,
     db: Session = Depends(get_db),
@@ -1083,7 +1083,7 @@ class EmergencyUnlockBody(BaseModel):
     reason: str
 
 
-@router.post("/emergency/unlock-all/")
+@router.post("/emergency/unlock-all")
 async def emergency_unlock_all(
     body: EmergencyUnlockBody,
     db: Session = Depends(get_db),
@@ -1300,7 +1300,7 @@ async def get_guard_tours(db: Session = Depends(get_db), current_user=Depends(ge
     return {"success": True, "data": result}
 
 
-@router.post("/guard-tour/")
+@router.post("/guard-tour")
 async def create_guard_tour(body: GuardTourBody, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     row = db.execute(text("""
         INSERT INTO acc_guard_tour (tour_name, description, interval_minutes, is_active)
@@ -1370,7 +1370,7 @@ async def get_tour_schedules(
     return {"success": True, "data": data}
 
 
-@router.post("/guard-tour/schedules/")
+@router.post("/guard-tour/schedules")
 async def create_tour_schedule(body: GuardTourScheduleBody, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     emp = db.execute(text(
         "SELECT TRIM(COALESCE(first_name,'') || ' ' || COALESCE(last_name,'')) AS name FROM personnel_employee WHERE emp_code=:c"
@@ -1389,7 +1389,7 @@ async def create_tour_schedule(body: GuardTourScheduleBody, db: Session = Depend
     return {"success": True, "data": d}
 
 
-@router.post("/guard-tour/log/")
+@router.post("/guard-tour/log")
 async def log_guard_scan(body: GuardTourLogBody, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     sched = db.execute(text("SELECT id, tour_id FROM acc_guard_tour_schedule WHERE id=:id"), {"id": body.schedule_id}).fetchone()
     if not sched:
@@ -1481,7 +1481,7 @@ async def get_visitors(
     return {"success": True, "data": data}
 
 
-@router.post("/visitors/")
+@router.post("/visitors")
 async def create_visitor(body: VisitorBody, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     row = db.execute(text("""
         INSERT INTO acc_visitor_access
@@ -1552,7 +1552,7 @@ class HolidayApplyBody(BaseModel):
     timezone_ids: Optional[List[int]] = None   # None = apply to all timezones
 
 
-@router.post("/timezones/apply-holidays/")
+@router.post("/timezones/apply-holidays")
 async def apply_holidays(body: HolidayApplyBody, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     """Write holiday time intervals into acc_timezone hol{n}_time1 columns."""
     if body.holiday_group not in (1, 2, 3):
