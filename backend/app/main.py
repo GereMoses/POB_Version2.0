@@ -126,6 +126,9 @@ app.add_middleware(RBACMiddleware, exclude_paths=[
     "/health", "/status", "/docs", "/redoc", "/openapi.json",
     "/api/v1/docs", "/api/v1/redoc", "/api/v1/openapi.json",
     "/api/v1/auth/login", "/api/v1/auth/simple-login", "/api/v1/auth/production-login",
+    # MFA handshake — consumes the mfa_pending token (which RBAC would reject);
+    # the endpoint validates that token itself. Only /verify, not the other /mfa routes.
+    "/api/v1/mfa/verify",
     # Subscription public endpoints — no auth required
     "/api/v1/subscription/status", "/api/v1/subscription/activate",
     # ZKTeco ADMS device endpoints — device-initiated, no user auth

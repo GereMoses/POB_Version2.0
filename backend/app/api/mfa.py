@@ -138,13 +138,17 @@ async def mfa_verify(
     body: VerifyBody,
     request: Request,
     db: Session = Depends(get_db),
-    current_user=Depends(get_current_user),
 ):
     """
     Complete the MFA login handshake.
 
     Expects the short-lived mfa_pending token from the login response.
     On success, revokes the pending token and issues a full access token.
+
+    NOTE: this endpoint must NOT use get_current_user — that dependency rejects
+    mfa_pending tokens (they're barred from every other route), so it would 401
+    the very token this endpoint exists to consume. We authenticate the pending
+    token here directly and resolve the user from its `sub`.
     """
     from jose import jwt as _jwt, JWTError as _JWTError
     from datetime import timedelta
@@ -169,12 +173,22 @@ async def mfa_verify(
             )
         jti = payload.get("jti", "")
         exp = int(payload.get("exp", 0))
+        sub = payload.get("sub")
     except _JWTError:
         raise HTTPException(status_code=401, detail="Invalid or expired MFA token")
 
+    # Resolve the user from the pending token's subject (username or email).
+    user_row = db.execute(text(
+        "SELECT id, username FROM auth_user WHERE username = :s OR email = :s"
+    ), {"s": sub}).fetchone()
+    if not user_row:
+        raise HTTPException(status_code=401, detail="Invalid or expired MFA token")
+    user_id = user_row.id
+    username = user_row.username
+
     # 2. Validate TOTP code — rate-limit to 5 attempts per pending token
     _ensure_totp_column(db)
-    secret = _get_totp_secret(db, current_user.id)
+    secret = _get_totp_secret(db, user_id)
     if not secret:
         raise HTTPException(status_code=400, detail="MFA not configured for this account")
 
@@ -182,7 +196,7 @@ async def mfa_verify(
     try:
         from ..core.redis_client import get_redis_client
         _r = get_redis_client()
-        attempt_key = f"mfa_attempts:{current_user.id}:{jti}"
+        attempt_key = f"mfa_attempts:{user_id}:{jti}"
         attempts = _r.incr(attempt_key)
         _r.expire(attempt_key, 300)  # 5-minute window
         if attempts > 5:
@@ -217,10 +231,10 @@ async def mfa_verify(
         timeout_mins = 480
 
     access_token = create_access_token(
-        data={"sub": current_user.username},
+        data={"sub": username},
         expires_delta=timedelta(minutes=timeout_mins),
     )
-    logger.info("MFA login completed for user %s", current_user.username)
+    logger.info("MFA login completed for user %s", username)
     return {
         "access_token": access_token,
         "token_type": "bearer",

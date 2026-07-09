@@ -116,6 +116,10 @@ class RBACMiddleware(BaseHTTPMiddleware):
             "/static",
             "/api/auth/",        # all auth endpoints (login, refresh, simple-login, etc.)
             "/api/v1/auth/",
+            "/api/v1/mfa/verify",  # MFA handshake: consumes the mfa_pending token the
+                                   # RBAC middleware would otherwise reject; the endpoint
+                                   # validates that token itself. (Only /verify — the
+                                   # other /mfa routes still require a full token + RBAC.)
             "/iclock/",          # all ZKTeco ADMS endpoints (no auth)
             "/api/v1/iclock/cdata",
         ]
