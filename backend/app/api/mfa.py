@@ -17,7 +17,10 @@ from ..core.database import get_db
 from ..core.dependencies import get_current_user
 from ..core.config import settings
 
-router = APIRouter(prefix="/api/v1/mfa", tags=["MFA/2FA"])
+# Prefix is relative — this router is mounted inside api_router, which already
+# adds settings.API_V1_STR ("/api/v1"). Using the full path here double-prefixed
+# every route to /api/v1/api/v1/mfa/... (404s in the UI).
+router = APIRouter(prefix="/mfa", tags=["MFA/2FA"])
 logger = logging.getLogger(__name__)
 
 APP_NAME = "POB System"
