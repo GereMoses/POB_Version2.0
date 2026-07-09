@@ -122,7 +122,7 @@ async def get_onboarding_by_id(
         )
 
 
-@router.post("/", response_model=dict)
+@router.post("", response_model=dict)
 async def create_onboarding(
     onboarding: OnboardingCreate,
     db: Session = Depends(get_db)

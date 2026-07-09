@@ -206,7 +206,7 @@ async def get_pay_structures(
         logger.error(f"Error getting pay structures: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/structures/", response_model=Dict[str, Any])
+@router.post("/structures", response_model=Dict[str, Any])
 async def create_pay_structure(
     structure_data: PayStructureCreate,
     db: Session = Depends(get_db),
@@ -323,7 +323,7 @@ async def delete_pay_structure(
         raise HTTPException(status_code=500, detail=str(e))
 
 # Pay Structure Items
-@router.post("/structures/{structure_id}/items/", response_model=Dict[str, Any])
+@router.post("/structures/{structure_id}/items", response_model=Dict[str, Any])
 async def create_pay_item(
     structure_id: int,
     item_data: PayItemCreate,
@@ -434,7 +434,7 @@ async def delete_pay_item(
         raise HTTPException(status_code=500, detail=str(e))
 
 # Structure Assignment
-@router.post("/structures/{structure_id}/assign/", response_model=Dict[str, Any])
+@router.post("/structures/{structure_id}/assign", response_model=Dict[str, Any])
 async def assign_structure(
     structure_id: int,
     assign_data: PayStructureAssignCreate,
@@ -488,7 +488,7 @@ async def assign_structure(
         raise HTTPException(status_code=500, detail=str(e))
 
 # Formula Testing
-@router.post("/structures/{structure_id}/formula/test/", response_model=Dict[str, Any])
+@router.post("/structures/{structure_id}/formula/test", response_model=Dict[str, Any])
 async def test_formula(
     structure_id: int,
     test_request: FormulaTestRequest,
@@ -551,7 +551,7 @@ async def get_pay_periods(
         logger.error(f"Error getting pay periods: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/periods/", response_model=Dict[str, Any])
+@router.post("/periods", response_model=Dict[str, Any])
 async def create_pay_period(
     period_data: PayPeriodCreate,
     db: Session = Depends(get_db),
@@ -636,7 +636,7 @@ async def update_pay_period(
         logger.error(f"Error updating pay period: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/periods/{period_id}/close/", response_model=Dict[str, Any])
+@router.post("/periods/{period_id}/close", response_model=Dict[str, Any])
 async def close_pay_period(
     period_id: int,
     db: Session = Depends(get_db),
@@ -671,7 +671,7 @@ async def close_pay_period(
         logger.error(f"Error closing pay period: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/periods/{period_id}/reopen/", response_model=Dict[str, Any])
+@router.post("/periods/{period_id}/reopen", response_model=Dict[str, Any])
 async def reopen_pay_period(
     period_id: int,
     db: Session = Depends(get_db),
@@ -711,7 +711,7 @@ async def reopen_pay_period(
         raise HTTPException(status_code=500, detail=str(e))
 
 # Payroll Calculation
-@router.post("/calculate/", response_model=Dict[str, Any])
+@router.post("/calculate", response_model=Dict[str, Any])
 async def calculate_payroll(
     calc_request: PayrollCalculationRequest,
     db: Session = Depends(get_db),
@@ -869,7 +869,7 @@ async def get_salary_details(
         logger.error(f"Error getting salary details: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/salaries/{salary_id}/adjust/", response_model=Dict[str, Any])
+@router.post("/salaries/{salary_id}/adjust", response_model=Dict[str, Any])
 async def adjust_salary(
     salary_id: int,
     adjustment_data: SalaryAdjustmentRequest,
@@ -925,7 +925,7 @@ async def adjust_salary(
         logger.error(f"Error adjusting salary: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/salaries/{salary_id}/recalc/", response_model=Dict[str, Any])
+@router.post("/salaries/{salary_id}/recalc", response_model=Dict[str, Any])
 async def recalculate_salary(
     salary_id: int,
     db: Session = Depends(get_db),
@@ -997,7 +997,7 @@ async def get_loans(
         logger.error(f"Error getting loans: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/loans/", response_model=Dict[str, Any])
+@router.post("/loans", response_model=Dict[str, Any])
 async def create_loan(
     loan_data: PayLoanCreate,
     db: Session = Depends(get_db),
@@ -1036,7 +1036,7 @@ async def create_loan(
         logger.error(f"Error creating loan: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/loans/{loan_id}/approve/", response_model=Dict[str, Any])
+@router.post("/loans/{loan_id}/approve", response_model=Dict[str, Any])
 async def approve_loan(
     loan_id: int,
     db: Session = Depends(get_db),
@@ -1099,7 +1099,7 @@ async def get_zone_allowances(
         logger.error(f"Error getting zone allowances: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/zone-allowances/", response_model=Dict[str, Any])
+@router.post("/zone-allowances", response_model=Dict[str, Any])
 async def create_zone_allowance(
     allowance_data: PayZoneAllowanceCreate,
     db: Session = Depends(get_db),
@@ -1176,7 +1176,7 @@ async def get_contractor_rates(
         logger.error(f"Error getting contractor rates: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/contractor-rates/", response_model=Dict[str, Any])
+@router.post("/contractor-rates", response_model=Dict[str, Any])
 async def create_contractor_rate(
     rate_data: PayContractorRateCreate,
     db: Session = Depends(get_db),
@@ -1239,7 +1239,7 @@ async def get_attendance_mapping(
         logger.error(f"Error getting attendance mapping: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.put("/attendance-mapping/", response_model=Dict[str, Any])
+@router.put("/attendance-mapping", response_model=Dict[str, Any])
 async def update_attendance_mapping(
     mappings: List[Dict[str, Any]],
     db: Session = Depends(get_db),
@@ -1453,7 +1453,7 @@ async def get_payslip(
         logger.error(f"Error generating payslip: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/payslip/bulk-generate/", response_model=Dict[str, Any])
+@router.post("/payslip/bulk-generate", response_model=Dict[str, Any])
 async def bulk_generate_payslips(
     period_id: int = Query(...),
     emp_ids: Optional[List[int]] = Body(None),
@@ -1473,7 +1473,7 @@ async def bulk_generate_payslips(
         logger.error(f"Error in bulk payslip generation: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/payslip/{salary_id}/send-email/", response_model=Dict[str, Any])
+@router.post("/payslip/{salary_id}/send-email", response_model=Dict[str, Any])
 async def send_payslip_email(
     salary_id: int,
     template_id: Optional[int] = Body(None),
@@ -1498,7 +1498,7 @@ async def send_payslip_email(
         logger.error(f"Error sending payslip email: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/payslip/bulk-email/", response_model=Dict[str, Any])
+@router.post("/payslip/bulk-email", response_model=Dict[str, Any])
 async def bulk_send_payslips(
     period_id: int = Query(...),
     emp_ids: Optional[List[int]] = Body(None),
@@ -1543,7 +1543,7 @@ async def get_payslip_templates(
         logger.error(f"Error getting payslip templates: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/payslip/template/", response_model=Dict[str, Any])
+@router.post("/payslip/template", response_model=Dict[str, Any])
 async def create_payslip_template(
     template_data: Dict[str, Any],
     db: Session = Depends(get_db),
@@ -1636,7 +1636,7 @@ async def get_loan_summary(
         logger.error(f"Error getting loan summary: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/loans/process-deductions/", response_model=Dict[str, Any])
+@router.post("/loans/process-deductions", response_model=Dict[str, Any])
 async def process_loan_deductions(
     period_id: int = Query(...),
     db: Session = Depends(get_db),
@@ -1654,7 +1654,7 @@ async def process_loan_deductions(
         logger.error(f"Error processing loan deductions: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/loans/calculate-emi/", response_model=Dict[str, Any])
+@router.post("/loans/calculate-emi", response_model=Dict[str, Any])
 async def calculate_emi_schedule(
     loan_amount: float = Query(..., gt=0),
     interest_rate: float = Query(..., ge=0),

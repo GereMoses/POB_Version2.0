@@ -159,7 +159,7 @@ async def get_room(room_id: int, db: Session = Depends(get_db)):
         )
     return room
 
-@router.post("/rooms/", response_model=dict)
+@router.post("/rooms", response_model=dict)
 async def create_room(room_data: RoomCreate, db: Session = Depends(get_db)):
     """Create new meeting room"""
     service = MeetingService(db)
@@ -243,7 +243,7 @@ async def get_booking(booking_id: int, db: Session = Depends(get_db)):
         )
     return booking
 
-@router.post("/bookings/", response_model=dict)
+@router.post("/bookings", response_model=dict)
 async def create_booking(booking_data: BookingCreate, db: Session = Depends(get_db)):
     """Create new meeting booking"""
     service = MeetingService(db)
@@ -288,7 +288,7 @@ async def update_booking(
     
     return await service.update_booking(booking_id, booking_dict)
 
-@router.post("/bookings/{booking_id}/cancel/")
+@router.post("/bookings/{booking_id}/cancel")
 async def cancel_booking(
     booking_id: int,
     cancel_data: CancelRequest,
@@ -299,7 +299,7 @@ async def cancel_booking(
     service = MeetingService(db)
     return await service.cancel_booking(booking_id, cancel_data.reason, current_user.id)
 
-@router.post("/bookings/{booking_id}/approve/")
+@router.post("/bookings/{booking_id}/approve")
 async def approve_booking(
     booking_id: int,
     approval_data: ApprovalRequest,
@@ -315,7 +315,7 @@ async def approve_booking(
         current_user.id
     )
 
-@router.post("/bookings/{booking_id}/complete/")
+@router.post("/bookings/{booking_id}/complete")
 async def complete_booking(
     booking_id: int,
     db: Session = Depends(get_db)
@@ -351,7 +351,7 @@ async def get_booking_attendees(booking_id: int, db: Session = Depends(get_db)):
     service = MeetingService(db)
     return await service.get_booking_attendees(booking_id)
 
-@router.post("/bookings/{booking_id}/attendees/", response_model=List[dict])
+@router.post("/bookings/{booking_id}/attendees", response_model=List[dict])
 async def add_attendees(
     booking_id: int,
     attendees_data: List[AttendeeCreate],
@@ -373,7 +373,7 @@ async def remove_attendee(
     await service.remove_attendee(booking_id, attendee_id)
     return {"message": "Attendee removed successfully"}
 
-@router.post("/bookings/{booking_id}/invite/")
+@router.post("/bookings/{booking_id}/invite")
 async def invite_attendees(
     booking_id: int,
     invite_data: dict,
@@ -384,7 +384,7 @@ async def invite_attendees(
     return {"message": "Invitations sent successfully"}
 
 # Check-in endpoints
-@router.post("/check-in/")
+@router.post("/check-in")
 async def check_in_attendee(
     check_in_data: CheckInRequest,
     db: Session = Depends(get_db)
@@ -400,7 +400,7 @@ async def check_in_attendee(
         verify_type=check_in_data.verify_type
     )
 
-@router.post("/check-out/")
+@router.post("/check-out")
 async def check_out_attendee(attendance_id: int, db: Session = Depends(get_db)):
     """Check out attendee"""
     service = MeetingService(db)
@@ -413,7 +413,7 @@ async def get_booking_minutes(booking_id: int, db: Session = Depends(get_db)):
     service = MeetingService(db)
     return await service.get_booking_minutes(booking_id)
 
-@router.post("/bookings/{booking_id}/minutes/")
+@router.post("/bookings/{booking_id}/minutes")
 async def upload_minutes(
     booking_id: int,
     file: UploadFile = File(...),
@@ -440,7 +440,7 @@ async def get_booking_actions(booking_id: int, db: Session = Depends(get_db)):
     service = MeetingService(db)
     return await service.get_booking_actions(booking_id)
 
-@router.post("/bookings/{booking_id}/actions/", response_model=dict)
+@router.post("/bookings/{booking_id}/actions", response_model=dict)
 async def add_action_item(
     booking_id: int,
     action_data: ActionItemCreate,
@@ -473,7 +473,7 @@ async def get_equipment(
     service = MeetingService(db)
     return await service.get_equipment(room_id)
 
-@router.post("/equipment/", response_model=dict)
+@router.post("/equipment", response_model=dict)
 async def create_equipment(
     equipment_data: EquipmentCreate,
     db: Session = Depends(get_db)

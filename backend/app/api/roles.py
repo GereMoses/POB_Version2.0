@@ -112,7 +112,7 @@ async def list_roles(
     ]}
 
 
-@router.post("/")
+@router.post("")
 async def create_role(
     role_data: Dict[str, Any],
     db: Session = Depends(get_db),

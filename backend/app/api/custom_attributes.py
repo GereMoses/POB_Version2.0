@@ -111,7 +111,7 @@ async def get_attribute_by_id(
         )
 
 
-@router.post("/", response_model=dict)
+@router.post("", response_model=dict)
 async def create_attribute(
     attribute: CustomAttributeCreate,
     db: Session = Depends(get_db)

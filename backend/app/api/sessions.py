@@ -68,7 +68,7 @@ async def revoke_session(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.delete("/")
+@router.delete("")
 async def revoke_all_sessions(
     current_user=Depends(get_current_user),
 ):

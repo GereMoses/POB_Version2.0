@@ -138,7 +138,7 @@ async def get_medical_records(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/medical/")
+@router.post("/medical")
 async def create_medical_record(
     medical_data: MedicalRecordCreate,
     cert_file: Optional[UploadFile] = File(None),
@@ -230,7 +230,7 @@ async def get_certification_types(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/cert-types/")
+@router.post("/cert-types")
 async def create_certification_type(
     cert_type_data: CertTypeCreate,
     db: Session = Depends(get_db),
@@ -323,7 +323,7 @@ async def get_certifications(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/certifications/")
+@router.post("/certifications")
 async def assign_certification(
     cert_data: CertificationCreate,
     cert_file: Optional[UploadFile] = File(None),
@@ -522,7 +522,7 @@ async def get_ppe_types(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/ppe-types/")
+@router.post("/ppe-types")
 async def create_ppe_type(
     ppe_data: PPETypeCreate,
     db: Session = Depends(get_db),
@@ -591,7 +591,7 @@ async def get_ppe_issues(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/ppe-issues/")
+@router.post("/ppe-issues")
 async def issue_ppe(
     ppe_data: PPEIssueCreate,
     db: Session = Depends(get_db),
@@ -612,7 +612,7 @@ async def issue_ppe(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/ppe-issues/{issue_id}/return/")
+@router.post("/ppe-issues/{issue_id}/return")
 async def return_ppe(
     issue_id: int,
     return_data: PPEReturnCreate,
@@ -704,7 +704,7 @@ async def get_induction_templates(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/induction-templates/")
+@router.post("/induction-templates")
 async def create_induction_template(
     template_data: InductionTemplateCreate,
     db: Session = Depends(get_db),
@@ -775,7 +775,7 @@ async def get_induction_records(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/induction-records/take/")
+@router.post("/induction-records/take")
 async def take_induction(
     induction_data: InductionTakeCreate,
     signed_doc: Optional[UploadFile] = File(None),
@@ -831,7 +831,7 @@ async def get_expiring_items(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/dashboard/notify/")
+@router.post("/dashboard/notify")
 async def notify_expiring_items(
     record_ids: List[int],
     background_tasks: BackgroundTasks,
@@ -946,7 +946,7 @@ async def get_non_compliant_personnel(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/compliance/enforce/")
+@router.post("/compliance/enforce")
 async def enforce_compliance(
     emp_ids: List[int],
     background_tasks: BackgroundTasks,
@@ -1012,7 +1012,7 @@ class NewHireSetupRequest(BaseModel):
     hire_date: Optional[date] = None
 
 
-@router.post("/compliance/setup-new-hire/")
+@router.post("/compliance/setup-new-hire")
 async def setup_new_hire_mtd(
     payload: NewHireSetupRequest,
     db: Session = Depends(get_db),
@@ -1103,7 +1103,7 @@ async def setup_new_hire_mtd(
 
 # ===== VISITOR MTD =====
 
-@router.post("/visitor/medical/")
+@router.post("/visitor/medical")
 async def create_visitor_medical(
     visitor_id: int,
     medical_data: Dict[str, Any],
@@ -1134,7 +1134,7 @@ async def create_visitor_medical(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/visitor/induction/")
+@router.post("/visitor/induction")
 async def create_visitor_induction(
     visitor_id: int,
     induction_data: Dict[str, Any],

@@ -272,7 +272,7 @@ async def get_enrollment_report(
 # ENABLE ENROLLMENT MODE
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@router.post("/api/device/enrollment/enable/")
+@router.post("/api/device/enrollment/enable")
 async def enable_enrollment_mode(
     sn: str = Query(..., description="Device serial number"),
     emp_code: Optional[str] = Query(None, description="Pre-select employee on device"),
@@ -345,7 +345,7 @@ class TemplatePushRequest(BaseModel):
     include_face: bool = True
 
 
-@router.post("/api/device/enrollment/push/")
+@router.post("/api/device/enrollment/push")
 async def push_templates_to_devices(
     payload: TemplatePushRequest,
     db: Session = Depends(get_db),
@@ -407,7 +407,7 @@ class AreaTemplatePushRequest(BaseModel):
     include_face: bool = True
 
 
-@router.post("/api/device/enrollment/push-to-area/")
+@router.post("/api/device/enrollment/push-to-area")
 async def push_templates_to_area(
     payload: AreaTemplatePushRequest,
     db: Session = Depends(get_db),
@@ -449,7 +449,7 @@ async def push_templates_to_area(
 # DELETE TEMPLATE
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@router.delete("/api/device/enrollment/template/")
+@router.delete("/api/device/enrollment/template")
 async def delete_template(
     emp_code: str = Query(...),
     finger_id: Optional[int] = Query(None, description="Specific finger slot; omit for all"),
@@ -497,7 +497,7 @@ async def delete_template(
 # DIRECT-CONNECT ENDPOINTS (ZKLib TCP — F18 / Huros)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@router.post("/api/device/enrollment/pull-from-device/")
+@router.post("/api/device/enrollment/pull-from-device")
 async def pull_templates_from_device(
     sn: str = Query(..., description="Device serial number"),
     db: Session = Depends(get_db),
@@ -596,7 +596,7 @@ class DirectEnrollRequest(BaseModel):
     finger_id: int    = Field(0,   description="Finger slot 0-9; use 10 for face (device-specific)")
 
 
-@router.post("/api/device/enrollment/cancel/")
+@router.post("/api/device/enrollment/cancel")
 async def cancel_enrollment(
     sn: str = Query(..., description="Device serial number"),
     db: Session = Depends(get_db),
@@ -619,7 +619,7 @@ async def cancel_enrollment(
     return {"success": True, "data": result}
 
 
-@router.post("/api/device/enrollment/enroll-direct/")
+@router.post("/api/device/enrollment/enroll-direct")
 async def enroll_direct(
     payload: DirectEnrollRequest,
     db: Session = Depends(get_db),

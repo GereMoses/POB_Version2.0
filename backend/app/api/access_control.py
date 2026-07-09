@@ -1511,7 +1511,7 @@ async def update_visitor(visitor_id: int, body: VisitorBody, db: Session = Depen
     return {"success": True, "message": "Visitor updated"}
 
 
-@router.patch("/visitors/{visitor_id}/revoke/")
+@router.patch("/visitors/{visitor_id}/revoke")
 async def revoke_visitor(visitor_id: int, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     db.execute(text("UPDATE acc_visitor_access SET is_revoked=true, status='revoked' WHERE id=:id"), {"id": visitor_id})
     db.commit()

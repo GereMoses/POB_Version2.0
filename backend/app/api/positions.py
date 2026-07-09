@@ -339,7 +339,7 @@ def get_position(
     return _pos_to_dict(row.Position, row.dept_name, row.dept_code, row.assigned_count)
 
 
-@router.post("/", status_code=201)
+@router.post("", status_code=201)
 def create_position(
     body: dict,
     db: Session = Depends(get_db),

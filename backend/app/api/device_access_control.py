@@ -159,7 +159,7 @@ async def list_timezones(
     ]}
 
 
-@router.post("/api/device/access/timezones/")
+@router.post("/api/device/access/timezones")
 async def create_timezone(
     payload: TimeZoneCreate,
     db: Session = Depends(get_db),
@@ -239,7 +239,7 @@ async def list_access_levels(
     ]}
 
 
-@router.post("/api/device/access/levels/")
+@router.post("/api/device/access/levels")
 async def create_access_level(
     payload: AccessLevelCreate,
     db: Session = Depends(get_db),
@@ -309,7 +309,7 @@ async def list_doors(
     ]}
 
 
-@router.post("/api/device/access/doors/")
+@router.post("/api/device/access/doors")
 async def create_door(
     payload: DoorCreate,
     db: Session = Depends(get_db),
@@ -414,7 +414,7 @@ async def list_user_authorizations(
     ]}
 
 
-@router.post("/api/device/access/users/")
+@router.post("/api/device/access/users")
 async def assign_user_access(
     payload: UserAuthCreate,
     db: Session = Depends(get_db),
@@ -474,7 +474,7 @@ async def list_anti_passback(
     ]}
 
 
-@router.post("/api/device/access/anti-passback/")
+@router.post("/api/device/access/anti-passback")
 async def create_anti_passback(
     payload: AntiPassbackCreate,
     db: Session = Depends(get_db),
@@ -523,7 +523,7 @@ async def get_blacklist(
     ]}
 
 
-@router.post("/api/device/access/blacklist/")
+@router.post("/api/device/access/blacklist")
 async def add_to_blacklist(
     payload: BlacklistCreate,
     db: Session = Depends(get_db),

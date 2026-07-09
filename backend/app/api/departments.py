@@ -348,7 +348,7 @@ async def get_department(
     return _to_dict(dept, db)
 
 
-@router.post("/", status_code=201)
+@router.post("", status_code=201)
 async def create_department(
     data: DepartmentCreate,
     db: Session = Depends(get_db),

@@ -543,7 +543,7 @@ async def get_personnel_by_badge(
     return personnel
 
 
-@router.post("/", response_model=Dict[str, Any])
+@router.post("", response_model=Dict[str, Any])
 async def create_personnel(
     personnel_data: PersonnelCreate,
     db: Session = Depends(get_db),
@@ -3359,7 +3359,7 @@ async def get_employees(
         status=status, page=page, limit=limit
     )
 
-@router.post("/employees/", response_model=EmployeeResponse)
+@router.post("/employees", response_model=EmployeeResponse)
 async def create_employee(
     employee: EmployeeCreate,
     db: Session = Depends(get_db),
@@ -3397,7 +3397,7 @@ async def get_employee(
     
     return employee
 
-@router.put("/employees/{emp_id}/", response_model=EmployeeResponse)
+@router.put("/employees/{emp_id}", response_model=EmployeeResponse)
 async def update_employee(
     emp_id: int,
     employee: EmployeeUpdate,
@@ -3421,7 +3421,7 @@ async def update_employee(
     
     return result['data']
 
-@router.delete("/employees/{emp_id}/")
+@router.delete("/employees/{emp_id}")
 async def delete_employee(
     emp_id: int,
     db: Session = Depends(get_db),
@@ -3440,7 +3440,7 @@ async def delete_employee(
     
     return {"message": "Employee deleted successfully"}
 
-@router.post("/employees/batch-import/")
+@router.post("/employees/batch-import")
 async def batch_import_employees(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
@@ -3471,7 +3471,7 @@ async def export_employees(
         return await service.export_employees_csv(employee_ids)
 
 # BioTime Biometric endpoints
-@router.post("/employees/{emp_id}/enroll/")
+@router.post("/employees/{emp_id}/enroll")
 async def enroll_employee_biometric(
     emp_id: int,
     enrollment_data: dict = Form(...),
@@ -3491,7 +3491,7 @@ async def enroll_employee_biometric(
     
     return result
 
-@router.post("/employees/{emp_id}/bio-data/")
+@router.post("/employees/{emp_id}/bio-data")
 async def save_biometric_data(
     emp_id: int,
     bio_data: dict,
@@ -3511,7 +3511,7 @@ async def save_biometric_data(
     
     return result
 
-@router.delete("/employees/{emp_id}/bio-data/")
+@router.delete("/employees/{emp_id}/bio-data")
 async def delete_biometric_data(
     emp_id: int,
     bio_data: dict,

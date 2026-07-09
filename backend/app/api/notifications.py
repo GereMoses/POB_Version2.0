@@ -482,7 +482,7 @@ async def list_notifications(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.put("/mark-all-read/")
+@router.put("/mark-all-read")
 async def mark_all_read(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
@@ -502,7 +502,7 @@ async def mark_all_read(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.put("/{notification_id}/read/")
+@router.put("/{notification_id}/read")
 async def mark_one_read(
     notification_id: int,
     db: Session = Depends(get_db),

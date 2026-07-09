@@ -124,7 +124,7 @@ async def get_emergency_status(
 
 # Lockdown Endpoints
 
-@router.post("/lockdown/")
+@router.post("/lockdown")
 async def emergency_lockdown(
     request: LockdownRequest,
     background_tasks: BackgroundTasks,
@@ -171,7 +171,7 @@ async def emergency_lockdown(
 
 # Fire Mode Endpoints
 
-@router.post("/fire-mode/")
+@router.post("/fire-mode")
 async def fire_mode_control(
     raw_request: Request,
     request: FireModeRequest,
@@ -258,7 +258,7 @@ async def list_emergency_templates(
             detail=str(e)
         )
 
-@router.post("/templates/")
+@router.post("/templates")
 async def create_emergency_template(
     template_data: EmergencyTemplateCreate,
     current_user: AuthUser = Depends(get_current_user),
@@ -310,7 +310,7 @@ async def create_emergency_template(
             detail=str(e)
         )
 
-@router.post("/notify/")
+@router.post("/notify")
 async def send_emergency_notification(
     request: EmergencyNotificationRequest,
     background_tasks: BackgroundTasks,
@@ -470,7 +470,7 @@ async def list_emergency_devices(
             detail=str(e)
         )
 
-@router.post("/devices/{device_id}/toggle/")
+@router.post("/devices/{device_id}/toggle")
 async def toggle_emergency_device(
     device_id: int,
     status: int = Query(..., description="Device status (0=OFF, 1=ON)"),
@@ -539,7 +539,7 @@ async def toggle_emergency_device(
             detail=str(e)
         )
 
-@router.post("/devices/test-all/")
+@router.post("/devices/test-all")
 async def test_all_emergency_devices(
     current_user: AuthUser = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -597,7 +597,7 @@ async def test_all_emergency_devices(
 
 # Trigger Endpoints
 
-@router.post("/panic/")
+@router.post("/panic")
 async def panic_button_trigger(
     request: PanicButtonRequest,
     current_user: AuthUser = Depends(get_current_user),
@@ -680,7 +680,7 @@ async def panic_button_trigger(
             detail=str(e)
         )
 
-@router.post("/trigger/")
+@router.post("/trigger")
 async def emergency_trigger_webhook(
     trigger_type: str = Query(..., description="Trigger type: panic, fire, etc."),
     source: str = Query(..., description="Trigger source"),
@@ -824,7 +824,7 @@ async def list_emergency_plans(
             detail=str(e)
         )
 
-@router.post("/plans/")
+@router.post("/plans")
 async def create_emergency_plan(
     plan_data: EmergencyPlanCreate,
     current_user: AuthUser = Depends(get_current_user),

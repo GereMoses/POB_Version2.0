@@ -445,7 +445,7 @@ def _sync_device_row(db: Session, sn: str, *, connection_mode: Optional[str] = N
         dev.zone_id = zone_id
 
 
-@router.post("/api/device/terminals/", response_model=DeviceResponse)
+@router.post("/api/device/terminals", response_model=DeviceResponse)
 async def create_terminal(
     terminal_data: DeviceCreate,
     db: Session = Depends(get_db),
@@ -783,7 +783,7 @@ async def delete_terminal(
         db.rollback()
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to delete terminal")
 
-@router.post("/api/device/terminals/batch-import/")
+@router.post("/api/device/terminals/batch-import")
 async def batch_import_terminals(
     import_data: BatchImportRequest,
     db: Session = Depends(get_db),
@@ -1151,7 +1151,7 @@ def _require_controller(sn: str, db: Session) -> dict:
     return info
 
 
-@router.post("/api/device/controller/test/")
+@router.post("/api/device/controller/test")
 async def controller_test(
     sn: str,
     db: Session = Depends(get_db),
@@ -1164,7 +1164,7 @@ async def controller_test(
     return test_connection(info["ip"], info["port"] or 4370)
 
 
-@router.post("/api/device/controller/open-door/")
+@router.post("/api/device/controller/open-door")
 async def controller_open_door(
     payload: ControllerActionRequest,
     db: Session = Depends(get_db),
@@ -1194,7 +1194,7 @@ async def delete_device_command(
     return {"id": command_id, "deleted": True}
 
 
-@router.post("/api/device/devcmd/sync-user/")
+@router.post("/api/device/devcmd/sync-user")
 async def sync_user_to_device(
     sn: str,
     emp_code: str,
@@ -1281,7 +1281,7 @@ async def sync_user_to_device(
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                             detail="Failed to sync user to device")
 
-@router.post("/api/device/devcmd/sync-all-users/")
+@router.post("/api/device/devcmd/sync-all-users")
 async def sync_all_users_to_device(
     sn: str,
     background_tasks: BackgroundTasks,
@@ -1467,7 +1467,7 @@ async def sync_all_users_to_device(
             detail="Failed to sync users to device"
         )
 
-@router.post("/api/device/devcmd/flush-pending-zklib/")
+@router.post("/api/device/devcmd/flush-pending-zklib")
 async def flush_pending_commands_via_zklib(
     sn: str,
     db: Session = Depends(get_db),
@@ -1584,7 +1584,7 @@ async def flush_pending_commands_via_zklib(
     }
 
 
-@router.post("/api/device/devcmd/sync-department/")
+@router.post("/api/device/devcmd/sync-department")
 async def sync_department_to_device(
     sn: str,
     department: str,
@@ -1687,7 +1687,7 @@ async def sync_department_to_device(
                             detail="Failed to sync department to device")
 
 
-@router.post("/api/device/devcmd/emergency/")
+@router.post("/api/device/devcmd/emergency")
 async def emergency_device_command(
     sn: str,
     action: str = Query(..., pattern="^(ON|OFF)$", description="Emergency action: ON or OFF"),
@@ -1800,7 +1800,7 @@ async def get_real_time_devices(
 
 # Firmware Management Endpoints
 
-@router.post("/api/device/firmware/upload/", response_model=FirmwareUploadResponse)
+@router.post("/api/device/firmware/upload", response_model=FirmwareUploadResponse)
 async def upload_firmware(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
@@ -1854,7 +1854,7 @@ async def upload_firmware(
             detail="Failed to upload firmware"
         )
 
-@router.post("/api/device/firmware/push/")
+@router.post("/api/device/firmware/push")
 async def push_firmware(
     push_request: FirmwarePushRequest,
     background_tasks: BackgroundTasks,
@@ -2144,7 +2144,7 @@ async def list_schedules(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/api/device/schedules/")
+@router.post("/api/device/schedules")
 async def create_schedule(
     payload: ScheduleCreate,
     db: Session = Depends(get_db),
@@ -2291,7 +2291,7 @@ def _parse_dt(s: Optional[str]):
     return dt.fromisoformat(s.replace("Z", "+00:00"))
 
 
-@router.post("/api/device/maintenance/")
+@router.post("/api/device/maintenance")
 async def create_maintenance(
     payload: MaintenanceCreate,
     db: Session = Depends(get_db),

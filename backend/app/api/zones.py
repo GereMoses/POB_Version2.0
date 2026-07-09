@@ -490,7 +490,7 @@ def get_zone(
     return _to_dict(zone, db)
 
 
-@router.post("/", status_code=201)
+@router.post("", status_code=201)
 def create_zone(
     body: dict,
     db: Session = Depends(get_db),

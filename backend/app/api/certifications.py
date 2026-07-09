@@ -43,7 +43,7 @@ class CertificationVerification(BaseModel):
 # Initialize service
 certification_service = CertificationService()
 
-@router.post("/")
+@router.post("")
 async def add_certification(
     certification_data: CertificationCreate,
     db: Session = Depends(get_db)

@@ -139,7 +139,7 @@ async def get_report_templates(
     return result
 
 
-@router.post("/templates/", response_model=Dict[str, Any])
+@router.post("/templates", response_model=Dict[str, Any])
 async def create_report_template(
     template: ReportTemplateCreate,
     db: Session = Depends(get_db),
@@ -306,7 +306,7 @@ async def delete_report_template(
     return {"message": "Template deleted successfully"}
 
 
-@router.post("/templates/{template_id}/clone/", response_model=Dict[str, Any])
+@router.post("/templates/{template_id}/clone", response_model=Dict[str, Any])
 async def clone_report_template(
     template_id: int,
     db: Session = Depends(get_db),
@@ -355,7 +355,7 @@ async def clone_report_template(
 
 # ==================== DATA ENDPOINTS ====================
 
-@router.post("/data/", response_model=Dict[str, Any])
+@router.post("/data", response_model=Dict[str, Any])
 async def get_report_data(
     request: ReportDataRequest,
     db: Session = Depends(get_db),
@@ -417,7 +417,7 @@ async def get_dashboard_widget(
 
 # ==================== EXPORT ENDPOINTS ====================
 
-@router.post("/export/", response_model=Dict[str, Any])
+@router.post("/export", response_model=Dict[str, Any])
 async def export_report(
     request: ReportExportRequest,
     background_tasks: BackgroundTasks,
@@ -546,7 +546,7 @@ async def get_report_schedules(
     return result
 
 
-@router.post("/schedules/", response_model=Dict[str, Any])
+@router.post("/schedules", response_model=Dict[str, Any])
 async def create_report_schedule(
     schedule: ReportScheduleCreate,
     db: Session = Depends(get_db),
@@ -663,7 +663,7 @@ async def delete_report_schedule(
     return {"message": "Schedule deleted successfully"}
 
 
-@router.post("/schedules/{schedule_id}/run-now/", response_model=Dict[str, Any])
+@router.post("/schedules/{schedule_id}/run-now", response_model=Dict[str, Any])
 async def run_schedule_now(
     schedule_id: int,
     background_tasks: BackgroundTasks,
@@ -726,7 +726,7 @@ async def get_user_presets(
     return result
 
 
-@router.post("/presets/", response_model=Dict[str, Any])
+@router.post("/presets", response_model=Dict[str, Any])
 async def create_user_preset(
     preset: ReportPresetCreate,
     db: Session = Depends(get_db),
@@ -879,7 +879,7 @@ async def get_builder_metadata(
     }
 
 
-@router.post("/builder/preview/", response_model=Dict[str, Any])
+@router.post("/builder/preview", response_model=Dict[str, Any])
 async def preview_custom_report(
     request: Dict[str, Any],
     db: Session = Depends(get_db),

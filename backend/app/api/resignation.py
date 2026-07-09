@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/resignation", tags=["Resignation Management"])
 
 
-@router.post("/", response_model=dict)
+@router.post("", response_model=dict)
 async def create_resignation(
     resignation: ResignationCreate,
     db: Session = Depends(get_db)
