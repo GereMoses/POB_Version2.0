@@ -6,7 +6,7 @@ from pydantic import BaseModel, EmailStr, Field
 import datetime
 
 from ..core.database import get_db
-from ..core.security import get_password_hash, verify_password
+from ..core.security import get_password_hash, verify_password, validate_password_strength
 from ..core.dependencies import get_current_user
 
 router = APIRouter(prefix="/api/v1/settings", tags=["Settings"])
@@ -142,6 +142,10 @@ async def create_user(body: UserCreate, db: Session = Depends(get_db), current_u
     if exists:
         raise HTTPException(400, f"Username '{body.username}' is already taken")
 
+    try:
+        validate_password_strength(body.password, body.username)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     hashed = get_password_hash(body.password)
     row = db.execute(text("""
         INSERT INTO auth_user (username, password, email, first_name, last_name, is_superuser, is_active)
@@ -231,6 +235,10 @@ async def change_password(user_id: int, body: PasswordChange, db: Session = Depe
         if not verify_password(body.current_password, row.password):
             raise HTTPException(400, "Current password is incorrect")
 
+    try:
+        validate_password_strength(body.new_password)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     hashed = get_password_hash(body.new_password)
     db.execute(text("UPDATE auth_user SET password = :p, updated_at = now() WHERE id = :id"), {"p": hashed, "id": user_id})
     db.commit()

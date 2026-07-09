@@ -14,6 +14,7 @@ from typing import Optional, List
 
 from app.core.config import settings
 from app.core.database import get_db
+from app.core.security import validate_password_strength
 from app.models.biotime_models import AuthUser, BaseOperationLog
 
 # Router
@@ -299,6 +300,12 @@ async def change_password(
             detail="Current password is incorrect"
         )
     
+    # Enforce password strength before hashing
+    try:
+        validate_password_strength(request.new_password, getattr(current_user, "username", None))
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
     # Hash new password
     new_password_hash = get_password_hash(request.new_password)
     
@@ -394,6 +401,12 @@ async def create_user(
             detail="Username already exists"
         )
     
+    # Enforce password strength before creating the account
+    try:
+        validate_password_strength(user_data.password, user_data.username)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
     # Create new user
     hashed_password = get_password_hash(user_data.password)
     new_user = AuthUser(

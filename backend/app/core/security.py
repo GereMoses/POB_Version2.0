@@ -131,6 +131,45 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 def get_password_hash(password: str) -> str:
     return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
 
+
+# ── Password strength policy ────────────────────────────────────────────────
+PASSWORD_MIN_LENGTH = 12
+
+# The most-common weak passwords (lowercased). Defence-in-depth on top of the
+# length + character-class rules — blocks the passwords credential-stuffing and
+# dictionary attacks try first.
+_COMMON_PASSWORDS = {
+    "password", "password1", "password12", "password123", "passw0rd", "admin",
+    "admin123", "administrator", "welcome", "welcome1", "welcome123", "letmein",
+    "qwerty", "qwerty123", "123456", "1234567", "12345678", "123456789", "1234567890",
+    "iloveyou", "abc123", "changeme", "secret", "root", "toor", "test123", "pass123",
+    "monkey", "dragon", "master", "superman", "trustno1", "login", "starwars",
+}
+
+
+def validate_password_strength(password: str, username: str | None = None) -> None:
+    """Raise ValueError if `password` is too weak to store.
+
+    Enforced on every password create/change so an easily-cracked password (a
+    short one, a single character class, 'admin123', or one containing the
+    username) can never be set — a stolen/guessed password should not be enough
+    to reach an account, and this stops the weak ones being chosen in the first
+    place. Pair with 2FA for defence in depth.
+    """
+    if not password or len(password) < PASSWORD_MIN_LENGTH:
+        raise ValueError(f"Password must be at least {PASSWORD_MIN_LENGTH} characters long.")
+    import re
+    classes = sum(bool(re.search(p, password)) for p in (r"[a-z]", r"[A-Z]", r"\d", r"[^A-Za-z0-9]"))
+    if classes < 3:
+        raise ValueError("Password must include at least 3 of: lowercase, uppercase, number, symbol.")
+    low = password.lower()
+    if low in _COMMON_PASSWORDS:
+        raise ValueError("That password is too common — choose a less predictable one.")
+    if "password" in low or "admin" in low:
+        raise ValueError("Password must not contain 'password' or 'admin'.")
+    if username and len(username) >= 3 and username.lower() in low:
+        raise ValueError("Password must not contain your username.")
+
 # Token Validation
 def create_password_reset_token(email: str) -> str:
     delta = timedelta(hours=settings.EMAIL_RESET_TOKEN_EXPIRE_HOURS)

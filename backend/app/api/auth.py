@@ -157,6 +157,39 @@ def _get_session_timeout(db: Session) -> int:
         return _FALLBACK_TIMEOUT
 
 
+def _mfa_pending_if_enabled(db: Session, user_id: int, sub: str, client_ip: str = None):
+    """If this account has TOTP 2FA enabled, return the short-lived mfa_pending
+    response the client must exchange at /api/v1/mfa/verify; otherwise None.
+
+    Every login path calls this AFTER a correct password so a valid password alone
+    can never mint a full session token when 2FA is on — closing the bypass where
+    an attacker used an alternate login endpoint to skip the second factor.
+    """
+    try:
+        row = db.execute(text(
+            "SELECT COALESCE(totp_enabled, FALSE) FROM auth_user WHERE id = :uid"
+        ), {"uid": user_id}).fetchone()
+        totp_enabled = bool(row[0]) if row else False
+    except Exception:
+        db.rollback()   # totp column may not exist yet — treat as disabled, keep session usable
+        totp_enabled = False
+
+    if not totp_enabled:
+        return None
+
+    mfa_token = create_access_token(
+        data={"sub": sub, "mfa_pending": True},
+        expires_delta=timedelta(minutes=5),
+    )
+    _clear_failed(sub, client_ip)
+    return {
+        "access_token": mfa_token,
+        "token_type": "bearer",
+        "mfa_required": True,
+        "message": "MFA verification required. Submit your TOTP code to /api/v1/mfa/verify.",
+    }
+
+
 @router.post("/production-login", response_model=dict)
 async def production_login(
     request: Request,
@@ -213,29 +246,11 @@ async def production_login(
                 detail="Account is inactive"
             )
         
-        # If MFA is enabled for this user, return a short-lived pending token
-        # instead of a full access token. The client must call /mfa/verify.
-        try:
-            mfa_row = db.execute(text(
-                "SELECT COALESCE(totp_enabled, FALSE) FROM auth_user WHERE id = :uid"
-            ), {"uid": user_data.id}).fetchone()
-            totp_enabled = bool(mfa_row[0]) if mfa_row else False
-        except Exception:
-            db.rollback()   # column may not exist yet; must rollback or session stays aborted
-            totp_enabled = False
-
-        if totp_enabled:
-            mfa_token = create_access_token(
-                data={"sub": user_data.username, "mfa_pending": True},
-                expires_delta=timedelta(minutes=5),
-            )
-            _clear_failed(form_data.username, client_ip)
-            return {
-                "access_token": mfa_token,
-                "token_type": "bearer",
-                "mfa_required": True,
-                "message": "MFA verification required. Submit your TOTP code to /api/v1/mfa/verify.",
-            }
+        # 2FA gate — if enabled, hand back a short-lived pending token that must be
+        # exchanged at /api/v1/mfa/verify with a valid TOTP code.
+        _mfa = _mfa_pending_if_enabled(db, user_data.id, user_data.username, client_ip)
+        if _mfa:
+            return _mfa
 
         # Create access token using DB-configured timeout
         timeout_mins = _get_session_timeout(db)
@@ -297,7 +312,13 @@ async def simple_login(
     form_data: OAuth2PasswordRequestForm = Depends(),
     db: Session = Depends(get_db)
 ):
-    """Login endpoint — shared brute-force lockout with production-login."""
+    """Dev-only login endpoint — shared brute-force lockout with production-login.
+
+    Disabled in production so it can never be used to sidestep the hardened
+    production-login flow; the React app uses production-login when deployed.
+    """
+    if str(getattr(settings, "ENVIRONMENT", "development")).lower() == "production":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
     try:
         _check_lockout(form_data.username)
 
@@ -324,8 +345,14 @@ async def simple_login(
                 detail="Account is inactive"
             )
 
+        # 2FA gate — never issue a full token on password alone when TOTP is on.
+        _mfa = _mfa_pending_if_enabled(db, user_data.id, user_data.username)
+        if _mfa:
+            _clear_failed(form_data.username)
+            return _mfa
+
         _clear_failed(form_data.username)
-        
+
         # Create access token using DB-configured timeout
         timeout_mins = _get_session_timeout(db)
         access_token_expires = timedelta(minutes=timeout_mins)
@@ -362,12 +389,12 @@ async def simple_login(
 #     return user
 
 
-@router.post("/login", response_model=Token)
+@router.post("/login", response_model=dict)
 async def login(
     db: Session = Depends(get_db),
     form_data: OAuth2PasswordRequestForm = Depends()
 ) -> Any:
-    """Authenticate user and return access token"""
+    """Authenticate user and return access token (or an mfa_pending response)."""
     try:
         # Use raw SQL to find user
         query = text("""
@@ -402,7 +429,12 @@ async def login(
                 detail="Incorrect password",
                 headers={"WWW-Authenticate": "Bearer"},
             )
-        
+
+        # 2FA gate — never issue a full token on password alone when TOTP is on.
+        _mfa = _mfa_pending_if_enabled(db, user_id, username)
+        if _mfa:
+            return _mfa
+
         # Create access token using DB-configured timeout
         timeout_mins = _get_session_timeout(db)
         access_token_expires = timedelta(minutes=timeout_mins)
