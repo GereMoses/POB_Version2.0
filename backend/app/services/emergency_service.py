@@ -446,6 +446,7 @@ class EmergencyService:
         self,
         zone_id: Optional[int] = None,
         location_id: Optional[int] = None,
+        muster_zone_id: Optional[int] = None,
         action: str = "activate",
         reason: Optional[str] = None,
         initiated_by: Optional[int] = None,
@@ -601,12 +602,18 @@ class EmergencyService:
                 # MusteringService.start_mustering_event has its own db.commit() on
                 # success and db.rollback() on failure. Because the emergency event
                 # was committed above, its own rollback cannot affect it.
+                # Affected/source zones = the fired zone, or (global) every active
+                # OPERATIONAL zone — never a muster point (those are the destinations).
                 mustering_zone_ids = [zone_id] if zone_id else [
-                    z.id for z in db.query(Zone).filter(Zone.is_active == True).limit(10).all()
+                    z.id for z in db.query(Zone).filter(
+                        Zone.is_active == True,
+                        Zone.zone_type != "MUSTER_POINT",
+                    ).limit(10).all()
                 ]
                 try:
                     muster_result = MusteringService(db).start_mustering_event(
                         zone_ids=mustering_zone_ids,
+                        muster_zone_id=muster_zone_id,  # directed assembly point (optional)
                         event_type=2,  # Fire
                         initiated_by=initiated_by or 0,
                         notes="Fire evacuation — auto-started by fire mode activation",

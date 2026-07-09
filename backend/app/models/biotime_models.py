@@ -327,7 +327,8 @@ class MusteringEvent(Base):
     
     id = Column(BigInteger, primary_key=True, index=True)
     zone_id = Column(Integer, ForeignKey("zones.id"), nullable=True, index=True)
-    zone_ids = Column(JSONB, default=list)  # list of zone IDs covered by this event
+    zone_ids = Column(JSONB, default=list)  # list of AFFECTED/source zone IDs (who is expected)
+    muster_zone_id = Column(Integer, ForeignKey("zones.id"), nullable=True, index=True)  # target assembly point (MUSTER_POINT zone) people report TO
     event_type = Column(SmallInteger, nullable=False)  # 0=drill, 1=emergency, 2=lockdown
     start_time = Column(DateTime(timezone=True), nullable=False)
     end_time = Column(DateTime(timezone=True))
@@ -346,6 +347,7 @@ class MusteringEvent(Base):
 
     # Relationships
     zone = relationship("Zone", foreign_keys=[zone_id])
+    muster_zone = relationship("Zone", foreign_keys=[muster_zone_id])
     logs = relationship("MusteringLog", back_populates="event")
 
 class MusteringLog(Base):

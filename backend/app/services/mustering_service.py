@@ -59,6 +59,7 @@ class MusteringService:
         zone_ids: List[int],
         event_type: int,
         initiated_by: int,
+        muster_zone_id: int = None,
         notify_sms: bool = False,
         notify_email: bool = False,
         notify_whatsapp: bool = False,
@@ -68,8 +69,10 @@ class MusteringService:
         """
         Start a mustering event covering one or more access-control zones.
 
-        Expected personnel = everyone whose current_zone_id is in zone_ids,
-        as tracked by the access-control system in real time.
+        zone_ids       = AFFECTED/source zones — expected personnel are everyone whose
+                         current_zone_id is in them (tracked by access control live).
+        muster_zone_id = the target assembly point (a MUSTER_POINT zone) people report
+                         TO; its Horus H1 ADMS reader is what marks them safe.
 
         Event Types: 0=Real, 1=Drill, 2=Fire, 3=Gas, 4=ManDown
         """
@@ -77,12 +80,26 @@ class MusteringService:
             if not zone_ids:
                 raise ValueError("At least one zone must be selected")
 
+            # A muster point is a safe destination, never a source zone — drop any that
+            # slipped into the affected list so they don't inflate the expected roster.
+            muster_ids = {
+                r[0] for r in self.db.query(Zone.id).filter(Zone.zone_type == "MUSTER_POINT").all()
+            }
+            zone_ids = [z for z in zone_ids if z not in muster_ids]
+            if not zone_ids:
+                raise ValueError("Select at least one operational (non-muster) affected zone")
+
             # Validate zones exist
             zones = self.db.query(Zone).filter(Zone.id.in_(zone_ids)).all()
             found_ids = {z.id for z in zones}
             missing = set(zone_ids) - found_ids
             if missing:
                 raise ValueError(f"Zone(s) not found: {missing}")
+
+            # Validate the target muster point (if given) really is a muster point.
+            if muster_zone_id is not None:
+                if muster_zone_id not in muster_ids:
+                    raise ValueError("muster_zone_id must be a MUSTER_POINT zone")
 
             # Acquire the global mustering advisory lock before checking for an active
             # event. The system intentionally allows only ONE active mustering event at a
@@ -114,6 +131,7 @@ class MusteringService:
             event = MusteringEvent(
                 zone_id=primary_zone_id,
                 zone_ids=zone_ids,
+                muster_zone_id=muster_zone_id,
                 event_type=event_type,
                 start_time=datetime.utcnow(),
                 status=0,
@@ -197,13 +215,17 @@ class MusteringService:
                 except Exception:
                     pass
 
-            # Activate mustering readers for all selected zones (best-effort).
-            for zid in zone_ids:
+            # Activate the muster-point readers (best-effort). Directed muster → only
+            # the chosen assembly point's reader; otherwise every muster point so any
+            # of them can accept check-ins. Muster readers live on the MUSTER_POINT
+            # zone, not the affected/source zones.
+            reader_zone_ids = [muster_zone_id] if muster_zone_id else list(muster_ids)
+            for zid in reader_zone_ids:
                 try:
                     self._set_mustering_readers(zid, True)
                 except Exception as reader_err:
                     logger.warning(
-                        f"Could not activate mustering reader for zone {zid}: {reader_err} — "
+                        f"Could not activate mustering reader for muster zone {zid}: {reader_err} — "
                         f"event already committed, continuing"
                     )
                     # Reset the session in case the transaction is now aborted
@@ -279,13 +301,21 @@ class MusteringService:
                     pass
 
             # Reset mustering readers (best-effort — bad serial numbers must not
-            # prevent the event from being marked complete).
-            for zid in (event.zone_ids or ([event.zone_id] if event.zone_id else [])):
+            # prevent the event from being marked complete). Deactivate the same
+            # muster-point readers that were activated at start: the chosen target,
+            # or every muster point when the event was open (no target).
+            if event.muster_zone_id:
+                reset_zone_ids = [event.muster_zone_id]
+            else:
+                reset_zone_ids = [
+                    r[0] for r in self.db.query(Zone.id).filter(Zone.zone_type == "MUSTER_POINT").all()
+                ]
+            for zid in reset_zone_ids:
                 try:
                     self._set_mustering_readers(zid, False)
                 except Exception as reader_err:
                     logger.warning(
-                        f"Could not deactivate mustering reader for zone {zid}: {reader_err} — "
+                        f"Could not deactivate mustering reader for muster zone {zid}: {reader_err} — "
                         f"event already committed as completed"
                     )
                     try:

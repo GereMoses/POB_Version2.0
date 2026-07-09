@@ -1964,6 +1964,26 @@ const MusteringManagement = ({ embedded = false, onSectionSwitch }) => {
               }
             </Select>
           </Form.Item>
+          <Form.Item
+            name="muster_zone_id"
+            label="Assembly Point (where personnel report)"
+            extra="Personnel from the coverage areas report here; the headcount is taken at this muster point's Horus H1 reader. Leave blank to allow check-in at any muster point."
+          >
+            <Select
+              allowClear
+              showSearch
+              optionFilterProp="label"
+              size="large"
+              placeholder="Select the muster point people evacuate to"
+            >
+              {zones
+                .filter(z => z.zone_type === 'MUSTER_POINT')
+                .map(z => (
+                  <Select.Option key={z.id} value={z.id} label={z.name}>{z.name}</Select.Option>
+                ))
+              }
+            </Select>
+          </Form.Item>
           <Form.Item name="event_type" label="Emergency Type" rules={[{ required: true }]}>
             <Select size="large">
               {EVENT_TYPES.map(t => (

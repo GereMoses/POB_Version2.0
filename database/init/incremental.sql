@@ -129,3 +129,9 @@ ALTER TABLE public.vis_pre_registration ADD CONSTRAINT vis_pre_registration_appr
 -- (controller, port) unit. Additive columns; terminal_sn kept for legacy T&A doors.
 ALTER TABLE public.acc_door ADD COLUMN IF NOT EXISTS controller_id integer REFERENCES public.access_controllers(id);
 ALTER TABLE public.acc_door ADD COLUMN IF NOT EXISTS port integer;
+
+-- ── Mustering: directed assembly — a target muster point per event ────────────
+-- zone_ids = affected/source zones (who is expected). muster_zone_id = the
+-- MUSTER_POINT zone people report TO (headcount via its Horus H1 ADMS reader).
+ALTER TABLE public.mustering_event ADD COLUMN IF NOT EXISTS muster_zone_id integer REFERENCES public.zones(id);
+CREATE INDEX IF NOT EXISTS ix_mustering_event_muster_zone_id ON public.mustering_event (muster_zone_id);

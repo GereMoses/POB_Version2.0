@@ -12,12 +12,14 @@ import { api } from '../../services/api';
 
 const EmergencyFireMode = () => {
   const [zones, setZones] = useState([]);
+  const [musterZones, setMusterZones] = useState([]);
   const [locations, setLocations] = useState([]);
   const [activeFireMode, setActiveFireMode] = useState(null);
   const [fireModeHistory, setFireModeHistory] = useState([]);
   const [loading, setLoading] = useState(true);
   const [actionInProgress, setActionInProgress] = useState(false);
   const [selectedZone, setSelectedZone] = useState('');
+  const [selectedMuster, setSelectedMuster] = useState('');
   const [selectedLocation, setSelectedLocation] = useState('');
   const [fireModeReason, setFireModeReason] = useState('');
   const [showConfirmModal, setShowConfirmModal] = useState(false);
@@ -37,9 +39,11 @@ const EmergencyFireMode = () => {
       ]);
       
       // Muster/assembly points are safe destinations people evacuate TO, not
-      // evacuation targets — exclude them from the fire-mode zone list.
+      // evacuation targets — exclude them from the fire-mode zone list, and offer
+      // them separately as the assembly point personnel report to.
       const _zl = Array.isArray(zonesRes) ? zonesRes : (zonesRes?.data?.data ?? zonesRes?.data ?? []);
       setZones(_zl.filter(z => z?.zone_type !== 'MUSTER_POINT'));
+      setMusterZones(_zl.filter(z => z?.zone_type === 'MUSTER_POINT'));
       // Locations = personnel areas (for location-scoped fire mode, action #13).
       try {
         const areasRes = await api.get('/api/device/areas');
@@ -82,6 +86,7 @@ const EmergencyFireMode = () => {
       const requestData = {
         zone_id: pendingAction.zoneId,
         location_id: pendingAction.locationId,
+        muster_zone_id: selectedMuster ? parseInt(selectedMuster) : null,
         action: pendingAction.action,
         reason: pendingAction.action === 'activate' ? fireModeReason : 'Fire emergency cleared'
       };
@@ -103,6 +108,7 @@ const EmergencyFireMode = () => {
         // Reset form
         setFireModeReason('');
         setSelectedZone('');
+        setSelectedMuster('');
         setShowConfirmModal(false);
         setPendingAction(null);
         
@@ -209,6 +215,27 @@ const EmergencyFireMode = () => {
                   </option>
                 ))}
               </select>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Assembly Point (where personnel report)
+              </label>
+              <select
+                value={selectedMuster}
+                onChange={(e) => setSelectedMuster(e.target.value)}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="">Any muster point</option>
+                {musterZones.map((mz) => (
+                  <option key={mz.id} value={mz.id}>
+                    {mz.name}
+                  </option>
+                ))}
+              </select>
+              <p className="mt-1 text-xs text-gray-500">
+                Evacuees report here; headcount is taken at this muster point’s Horus H1 reader.
+              </p>
             </div>
 
             <div>
