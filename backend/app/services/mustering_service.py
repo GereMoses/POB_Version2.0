@@ -819,6 +819,18 @@ class MusteringService:
             log.status = status
             log.check_time = datetime.utcnow()
 
+            # Marking someone Safe/Injured means they've been accounted for at the
+            # assembly point — attribute them to the event's target muster point so
+            # the headcount shows there (the map credits a zone by last_punch_area
+            # name). Only when the event has a directed target; open musters keep
+            # whatever area the badge/last-seen recorded.
+            if status in (1, 2):
+                event = self.db.query(MusteringEvent).filter(MusteringEvent.id == event_id).first()
+                if event and event.muster_zone_id:
+                    mz = self.db.query(Zone).filter(Zone.id == event.muster_zone_id).first()
+                    if mz:
+                        log.last_punch_area = mz.name
+
             # Compute counter deltas and apply atomically
             delta_safe = delta_missing = delta_injured = 0
             if old_status == 0 and status == 1:    # Missing -> Safe

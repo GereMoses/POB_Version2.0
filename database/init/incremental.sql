@@ -135,3 +135,7 @@ ALTER TABLE public.acc_door ADD COLUMN IF NOT EXISTS port integer;
 -- MUSTER_POINT zone people report TO (headcount via its Horus H1 ADMS reader).
 ALTER TABLE public.mustering_event ADD COLUMN IF NOT EXISTS muster_zone_id integer REFERENCES public.zones(id);
 CREATE INDEX IF NOT EXISTS ix_mustering_event_muster_zone_id ON public.mustering_event (muster_zone_id);
+
+-- mustering_log.last_punch_area holds a zone NAME (zones.name is varchar(100));
+-- the original varchar(20) truncated longer names and broke safe-count attribution.
+ALTER TABLE public.mustering_log ALTER COLUMN last_punch_area TYPE varchar(100);
