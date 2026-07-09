@@ -106,7 +106,11 @@ class EmergencyService:
                     "status": "ACTIVE" if active_count > 0 else "SAFE",
                     "active_emergencies": active_count,
                     "capacity": zone.max_capacity,
-                    "evac_point": zone.evac_point
+                    "evac_point": zone.evac_point,
+                    # Muster/assembly points are safe destinations, not operational
+                    # zones — flag them so the UI can separate them from lockdown targets.
+                    "is_muster_point": zone.zone_type == "MUSTER_POINT",
+                    "zone_type": zone.zone_type,
                 })
             
             return {
@@ -150,6 +154,17 @@ class EmergencyService:
         except Exception as e:
             logger.error(f"Error getting emergency dashboard: {str(e)}")
             raise
+
+    @staticmethod
+    def _muster_zone_ids(db: Session) -> set:
+        """IDs of zones that are muster/assembly points (zone_type == MUSTER_POINT).
+
+        A muster point is the *safe destination* people evacuate TO — its headcount
+        comes from Horus H1 ADMS readers via the mustering module. It is never an
+        operational zone to lock down or evacuate, so emergency actions exclude it.
+        """
+        rows = db.query(Zone.id).filter(Zone.zone_type == "MUSTER_POINT").all()
+        return {r[0] for r in rows}
 
     @staticmethod
     def _dedupe_doors(doors: List[AccDoor]) -> List[AccDoor]:
@@ -243,6 +258,15 @@ class EmergencyService:
                 target_doors = db.query(AccDoor).all()
                 scope_enum = EmergencyScope.GLOBAL.value
             elif scope == "zone" and zone_ids:
+                # Muster/assembly points are safe destinations, not lockdown targets —
+                # drop them so they're neither commanded nor recorded as affected zones.
+                muster_ids = self._muster_zone_ids(db)
+                zone_ids = [z for z in zone_ids if z not in muster_ids]
+                if not zone_ids:
+                    raise ValueError(
+                        "Muster points are safe assembly areas and cannot be locked "
+                        "down or evacuated. Select operational zones instead."
+                    )
                 # Two door kinds map to a zone: legacy T&A/standalone doors via their
                 # terminal's zone_id, and access-control doors via a controller port
                 # (controller_id + port) mapped to an AccessReader in the zone.
@@ -441,6 +465,14 @@ class EmergencyService:
                 zone = db.query(Zone).filter(Zone.id == zone_id).first()
                 if not zone:
                     raise ValueError(f"Zone {zone_id} not found")
+                if zone.zone_type == "MUSTER_POINT":
+                    # A muster point is the safe destination people evacuate TO — you
+                    # don't activate fire evacuation on it. Headcount there is via the
+                    # mustering module (Horus H1 ADMS readers), not fire mode.
+                    raise ValueError(
+                        "Muster points are safe assembly areas and cannot be the "
+                        "target of fire mode. Select an operational zone."
+                    )
             else:
                 zone = None
 

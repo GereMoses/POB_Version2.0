@@ -38,7 +38,9 @@ const EmergencyLockdown = () => {
         api.get('/api/emergency/audit/?event_type=0&limit=10') // Lockdown events
       ]);
       
-      setZones(zonesRes.data.data || []);
+      // Muster/assembly points are safe areas, not lockdown targets — exclude them.
+      const _zl = Array.isArray(zonesRes) ? zonesRes : (zonesRes?.data?.data ?? zonesRes?.data ?? []);
+      setZones(_zl.filter(z => z?.zone_type !== 'MUSTER_POINT'));
       setDoors(doorsRes.data.data || []);
       // Locations = personnel areas (for location-scoped lockdown, action #13).
       try {

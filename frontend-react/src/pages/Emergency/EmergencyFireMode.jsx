@@ -36,7 +36,10 @@ const EmergencyFireMode = () => {
         api.get('/api/emergency/audit/?event_type=1&limit=10') // Fire events
       ]);
       
-      setZones(zonesRes.data.data || []);
+      // Muster/assembly points are safe destinations people evacuate TO, not
+      // evacuation targets — exclude them from the fire-mode zone list.
+      const _zl = Array.isArray(zonesRes) ? zonesRes : (zonesRes?.data?.data ?? zonesRes?.data ?? []);
+      setZones(_zl.filter(z => z?.zone_type !== 'MUSTER_POINT'));
       // Locations = personnel areas (for location-scoped fire mode, action #13).
       try {
         const areasRes = await api.get('/api/device/areas');
