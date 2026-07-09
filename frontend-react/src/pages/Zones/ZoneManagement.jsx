@@ -2631,12 +2631,18 @@ const ZoneManagement = () => {
 
   const hasFilters = searchVal || typeFilter || statusFilter || hazardFilter;
 
-  const { totalPOB, activeZones, totalReaders, alerts } = useMemo(() => ({
-    totalPOB:     zones.reduce((s, z) => s + (z.current_personnel_count || 0), 0),
-    activeZones:  zones.filter(z => z.is_active && z.status === 'ACTIVE').length,
-    totalReaders: zones.reduce((s, z) => s + (z.device_count || z.reader_count || 0), 0),
-    alerts:       zones.filter(z => ['EMERGENCY','LOCKDOWN'].includes(z.status)).length,
-  }), [zones]);
+  // Operational zones exclude muster/assembly points — those are safe destinations,
+  // not tracked-occupancy zones, so they get their own count (see musterPoints above).
+  const { totalPOB, operationalZones, activeZones, totalReaders, alerts } = useMemo(() => {
+    const ops = zones.filter(z => z.zone_type !== 'MUSTER_POINT');
+    return {
+      totalPOB:        zones.reduce((s, z) => s + (z.current_personnel_count || 0), 0),
+      operationalZones: ops.length,
+      activeZones:     ops.filter(z => z.is_active && z.status === 'ACTIVE').length,
+      totalReaders:    zones.reduce((s, z) => s + (z.device_count || z.reader_count || 0), 0),
+      alerts:          zones.filter(z => ['EMERGENCY','LOCKDOWN'].includes(z.status)).length,
+    };
+  }, [zones]);
 
   // Always reflects the latest polling data — no manual sync needed
   const detailZone = useMemo(() => zones.find(z => z.id === detailZoneId) ?? null, [zones, detailZoneId]);
@@ -2880,13 +2886,14 @@ const ZoneManagement = () => {
         {/* ── KPI strip ── */}
         <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
           {[
-            { label: 'Total Personnel On Board', value: totalPOB,     color: '#0078D4', icon: <TeamOutlined /> },
-            { label: 'Active Zones',              value: activeZones,  color: '#059669', icon: <CheckCircleOutlined /> },
-            { label: 'Total Zones',               value: zones.length, color: '#374151', icon: <RadarChartOutlined /> },
-            { label: 'ADMS Readers',              value: totalReaders, color: '#6D28D9', icon: <ApiOutlined /> },
-            { label: 'Alerts',                    value: alerts,       color: alerts > 0 ? '#DC2626' : '#94a3b8', icon: <AlertOutlined /> },
+            { label: 'Total Personnel On Board', value: totalPOB,            color: '#0078D4', icon: <TeamOutlined /> },
+            { label: 'Active Zones',              value: activeZones,         color: '#059669', icon: <CheckCircleOutlined /> },
+            { label: 'Zones',                     value: operationalZones,    color: '#374151', icon: <RadarChartOutlined /> },
+            { label: 'Muster Points',             value: musterPoints.length, color: '#10B981', icon: <SafetyOutlined /> },
+            { label: 'ADMS Readers',              value: totalReaders,        color: '#6D28D9', icon: <ApiOutlined /> },
+            { label: 'Alerts',                    value: alerts,              color: alerts > 0 ? '#DC2626' : '#94a3b8', icon: <AlertOutlined /> },
           ].map(s => (
-            <Col key={s.label} xs={12} sm={s.label === 'Total Personnel On Board' ? 6 : 4}>
+            <Col key={s.label} xs={12} sm={4}>
               <div style={{
                 background: '#fff', borderRadius: 10, padding: '14px 18px',
                 border: `1px solid ${s.label === 'Alerts' && alerts > 0 ? '#fecaca' : '#f0f0f0'}`,
