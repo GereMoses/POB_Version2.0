@@ -59,7 +59,7 @@ class MusteringService:
         zone_ids: List[int],
         event_type: int,
         initiated_by: int,
-        muster_zone_id: int = None,
+        muster_zone_ids: List[int] = None,
         notify_sms: bool = False,
         notify_email: bool = False,
         notify_whatsapp: bool = False,
@@ -69,10 +69,11 @@ class MusteringService:
         """
         Start a mustering event covering one or more access-control zones.
 
-        zone_ids       = AFFECTED/source zones — expected personnel are everyone whose
-                         current_zone_id is in them (tracked by access control live).
-        muster_zone_id = the target assembly point (a MUSTER_POINT zone) people report
-                         TO; its Horus H1 ADMS reader is what marks them safe.
+        zone_ids        = AFFECTED/source zones — expected personnel are everyone whose
+                          current_zone_id is in them (tracked by access control live).
+        muster_zone_ids = the target assembly points (MUSTER_POINT zones). Personnel go
+                          to whichever is NEAREST and scan there; each point's Horus H1
+                          reader marks the people who reach it. Empty = any muster point.
 
         Event Types: 0=Real, 1=Drill, 2=Fire, 3=Gas, 4=ManDown
         """
@@ -82,10 +83,10 @@ class MusteringService:
 
             # A muster point is a safe destination, never a source zone — drop any that
             # slipped into the affected list so they don't inflate the expected roster.
-            muster_ids = {
+            all_muster_ids = {
                 r[0] for r in self.db.query(Zone.id).filter(Zone.zone_type == "MUSTER_POINT").all()
             }
-            zone_ids = [z for z in zone_ids if z not in muster_ids]
+            zone_ids = [z for z in zone_ids if z not in all_muster_ids]
             if not zone_ids:
                 raise ValueError("Select at least one operational (non-muster) affected zone")
 
@@ -96,10 +97,13 @@ class MusteringService:
             if missing:
                 raise ValueError(f"Zone(s) not found: {missing}")
 
-            # Validate the target muster point (if given) really is a muster point.
-            if muster_zone_id is not None:
-                if muster_zone_id not in muster_ids:
-                    raise ValueError("muster_zone_id must be a MUSTER_POINT zone")
+            # Validate every chosen assembly point really is a muster point; de-dupe,
+            # keep order. muster_zone_id (primary) = the first, for manual-mark attribution.
+            muster_zone_ids = list(dict.fromkeys(muster_zone_ids or []))
+            bad = [m for m in muster_zone_ids if m not in all_muster_ids]
+            if bad:
+                raise ValueError(f"Assembly point(s) are not muster points: {bad}")
+            muster_zone_id = muster_zone_ids[0] if muster_zone_ids else None
 
             # Acquire the global mustering advisory lock before checking for an active
             # event. The system intentionally allows only ONE active mustering event at a
@@ -132,6 +136,7 @@ class MusteringService:
                 zone_id=primary_zone_id,
                 zone_ids=zone_ids,
                 muster_zone_id=muster_zone_id,
+                muster_zone_ids=muster_zone_ids,
                 event_type=event_type,
                 start_time=datetime.utcnow(),
                 status=0,
@@ -193,14 +198,9 @@ class MusteringService:
             # name at event start for historical accuracy; current_zone_id gives
             # the live queryable FK for grouping missing persons by search zone.
             try:
-                muster_zone_ids = [
-                    row[0] for row in self.db.query(Zone.id).filter(
-                        Zone.zone_type == 'MUSTER_POINT'
-                    ).all()
-                ]
                 zone_filter = Zone.current_occupancy > 0
-                if muster_zone_ids:
-                    zone_filter = and_(zone_filter, ~Zone.id.in_(muster_zone_ids))
+                if all_muster_ids:
+                    zone_filter = and_(zone_filter, ~Zone.id.in_(all_muster_ids))
                 self.db.query(Zone).filter(zone_filter).update(
                     {'current_occupancy': 0, 'current_personnel_count': 0},
                     synchronize_session=False
@@ -215,11 +215,10 @@ class MusteringService:
                 except Exception:
                     pass
 
-            # Activate the muster-point readers (best-effort). Directed muster → only
-            # the chosen assembly point's reader; otherwise every muster point so any
-            # of them can accept check-ins. Muster readers live on the MUSTER_POINT
-            # zone, not the affected/source zones.
-            reader_zone_ids = [muster_zone_id] if muster_zone_id else list(muster_ids)
+            # Activate the muster-point readers (best-effort) for every chosen assembly
+            # point — so people can scan in at whichever is nearest. None chosen → every
+            # muster point. Muster readers live on the MUSTER_POINT zone, not the source.
+            reader_zone_ids = list(muster_zone_ids) if muster_zone_ids else list(all_muster_ids)
             for zid in reader_zone_ids:
                 try:
                     self._set_mustering_readers(zid, True)
@@ -302,10 +301,10 @@ class MusteringService:
 
             # Reset mustering readers (best-effort — bad serial numbers must not
             # prevent the event from being marked complete). Deactivate the same
-            # muster-point readers that were activated at start: the chosen target,
-            # or every muster point when the event was open (no target).
-            if event.muster_zone_id:
-                reset_zone_ids = [event.muster_zone_id]
+            # muster-point readers that were activated at start: the chosen assembly
+            # points, or every muster point when the event was open (none chosen).
+            if event.muster_zone_ids:
+                reset_zone_ids = list(event.muster_zone_ids)
             else:
                 reset_zone_ids = [
                     r[0] for r in self.db.query(Zone.id).filter(Zone.zone_type == "MUSTER_POINT").all()

@@ -48,7 +48,7 @@ manager = MusteringConnectionManager()
 # Pydantic Models
 class MusteringEventStart(BaseModel):
     zone_ids: List[int] = Field(..., min_items=1, description="Affected/source zone IDs (who is expected)")
-    muster_zone_id: Optional[int] = Field(None, description="Target assembly point people report TO (a MUSTER_POINT zone)")
+    muster_zone_ids: Optional[List[int]] = Field(None, description="Target assembly points (MUSTER_POINT zones); personnel go to the nearest. Empty = any muster point.")
     event_type: int = Field(..., description="Event type: 0=Real, 1=Drill, 2=Fire, 3=Gas, 4=ManDown")
     notify_sms: bool = Field(default=False, description="Send SMS notifications")
     notify_email: bool = Field(default=False, description="Send email notifications")
@@ -385,6 +385,8 @@ async def list_mustering_events(
                 "zone_names": ev_zone_names,
                 "muster_zone_id": event.muster_zone_id,
                 "muster_zone_name": all_zones.get(event.muster_zone_id) if event.muster_zone_id else None,
+                "muster_zone_ids": event.muster_zone_ids or ([event.muster_zone_id] if event.muster_zone_id else []),
+                "muster_zone_names": [all_zones.get(z) for z in (event.muster_zone_ids or ([event.muster_zone_id] if event.muster_zone_id else [])) if z in all_zones],
                 "event_type": event.event_type,
                 "start_time": event.start_time.isoformat() if event.start_time else None,
                 "end_time": event.end_time.isoformat() if event.end_time else None,
@@ -416,7 +418,7 @@ async def start_mustering_event(
         
         result = service.start_mustering_event(
             zone_ids=event_data.zone_ids,
-            muster_zone_id=event_data.muster_zone_id,
+            muster_zone_ids=event_data.muster_zone_ids,
             event_type=event_data.event_type,
             initiated_by=current_user.id,
             notes=event_data.notes

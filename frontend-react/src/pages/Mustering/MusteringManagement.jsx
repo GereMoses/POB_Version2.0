@@ -565,7 +565,7 @@ const MusteringManagement = ({ embedded = false, onSectionSwitch }) => {
   // Live map/panel shows only the zones THIS event involves — its affected/source
   // zones plus the chosen target muster point — not every zone in the system.
   const eventScopeIds = (selectedEvent && selectedEvent.status === 0)
-    ? new Set([...(selectedEvent.zone_ids || []), selectedEvent.muster_zone_id].filter(v => v != null))
+    ? new Set([...(selectedEvent.zone_ids || []), ...(selectedEvent.muster_zone_ids || [selectedEvent.muster_zone_id])].filter(v => v != null))
     : null;
   const mapZones = (eventScopeIds && eventScopeIds.size)
     ? zones.filter(z => eventScopeIds.has(z.id))
@@ -1341,7 +1341,7 @@ const MusteringManagement = ({ embedded = false, onSectionSwitch }) => {
             <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
               <MusteringLiveMap
                 zones={mapZones}
-                activeZoneId={selectedEvent?.muster_zone_id ?? selectedEvent?.zone_id ?? null}
+                activeZoneId={selectedEvent?.muster_zone_ids?.[0] ?? selectedEvent?.muster_zone_id ?? selectedEvent?.zone_id ?? null}
                 allLogs={allLogs}
                 isEventActive={selectedEvent?.status === 0}
                 zoneLiveCounts={zoneLiveCounts}
@@ -1974,16 +1974,18 @@ const MusteringManagement = ({ embedded = false, onSectionSwitch }) => {
             </Select>
           </Form.Item>
           <Form.Item
-            name="muster_zone_id"
-            label="Assembly Point (where personnel report)"
-            extra="Personnel from the coverage areas report here; the headcount is taken at this muster point's Horus H1 reader. Leave blank to allow check-in at any muster point."
+            name="muster_zone_ids"
+            label="Assembly Points (where personnel report)"
+            extra="Pick one or more muster points — personnel go to whichever is nearest and scan in at that point's Horus H1 reader. Leave blank to allow check-in at any muster point."
           >
             <Select
+              mode="multiple"
               allowClear
               showSearch
               optionFilterProp="label"
               size="large"
-              placeholder="Select the muster point people evacuate to"
+              maxTagCount="responsive"
+              placeholder="Select the muster point(s) people evacuate to"
             >
               {zones
                 .filter(z => z.zone_kind === 'MUSTER_POINT')

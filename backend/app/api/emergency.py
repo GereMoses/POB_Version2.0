@@ -60,7 +60,7 @@ class LockdownRequest(BaseModel):
 class FireModeRequest(BaseModel):
     zone_id: Optional[int] = Field(None, description="Zone ID (optional for global)")
     location_id: Optional[int] = Field(None, description="Area/location ID (optional for location scope)")
-    muster_zone_id: Optional[int] = Field(None, description="Target assembly point people evacuate TO (a MUSTER_POINT zone)")
+    muster_zone_ids: Optional[List[int]] = Field(None, description="Target assembly points (MUSTER_POINT zones); evacuees go to the nearest. Empty = any muster point.")
     action: str = Field(..., description="activate or clear")
     reason: Optional[str] = Field(None, description="Reason for fire mode")
 
@@ -197,7 +197,7 @@ async def fire_mode_control(
         result = await emergency_service.activate_fire_mode(
             zone_id=request.zone_id,
             location_id=request.location_id,
-            muster_zone_id=request.muster_zone_id,
+            muster_zone_ids=request.muster_zone_ids,
             action=request.action,
             reason=request.reason,
             initiated_by=current_user.id,

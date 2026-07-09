@@ -328,7 +328,8 @@ class MusteringEvent(Base):
     id = Column(BigInteger, primary_key=True, index=True)
     zone_id = Column(Integer, ForeignKey("zones.id"), nullable=True, index=True)
     zone_ids = Column(JSONB, default=list)  # list of AFFECTED/source zone IDs (who is expected)
-    muster_zone_id = Column(Integer, ForeignKey("zones.id"), nullable=True, index=True)  # target assembly point (MUSTER_POINT zone) people report TO
+    muster_zone_id = Column(Integer, ForeignKey("zones.id"), nullable=True, index=True)  # PRIMARY assembly point (= muster_zone_ids[0]); anchor for manual-mark attribution
+    muster_zone_ids = Column(JSONB, default=list)  # all target assembly points (MUSTER_POINT zones) — personnel report to whichever is nearest
     event_type = Column(SmallInteger, nullable=False)  # 0=drill, 1=emergency, 2=lockdown
     start_time = Column(DateTime(timezone=True), nullable=False)
     end_time = Column(DateTime(timezone=True))

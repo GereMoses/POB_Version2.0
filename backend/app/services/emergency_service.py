@@ -446,7 +446,7 @@ class EmergencyService:
         self,
         zone_id: Optional[int] = None,
         location_id: Optional[int] = None,
-        muster_zone_id: Optional[int] = None,
+        muster_zone_ids: Optional[List[int]] = None,
         action: str = "activate",
         reason: Optional[str] = None,
         initiated_by: Optional[int] = None,
@@ -613,7 +613,7 @@ class EmergencyService:
                 try:
                     muster_result = MusteringService(db).start_mustering_event(
                         zone_ids=mustering_zone_ids,
-                        muster_zone_id=muster_zone_id,  # directed assembly point (optional)
+                        muster_zone_ids=muster_zone_ids,  # chosen assembly points (optional)
                         event_type=2,  # Fire
                         initiated_by=initiated_by or 0,
                         notes="Fire evacuation — auto-started by fire mode activation",

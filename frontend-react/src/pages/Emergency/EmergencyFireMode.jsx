@@ -19,7 +19,7 @@ const EmergencyFireMode = () => {
   const [loading, setLoading] = useState(true);
   const [actionInProgress, setActionInProgress] = useState(false);
   const [selectedZone, setSelectedZone] = useState('');
-  const [selectedMuster, setSelectedMuster] = useState('');
+  const [selectedMusters, setSelectedMusters] = useState([]);
   const [selectedLocation, setSelectedLocation] = useState('');
   const [fireModeReason, setFireModeReason] = useState('');
   const [showConfirmModal, setShowConfirmModal] = useState(false);
@@ -86,7 +86,7 @@ const EmergencyFireMode = () => {
       const requestData = {
         zone_id: pendingAction.zoneId,
         location_id: pendingAction.locationId,
-        muster_zone_id: selectedMuster ? parseInt(selectedMuster) : null,
+        muster_zone_ids: selectedMusters.map(Number),
         action: pendingAction.action,
         reason: pendingAction.action === 'activate' ? fireModeReason : 'Fire emergency cleared'
       };
@@ -108,7 +108,7 @@ const EmergencyFireMode = () => {
         // Reset form
         setFireModeReason('');
         setSelectedZone('');
-        setSelectedMuster('');
+        setSelectedMusters([]);
         setShowConfirmModal(false);
         setPendingAction(null);
         
@@ -219,14 +219,14 @@ const EmergencyFireMode = () => {
 
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">
-                Assembly Point (where personnel report)
+                Assembly Points (where personnel report)
               </label>
               <select
-                value={selectedMuster}
-                onChange={(e) => setSelectedMuster(e.target.value)}
-                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                multiple
+                value={selectedMusters}
+                onChange={(e) => setSelectedMusters(Array.from(e.target.selectedOptions, o => o.value))}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 h-28"
               >
-                <option value="">Any muster point</option>
                 {musterZones.map((mz) => (
                   <option key={mz.id} value={mz.id}>
                     {mz.name}
@@ -234,7 +234,7 @@ const EmergencyFireMode = () => {
                 ))}
               </select>
               <p className="mt-1 text-xs text-gray-500">
-                Evacuees report here; headcount is taken at this muster point’s Horus H1 reader.
+                Hold ⌘/Ctrl to pick several — evacuees go to the nearest and are counted at that point’s Horus H1 reader. None selected = any muster point.
               </p>
             </div>
 
