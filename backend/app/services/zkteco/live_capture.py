@@ -216,6 +216,25 @@ async def _device_live_capture(device_id: int,
             return
         ip, port, sn, area = cfg
 
+        # Fast reachability probe (~2s) BEFORE the full 8s ZK connect. An offline
+        # reader is common (network blip, powered down); without this each retry ties
+        # up a worker thread + a DB session for 8s+, and enough of those under load
+        # starve request handling so even logins time out. Unreachable → back off
+        # and skip the expensive connect entirely.
+        def _reachable():
+            import socket
+            try:
+                with socket.create_connection((ip, int(port)), timeout=2):
+                    return True
+            except Exception:
+                return False
+
+        if not await asyncio.get_event_loop().run_in_executor(None, _reachable):
+            retry = min(retry * 2, RETRY_MAX)
+            logger.debug("Live capture: %s (%s:%s) unreachable — retry in %ss", sn, ip, port, retry)
+            await asyncio.sleep(retry)
+            continue
+
         logger.info("Live capture: connecting to %s (%s:%s)", sn, ip, port)
 
         stop_evt   = threading.Event()
@@ -233,7 +252,8 @@ async def _device_live_capture(device_id: int,
 
         punch_count  = 0
         connect_time = asyncio.get_event_loop().time()
-        db = SessionLocal()
+        db = None  # opened lazily on the first real punch — an idle/offline reader
+                   # must not hold a pooled DB connection while it waits.
         try:
             while True:
                 try:
@@ -256,6 +276,8 @@ async def _device_live_capture(device_id: int,
                     continue   # idle heartbeat tick
 
                 try:
+                    if db is None:
+                        db = SessionLocal()
                     event = _save_punch(db, sn, area, item)
                     if event:
                         punch_count += 1
@@ -277,7 +299,8 @@ async def _device_live_capture(device_id: int,
                     db = _SL()
         finally:
             stop_evt.set()
-            db.close()
+            if db is not None:
+                db.close()
             with _device_threads_lock:
                 _device_threads[device_id] = None
 
