@@ -52,7 +52,9 @@ const elapsedStr = (t) => {
 const evTypeMeta = (v) => EVENT_TYPES.find(t => t.value === v) ?? EVENT_TYPES[0];
 
 const downloadEventReport = (eventId, fmt = 'excel') => {
-  const token = localStorage.getItem('auth_token') || sessionStorage.getItem('auth_token') || '';
+  // Canonical token key is 'token' (see services/api.js getAuthToken) — the old
+  // 'auth_token' lookup was always empty, so every export 401'd and silently failed.
+  const token = localStorage.getItem('token') || localStorage.getItem('authToken') || localStorage.getItem('access_token') || '';
   const url = `/api/mustering/events/${eventId}/export/?format=${fmt}`;
   fetch(url, { headers: { Authorization: `Bearer ${token}` } })
     .then(r => {
