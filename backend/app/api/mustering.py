@@ -421,6 +421,10 @@ async def start_mustering_event(
             muster_zone_ids=event_data.muster_zone_ids,
             event_type=event_data.event_type,
             initiated_by=current_user.id,
+            notify_sms=event_data.notify_sms,
+            notify_email=event_data.notify_email,
+            notify_whatsapp=event_data.notify_whatsapp,
+            notify_siren=event_data.notify_siren,
             notes=event_data.notes
         )
 

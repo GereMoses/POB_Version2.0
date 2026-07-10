@@ -239,6 +239,15 @@ class MusteringService:
                 event.id, zone_names, total_expected
             )
 
+            # Alert expected personnel over the requested channels (best-effort — a
+            # mail/gateway problem must never fail the muster). The event is already
+            # committed, so notifications run against a persisted event.
+            notify_result = None
+            if notify_sms or notify_email or notify_whatsapp:
+                notify_result = self._send_notifications(
+                    event.id, sms=notify_sms, email=notify_email, whatsapp=notify_whatsapp
+                )
+
             return {
                 "event_id": event.id,
                 "zone_ids": zone_ids,
@@ -247,6 +256,7 @@ class MusteringService:
                 "total_expected": total_expected,
                 "start_time": event.start_time.isoformat(),
                 "status": "started",
+                "notifications": notify_result,
             }
 
         except Exception as e:
@@ -1190,23 +1200,55 @@ class MusteringService:
             for s in sweeps
         ]
 
-    def _send_notifications(self, event_id: int, sms: bool, email: bool, whatsapp: bool):
-        """Send notifications for mustering event"""
+    def _send_notifications(self, event_id: int, sms: bool, email: bool, whatsapp: bool) -> Dict[str, Any]:
+        """Alert the expected personnel to proceed to their assembly point.
+
+        Email is delivered through the shared env-SMTP sender. SMS/WhatsApp need a
+        gateway (SMS_API_URL/KEY etc.) and are logged as pending until one is set.
+        Never raises — a mail outage must not fail the muster it belongs to.
+        """
+        result = {"email": None, "sms": "no_gateway" if sms else None,
+                  "whatsapp": "no_provider" if whatsapp else None}
         try:
+            from .notify_email import send_email, smtp_configured
             event = self.db.query(MusteringEvent).filter(MusteringEvent.id == event_id).first()
             if not event:
-                return
-            
-            # Queue notification tasks (in real implementation with Celery)
-            if sms:
-                logger.info(f"Queueing SMS notifications for event {event_id}")
-            
+                return result
+
+            mp_ids = event.muster_zone_ids or ([event.muster_zone_id] if event.muster_zone_id else [])
+            mp_names = [z.name for z in self.db.query(Zone).filter(Zone.id.in_(mp_ids)).all()] if mp_ids else []
+            where = (" — nearest: " + ", ".join(mp_names)) if mp_names else ""
+            etype = {0: "Roll call", 1: "Drill", 2: "FIRE", 3: "GAS", 4: "Man-down"}.get(event.event_type, "Muster")
+
             if email:
-                logger.info(f"Queueing email notifications for event {event_id}")
-            
+                if not smtp_configured():
+                    logger.warning("Muster %s: email requested but SMTP not configured — nothing sent", event_id)
+                    result["email"] = {"sent": 0, "error": "SMTP not configured"}
+                else:
+                    expected = self._calculate_expected_personnel(event.zone_ids or [])
+                    codes = [e["emp_code"] for e in expected if e.get("emp_code")]
+                    emails = []
+                    if codes:
+                        emails = [
+                            r[0] for r in self.db.query(Personnel.email).filter(
+                                Personnel.emp_code.in_(codes),
+                                Personnel.email.isnot(None), Personnel.email != "",
+                            ).all()
+                        ]
+                    emails = sorted(set(emails))
+                    subject = f"⚠ {etype} muster activated — proceed to assembly point"
+                    html = (f"<p><b>{etype} muster activated.</b></p>"
+                            f"<p>Proceed immediately to your assembly point{where}, and scan in "
+                            f"at the muster reader so you are accounted for as safe.</p>")
+                    text = f"{etype} muster activated. Proceed to your assembly point{where} and scan in to be marked safe."
+                    result["email"] = send_email(emails, subject, html, body_text=text)
+                    logger.info("Muster %s email notify: %s (%d recipients)", event_id, result["email"], len(emails))
+
+            if sms:
+                logger.warning("Muster %s: SMS requested but no SMS gateway configured (SMS_API_URL/SMS_API_KEY)", event_id)
             if whatsapp:
-                logger.info(f"Queueing WhatsApp notifications for event {event_id}")
-            
-        except Exception as e:
-            logger.error(f"Error sending notifications: {e}")
-            raise
+                logger.warning("Muster %s: WhatsApp requested but no provider configured", event_id)
+        except Exception as e:  # noqa: BLE001 — notifications must never fail the muster
+            logger.error("Muster %s notification error: %s", event_id, e)
+            result["error"] = str(e)
+        return result
