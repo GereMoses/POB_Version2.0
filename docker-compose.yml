@@ -118,6 +118,19 @@ services:
       # Set this only if you need to scan an additional range the server is not on.
       # Example: DEVICE_SCAN_SUBNETS=10.10.5.0/24,172.16.0.0/24
       - DEVICE_SCAN_SUBNETS=${DEVICE_SCAN_SUBNETS:-}
+      # ── Email notifications (emergency + mustering alerts) ──────────────────
+      # Fill these in .env to turn on email alerts, then restart the backend.
+      # Gmail example: SMTP_HOST=smtp.gmail.com, SMTP_PORT=587, SMTP_USER=you@gmail.com,
+      # SMTP_PASSWORD=<16-char App Password>, EMAIL_FROM=you@gmail.com. Empty = off.
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
+      - EMAIL_FROM=${EMAIL_FROM:-}
+      - SMTP_USE_TLS=${SMTP_USE_TLS:-true}
+      # SMS/WhatsApp gateway (optional — leave empty until you have a provider)
+      - SMS_API_URL=${SMS_API_URL:-}
+      - SMS_API_KEY=${SMS_API_KEY:-}
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4", "--timeout-graceful-shutdown", "30", "--access-log"]
     depends_on:
       postgres:
@@ -154,6 +167,15 @@ services:
       - SECRET_KEY=${SECRET_KEY:-pob-system-production-secret-key-2024-secure-jwt-auth}
       - ENVIRONMENT=${ENVIRONMENT:-production}
       - DEBUG=False
+      # Email/SMS for scheduled-drill notifications (same .env vars as the backend)
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
+      - EMAIL_FROM=${EMAIL_FROM:-}
+      - SMTP_USE_TLS=${SMTP_USE_TLS:-true}
+      - SMS_API_URL=${SMS_API_URL:-}
+      - SMS_API_KEY=${SMS_API_KEY:-}
     depends_on:
       postgres:
         condition: service_healthy
