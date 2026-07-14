@@ -3,7 +3,7 @@ import {
   Tabs, Card, Table, Button, Space, Tag, App, Form, Modal, Drawer,
   Input, Select, Switch, Row, Col, Divider, Badge, Alert,
   Checkbox, Popconfirm, Typography, Statistic, Tooltip, Empty, Spin, Progress,
-  Avatar, Segmented, Dropdown,
+  Avatar, Segmented, Dropdown, Upload,
 } from 'antd';
 import {
   UserOutlined, TeamOutlined, LockOutlined, AuditOutlined,
@@ -18,6 +18,7 @@ import {
   MailOutlined, MoreOutlined, StopOutlined,
   SearchOutlined, DesktopOutlined, FileTextOutlined,
   BarChartOutlined, AlertOutlined, RightOutlined, GlobalOutlined,
+  UploadOutlined, RollbackOutlined, ExclamationCircleOutlined,
 } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import apiService from '../../services/api';
@@ -2118,9 +2119,11 @@ const MFAPanel = () => {
 // BACKUP TAB
 // ════════════════════════════════════════════════════════════════════════════
 const BackupTab = () => {
-  const { message: msg } = App.useApp();
+  const { message: msg, modal } = App.useApp();
   const queryClient = useQueryClient();
   const [triggering, setTriggering] = useState(false);
+  const [restoring, setRestoring] = useState(false);
+  const [uploading, setUploading] = useState(false);
 
   const { data: statusRaw, isLoading: statusLoading, refetch: refetchStatus } = useQuery({
     queryKey: ['backup-status'],
@@ -2165,6 +2168,73 @@ const BackupTab = () => {
     }
   };
 
+  const handleRestore = (filename) => {
+    modal.confirm({
+      title: 'Restore this backup?',
+      icon: <ExclamationCircleOutlined style={{ color: '#cf1322' }} />,
+      width: 540,
+      content: (
+        <div>
+          <Alert
+            type="error"
+            showIcon
+            style={{ margin: '12px 0' }}
+            message="This replaces ALL current data"
+            description={
+              <span>
+                The database will be overwritten with the contents of{' '}
+                <Text code>{filename}</Text>. Current users, personnel, attendance and
+                every other record are replaced.
+              </span>
+            }
+          />
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            A safety backup of the current database is taken automatically first
+            (<Text code>pob_pre_restore_*</Text>), so this can be undone. You may need
+            to sign in again afterwards.
+          </Text>
+        </div>
+      ),
+      okText: 'Overwrite & Restore',
+      okButtonProps: { danger: true },
+      cancelText: 'Cancel',
+      onOk: async () => {
+        setRestoring(true);
+        try {
+          const data = await apiService.post('/api/v1/backup/restore', { filename, confirm: true });
+          msg.success(data.message || 'Database restored successfully');
+          queryClient.invalidateQueries({ queryKey: ['backup-list'] });
+          queryClient.invalidateQueries({ queryKey: ['backup-status'] });
+        } catch (e) {
+          msg.error(e.message || 'Restore failed');
+        } finally {
+          setRestoring(false);
+        }
+      },
+    });
+  };
+
+  const uploadProps = {
+    accept: '.sql,.gz,.dump,.backup',
+    showUploadList: false,
+    maxCount: 1,
+    customRequest: async ({ file, onSuccess, onError }) => {
+      setUploading(true);
+      try {
+        const data = await apiService.upload('/api/v1/backup/upload', file);
+        msg.success(data.message || 'Backup uploaded');
+        queryClient.invalidateQueries({ queryKey: ['backup-list'] });
+        queryClient.invalidateQueries({ queryKey: ['backup-status'] });
+        onSuccess?.(data);
+      } catch (e) {
+        msg.error(e.message || 'Upload failed');
+        onError?.(e);
+      } finally {
+        setUploading(false);
+      }
+    },
+  };
+
   const deleteMutation = useMutation({
     mutationFn: (filename) => apiService.delete(`/api/v1/backup/${encodeURIComponent(filename)}`),
     onSuccess: () => {
@@ -2175,7 +2245,7 @@ const BackupTab = () => {
     onError: (e) => msg.error(e.message),
   });
 
-  const TYPE_COLOR = { manual: 'blue', daily: 'green', weekly: 'orange', monthly: 'purple' };
+  const TYPE_COLOR = { manual: 'blue', daily: 'green', weekly: 'orange', monthly: 'purple', uploaded: 'cyan' };
 
   const cols = [
     {
@@ -2199,9 +2269,17 @@ const BackupTab = () => {
       defaultSortOrder: 'ascend',
     },
     {
-      title: 'Actions', key: 'actions', width: 130, fixed: 'right',
+      title: 'Actions', key: 'actions', width: 170, fixed: 'right',
       render: (_, r) => (
         <Space>
+          <Tooltip title="Restore (overwrites current data)">
+            <Button
+              size="small" icon={<RollbackOutlined />} type="link"
+              style={{ color: '#cf1322' }}
+              loading={restoring}
+              onClick={() => handleRestore(r.filename)}
+            />
+          </Tooltip>
           <Tooltip title="Download">
             <Button
               size="small" icon={<DownloadOutlined />} type="link"
@@ -2302,6 +2380,13 @@ const BackupTab = () => {
           <Button icon={<ReloadOutlined />} onClick={() => { refetchStatus(); refetchList(); }}>
             Refresh
           </Button>
+          <Upload {...uploadProps}>
+            <Tooltip title="Upload an off-site backup file (.sql / .sql.gz) for disaster recovery">
+              <Button icon={<UploadOutlined />} loading={uploading}>
+                Upload Backup
+              </Button>
+            </Tooltip>
+          </Upload>
           <Button
             type="primary"
             icon={triggering ? <SyncOutlined spin /> : <DatabaseOutlined />}
