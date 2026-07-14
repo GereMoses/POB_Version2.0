@@ -145,6 +145,10 @@ services:
       start_period: 60s
     networks:
       - pob_internal
+      # Also on the external bridge so the backend has OUTBOUND access to the
+      # reader LAN (direct-IP ZKLib scans on :4370) and the internet (SMTP/SMS/
+      # WhatsApp/SeamlessHR). pob_internal alone is internal:true = no egress.
+      - pob_external
     restart: unless-stopped
 
   # ── Celery Worker ───────────────────────────────────────────────────────────
@@ -170,6 +174,8 @@ services:
         condition: service_healthy
     networks:
       - pob_internal
+      # Egress for reader-LAN polling + notification/HR API calls (see backend).
+      - pob_external
     restart: unless-stopped
 
   # ── Celery Beat (periodic task scheduler) ──────────────────────────────────
