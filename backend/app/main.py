@@ -137,6 +137,8 @@ app.add_middleware(RBACMiddleware, exclude_paths=[
     "/api/v1/iclock/devicecmd", "/api/v1/iclock/test",
     # Visitor kiosk public self-service endpoints
     "/api/visitor/kiosk/check-in", "/api/visitor/kiosk/types",
+    # SeamlessHR employee webhook — called by SeamlessHR, verified via HMAC signature
+    "/api/v1/hr-integration/webhook",
     # Global search and SSE notifications (token via query param)
     "/api/v1/notifications/stream",
     # Punch-stream SSE uses short-lived ticket auth (no Bearer header support)

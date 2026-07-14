@@ -1,7 +1,7 @@
 {
   "files": {
     "main.css": "/pob-system/static/css/main.844ccd64.css",
-    "main.js": "/pob-system/static/js/main.b90c53b6.js",
+    "main.js": "/pob-system/static/js/main.e419bd07.js",
     "static/js/795.f66d73b8.chunk.js": "/pob-system/static/js/795.f66d73b8.chunk.js",
     "static/js/52.517e9415.chunk.js": "/pob-system/static/js/52.517e9415.chunk.js",
     "static/js/10.d89197fd.chunk.js": "/pob-system/static/js/10.d89197fd.chunk.js",
@@ -11,6 +11,6 @@
   },
   "entrypoints": [
     "static/css/main.844ccd64.css",
-    "static/js/main.b90c53b6.js"
+    "static/js/main.e419bd07.js"
   ]
 }

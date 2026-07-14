@@ -26,6 +26,7 @@ from ..models.biotime_models import (
     AuthUser, PersonnelEmployee, BaseOperationLog
 )
 from ..models.zone import Zone
+from ..models.personnel import Personnel
 from ..models.access_controller import AccessController, AccessReader
 from ..core.database import get_db
 from ..services.zkteco.biometric_service import ZKTecoBiometricService
@@ -825,57 +826,63 @@ class EmergencyService:
         zone_ids: Optional[List[int]],
         db: Session
     ) -> List[Dict[str, Any]]:
-        """Get notification recipients based on channel and scope"""
-        
-        recipients = []
-        
+        """Resolve recipient addresses for a channel from the Personnel roster.
+
+        Uses the Personnel app model (which actually carries contact details):
+          EMAIL     → Personnel.email
+          SMS       → Personnel.phone, falling back to emergency_contact_phone
+          WHATSAPP  → same phone fields as SMS
+
+        Scope:
+          GLOBAL → every active person
+          ZONE   → people whose current_zone_id (access-control live location) is in
+                   zone_ids. This is the access-control Zone FK, NOT a T&A area.
+
+        PA/SIREN/PUSH have no per-person address; they are broadcast channels handled
+        in send_notification, so this returns [] for them (0 per-recipient rows).
+        Addresses are de-duplicated so nobody is messaged twice.
+        """
+        recipients: List[Dict[str, Any]] = []
+
+        # Broadcast-only channels have no per-recipient address list.
+        if channel not in (
+            NotificationChannel.SMS.value,
+            NotificationChannel.EMAIL.value,
+            NotificationChannel.WHATSAPP.value,
+        ):
+            return recipients
+
         try:
-            if scope == EmergencyScope.GLOBAL.value:
-                # All active personnel
-                personnel = db.query(PersonnelEmployee).filter(
-                    PersonnelEmployee.status == 0  # Active
-                ).all()
-                
-                for person in personnel:
-                    recipient = {"type": RecipientType.USER.value, "id": person.id}
-                    
-                    if channel == NotificationChannel.SMS.value:
-                        # Get phone number from emergency contacts
-                        emergency_info = person.emergency_contact or {}
-                        contacts = emergency_info.get("contacts", [])
-                        primary_contact = next((c for c in contacts if c.get("is_primary")), contacts[0] if contacts else None)
-                        
-                        if primary_contact and primary_contact.get("phone"):
-                            recipient["address"] = primary_contact["phone"]
-                            recipients.append(recipient)
-                    
-                    elif channel == NotificationChannel.EMAIL.value:
-                        # Would need email field in personnel
-                        pass
-                    
-            elif scope == EmergencyScope.ZONE.value and zone_ids:
-                # Personnel in specific zones
-                for zone_id in zone_ids:
-                    personnel_in_zone = db.query(PersonnelEmployee).join(IClockTerminal).filter(
-                        IClockTerminal.area_id == zone_id,
-                        PersonnelEmployee.status == 0
-                    ).all()
-                    
-                    for person in personnel_in_zone:
-                        recipient = {"type": RecipientType.USER.value, "id": person.id}
-                        
-                        # Add contact info similar to global scope
-                        emergency_info = person.emergency_contact or {}
-                        contacts = emergency_info.get("contacts", [])
-                        primary_contact = next((c for c in contacts if c.get("is_primary")), contacts[0] if contacts else None)
-                        
-                        if primary_contact and primary_contact.get("phone"):
-                            recipient["address"] = primary_contact["phone"]
-                            recipients.append(recipient)
-        
+            query = db.query(Personnel).filter(Personnel.is_active == True)  # noqa: E712
+
+            if scope == EmergencyScope.ZONE.value and zone_ids:
+                query = query.filter(Personnel.current_zone_id.in_(zone_ids))
+            elif scope == EmergencyScope.ZONE.value and not zone_ids:
+                return recipients  # zone scope with no zones → nobody
+
+            seen_addresses = set()
+            for person in query.all():
+                if channel == NotificationChannel.EMAIL.value:
+                    address = person.email
+                else:  # SMS or WHATSAPP
+                    address = person.phone or person.emergency_contact_phone
+
+                if not address or not address.strip():
+                    continue
+                address = address.strip()
+                if address in seen_addresses:
+                    continue
+                seen_addresses.add(address)
+
+                recipients.append({
+                    "type": RecipientType.USER.value,
+                    "id": person.id,
+                    "address": address,
+                })
+
         except Exception as e:
             logger.error(f"Error getting notification recipients: {str(e)}")
-        
+
         return recipients
 
     async def send_notification(
@@ -885,63 +892,41 @@ class EmergencyService:
         message: str,
         subject: str = "Emergency Alert",
     ) -> Dict[str, Any]:
-        """Send notification through a specific channel.
+        """Send one notification through a specific channel.
 
-        All blocking I/O (SMTP, HTTP) is offloaded to a thread via asyncio.to_thread()
-        so the event loop is never blocked during an emergency with many recipients.
+        Every channel routes through the SHARED env-configured senders
+        (notify_email / notify_sms / notify_whatsapp) so email, SMS and WhatsApp
+        all read one config surface and behave identically to mustering alerts.
+        The senders block on I/O, so they run via asyncio.to_thread() — the event
+        loop is never stalled during an emergency with many recipients. They also
+        never raise, so one failed address can't abort the rest.
         """
-        import os
         try:
             if channel == NotificationChannel.SMS.value:
-                sms_key = os.getenv('SMS_API_KEY')
-                sms_url = os.getenv('SMS_API_URL')
-                if not sms_key or not sms_url:
-                    logger.warning(f"SMS not configured — would send to {address}: {message}")
-                    return {"success": False, "error": "SMS_API_KEY / SMS_API_URL not set"}
-
-                def _send_sms():
-                    import requests as _req
-                    resp = _req.post(
-                        sms_url,
-                        json={'api_key': sms_key, 'to': address, 'message': message},
-                        timeout=10,
-                    )
-                    resp.raise_for_status()
-
-                await asyncio.to_thread(_send_sms)
-                logger.info(f"SMS sent to {address}")
-                return {"success": True}
+                from .notify_sms import send_sms
+                result = await asyncio.to_thread(send_sms, address, message)
+                if result.get("sent"):
+                    return {"success": True}
+                return {"success": False, "error": result.get("error", "SMS send failed")}
 
             elif channel == NotificationChannel.EMAIL.value:
-                smtp_host = os.getenv('SMTP_HOST')
-                smtp_port = int(os.getenv('SMTP_PORT', '587'))
-                smtp_user = os.getenv('SMTP_USER')
-                smtp_pass = os.getenv('SMTP_PASSWORD')
-                email_from = os.getenv('EMAIL_FROM', smtp_user)
-                if not smtp_host or not smtp_user:
-                    logger.warning(f"SMTP not configured — would send to {address}: {subject}")
-                    return {"success": False, "error": "SMTP_HOST / SMTP_USER not set"}
+                from .notify_email import send_email
+                # message is plain text; wrap minimally for the HTML part.
+                html = f"<p>{message}</p>"
+                result = await asyncio.to_thread(send_email, address, subject, html, message)
+                if result.get("sent"):
+                    return {"success": True}
+                return {"success": False, "error": result.get("error", "Email send failed")}
 
-                def _send_email():
-                    import smtplib
-                    from email.mime.multipart import MIMEMultipart
-                    from email.mime.text import MIMEText as _MIMEText
-                    msg = MIMEMultipart('alternative')
-                    msg['Subject'] = subject
-                    msg['From'] = email_from
-                    msg['To'] = address
-                    msg.attach(_MIMEText(message, 'plain'))
-                    with smtplib.SMTP(smtp_host, smtp_port, timeout=10) as server:
-                        server.ehlo()
-                        server.starttls()
-                        server.login(smtp_user, smtp_pass)
-                        server.sendmail(email_from, [address], msg.as_string())
-
-                await asyncio.to_thread(_send_email)
-                logger.info(f"Email sent to {address}")
-                return {"success": True}
+            elif channel == NotificationChannel.WHATSAPP.value:
+                from .notify_whatsapp import send_whatsapp
+                result = await asyncio.to_thread(send_whatsapp, address, message)
+                if result.get("sent"):
+                    return {"success": True}
+                return {"success": False, "error": result.get("error", "WhatsApp send failed")}
 
             elif channel == NotificationChannel.PA.value:
+                # PA is a site-wide broadcast, not a per-recipient message.
                 logger.info(f"PA broadcast: {message}")
                 return {"success": True}
 

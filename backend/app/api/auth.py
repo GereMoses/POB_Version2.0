@@ -14,6 +14,7 @@ from ..core.security import create_access_token, verify_password, get_password_h
 from ..core.config import settings
 from ..core.dependencies import get_current_user
 from ..core.redis_client import get_redis_client as get_redis
+from ..core.sessions import record_login_session
 from ..schemas.auth import Token, UserCreate, UserResponse
 
 router = APIRouter()
@@ -263,23 +264,9 @@ async def production_login(
         _clear_failed(form_data.username, client_ip)
         logger.info("Successful login for user: %s", user_data.username)
 
-        # Track session in Redis so session management UI can list/revoke it
-        try:
-            r = get_redis()
-            session_id = uuid.uuid4().hex
-            session_key = f"sessions:{user_data.id}:{session_id}"
-            ip = request.client.host if request.client else "unknown"
-            ua = request.headers.get("user-agent", "")[:200]
-            now_iso = datetime.now(timezone.utc).isoformat()
-            r.hset(session_key, mapping={
-                "created_at": now_iso,
-                "last_active": now_iso,
-                "ip": ip,
-                "ua": ua,
-            })
-            r.expire(session_key, timeout_mins * 60)
-        except Exception:
-            pass  # session tracking is best-effort
+        # Track session in Redis (with the token jti) so the session-management UI
+        # can list it and revoking it actually invalidates the token.
+        record_login_session(user_data.id, access_token, request)
 
         roles, permissions = _get_user_auth_info(db, user_data.id)
         return {
@@ -309,6 +296,7 @@ async def production_login(
 
 @router.post("/simple-login", response_model=dict)
 async def simple_login(
+    request: Request,
     form_data: OAuth2PasswordRequestForm = Depends(),
     db: Session = Depends(get_db)
 ):
@@ -361,6 +349,9 @@ async def simple_login(
             expires_delta=access_token_expires
         )
 
+        # Track session (with jti) so it appears in Active Sessions and is revocable.
+        record_login_session(user_data.id, access_token, request)
+
         roles, permissions = _get_user_auth_info(db, user_data.id)
         return {
             "access_token": access_token,
@@ -391,6 +382,7 @@ async def simple_login(
 
 @router.post("/login", response_model=dict)
 async def login(
+    request: Request,
     db: Session = Depends(get_db),
     form_data: OAuth2PasswordRequestForm = Depends()
 ) -> Any:
@@ -441,6 +433,9 @@ async def login(
         access_token = create_access_token(
             data={"sub": email}, expires_delta=access_token_expires
         )
+
+        # Track session (with jti) so it appears in Active Sessions and is revocable.
+        record_login_session(user_id, access_token, request)
 
         # Update last login
         update_query = text("UPDATE auth_user SET last_login = CURRENT_TIMESTAMP WHERE id = :user_id")

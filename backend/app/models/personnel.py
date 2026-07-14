@@ -83,6 +83,18 @@ class Personnel(Base):
     employment_type = Column(String(30), default='EMPLOYEE', server_default="'EMPLOYEE'")
     is_active = Column(Boolean, default=True, server_default='true')
 
+    # HR system-of-record marker. When set to 'SEAMLESSHR', this employee's MASTER
+    # fields (name, email, company, department, role, employment/ID data) are owned by
+    # SeamlessHR and are read-only in ApexPOB. Operational fields (badge, zone, POB
+    # status, biometrics, emergency contacts) remain editable here.
+    hr_source = Column(String(20), nullable=True, index=True)
+    hr_synced_at = Column(TIMESTAMP(timezone=True), nullable=True)
+
+    # On approved leave (synced from SeamlessHR). Excluded from muster "expected"
+    # rosters so someone away on leave is never counted as MISSING in an emergency.
+    on_leave = Column(Boolean, default=False, server_default='false', index=True)
+    leave_end_date = Column(Date, nullable=True)
+
     # BioTime Enhanced Fields
     biotime_employee_id = Column(String(50), nullable=True, index=True)  # BioTime employee ID
     work_schedule = Column(JSON, nullable=True)  # BioTime work schedule

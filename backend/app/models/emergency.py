@@ -258,6 +258,7 @@ class Transport(Base):
     
     # Capacity and status
     capacity = Column(Integer, default=12)
+    max_payload_kg = Column(Float)  # weight-and-balance limit; enforced at check-in when set
     current_pob = Column(Integer, default=0)
     status = Column(SmallInteger, default=TransportStatus.SCHEDULED.value, index=True)  # TransportStatus enum
     
@@ -395,16 +396,21 @@ class TransportSchedule(Base):
     arrival_location = Column(String(100), nullable=False)
     departure_time = Column(DateTime(timezone=True), nullable=False)
     arrival_time = Column(DateTime(timezone=True))
-    
+
+    # Actuals — set when the journey actually departs / arrives (for delay tracking)
+    actual_departure_time = Column(DateTime(timezone=True))
+    actual_arrival_time = Column(DateTime(timezone=True))
+
     # Scheduling details
     frequency = Column(String(20))  # DAILY, WEEKLY, MONTHLY, ON_DEMAND
     end_date = Column(DateTime(timezone=True))
     status = Column(String(20), default="SCHEDULED")  # SCHEDULED, CONFIRMED, CANCELLED, COMPLETED
     priority = Column(String(20), default="NORMAL")  # LOW, NORMAL, HIGH, URGENT
-    
-    # Cargo and passengers
+
+    # Cargo, crew and passengers
     passenger_manifest = Column(JSONB)  # List of passengers
-    cargo_manifest = Column(JSONB)  # List of cargo items
+    cargo_manifest = Column(JSONB)  # [{description, weight_kg, type, dangerous_goods, un_number, remarks}]
+    crew = Column(JSONB)  # [{name, role, license_no}] — pilot / captain / driver assigned to this journey
     estimated_cost = Column(Float)
     actual_cost = Column(Float)
     
@@ -466,6 +472,10 @@ class ManifestEntry(Base):
     emp_code = Column(String(50))
     company = Column(String(100))
     id_number = Column(String(50))   # passport / national ID
+
+    # Weight & balance (kg) — required for helicopter payload calculations
+    body_weight = Column(Float)
+    baggage_weight = Column(Float)
 
     # INBOUND = arriving offshore, OUTBOUND = departing offshore
     direction = Column(String(20), nullable=False, default="INBOUND")

@@ -902,7 +902,10 @@ class MusteringService:
                     self.db.query(Personnel, PersonnelEmployee, Zone)
                     .outerjoin(PersonnelEmployee, Personnel.emp_code == PersonnelEmployee.emp_code)
                     .outerjoin(Zone, Zone.id == Personnel.current_zone_id)
-                    .filter(filter_clause, Personnel.is_active == True)
+                    # Exclude staff on approved leave (synced from SeamlessHR) — they are
+                    # off-site and must never be counted as MISSING at a muster.
+                    .filter(filter_clause, Personnel.is_active == True,
+                            Personnel.on_leave.isnot(True))
                     .all()
                 )
 
@@ -1203,14 +1206,17 @@ class MusteringService:
     def _send_notifications(self, event_id: int, sms: bool, email: bool, whatsapp: bool) -> Dict[str, Any]:
         """Alert the expected personnel to proceed to their assembly point.
 
-        Email is delivered through the shared env-SMTP sender. SMS/WhatsApp need a
-        gateway (SMS_API_URL/KEY etc.) and are logged as pending until one is set.
-        Never raises — a mail outage must not fail the muster it belongs to.
+        All three channels go through the SHARED env-configured senders
+        (notify_email / notify_sms / notify_whatsapp), so one set of gateway env
+        vars turns them on everywhere. Each returns {"sent": N, ...} and never
+        raises — a mail/gateway outage must not fail the muster it belongs to.
         """
-        result = {"email": None, "sms": "no_gateway" if sms else None,
-                  "whatsapp": "no_provider" if whatsapp else None}
+        result: Dict[str, Any] = {"email": None, "sms": None, "whatsapp": None}
         try:
             from .notify_email import send_email, smtp_configured
+            from .notify_sms import send_sms, sms_configured
+            from .notify_whatsapp import send_whatsapp, whatsapp_configured
+
             event = self.db.query(MusteringEvent).filter(MusteringEvent.id == event_id).first()
             if not event:
                 return result
@@ -1220,13 +1226,17 @@ class MusteringService:
             where = (" — nearest: " + ", ".join(mp_names)) if mp_names else ""
             etype = {0: "Roll call", 1: "Drill", 2: "FIRE", 3: "GAS", 4: "Man-down"}.get(event.event_type, "Muster")
 
+            # Resolve the expected roster once, then pull each contact channel from it.
+            expected = self._calculate_expected_personnel(event.zone_ids or [])
+            codes = [e["emp_code"] for e in expected if e.get("emp_code")]
+
+            text = f"{etype} muster activated. Proceed to your assembly point{where} and scan in to be marked safe."
+
             if email:
                 if not smtp_configured():
                     logger.warning("Muster %s: email requested but SMTP not configured — nothing sent", event_id)
                     result["email"] = {"sent": 0, "error": "SMTP not configured"}
                 else:
-                    expected = self._calculate_expected_personnel(event.zone_ids or [])
-                    codes = [e["emp_code"] for e in expected if e.get("emp_code")]
                     emails = []
                     if codes:
                         emails = [
@@ -1240,14 +1250,42 @@ class MusteringService:
                     html = (f"<p><b>{etype} muster activated.</b></p>"
                             f"<p>Proceed immediately to your assembly point{where}, and scan in "
                             f"at the muster reader so you are accounted for as safe.</p>")
-                    text = f"{etype} muster activated. Proceed to your assembly point{where} and scan in to be marked safe."
                     result["email"] = send_email(emails, subject, html, body_text=text)
                     logger.info("Muster %s email notify: %s (%d recipients)", event_id, result["email"], len(emails))
 
-            if sms:
-                logger.warning("Muster %s: SMS requested but no SMS gateway configured (SMS_API_URL/SMS_API_KEY)", event_id)
-            if whatsapp:
-                logger.warning("Muster %s: WhatsApp requested but no provider configured", event_id)
+            if sms or whatsapp:
+                # Both channels use the same phone list (phone, then emergency contact).
+                phones = []
+                if codes:
+                    phones = [
+                        (r[0] or r[1]) for r in self.db.query(
+                            Personnel.phone, Personnel.emergency_contact_phone
+                        ).filter(
+                            Personnel.emp_code.in_(codes),
+                            or_(
+                                and_(Personnel.phone.isnot(None), Personnel.phone != ""),
+                                and_(Personnel.emergency_contact_phone.isnot(None),
+                                     Personnel.emergency_contact_phone != ""),
+                            ),
+                        ).all()
+                    ]
+                phones = sorted({p.strip() for p in phones if p and p.strip()})
+
+                if sms:
+                    if not sms_configured():
+                        logger.warning("Muster %s: SMS requested but no SMS gateway configured", event_id)
+                        result["sms"] = {"sent": 0, "error": "SMS gateway not configured"}
+                    else:
+                        result["sms"] = send_sms(phones, text)
+                        logger.info("Muster %s SMS notify: %s (%d recipients)", event_id, result["sms"], len(phones))
+
+                if whatsapp:
+                    if not whatsapp_configured():
+                        logger.warning("Muster %s: WhatsApp requested but no provider configured", event_id)
+                        result["whatsapp"] = {"sent": 0, "error": "WhatsApp not configured"}
+                    else:
+                        result["whatsapp"] = send_whatsapp(phones, text)
+                        logger.info("Muster %s WhatsApp notify: %s (%d recipients)", event_id, result["whatsapp"], len(phones))
         except Exception as e:  # noqa: BLE001 — notifications must never fail the muster
             logger.error("Muster %s notification error: %s", event_id, e)
             result["error"] = str(e)

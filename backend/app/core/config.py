@@ -123,34 +123,52 @@ class Settings(BaseSettings):
 
     @validator("SECRET_KEY")
     def secret_key_must_be_strong(cls, v, values):
+        import os
         insecure_defaults = {
             "pob-system-production-secret-key-2024-secure-jwt-auth",
             "changethis",
             "secret",
             "your-secret-key",
         }
-        env = values.get("ENVIRONMENT", "development")
-        if v in insecure_defaults and env == "production":
-            raise ValueError(
-                "SECRET_KEY is using an insecure default value. "
-                "Generate a strong key: python -c \"import secrets; print(secrets.token_urlsafe(48))\""
-            )
+        # Read ENVIRONMENT order-independently — the validated `values` may not
+        # yet contain ENVIRONMENT depending on field order, which silently
+        # disabled this guard. The container always sets it as an env var.
+        env = os.getenv("ENVIRONMENT") or values.get("ENVIRONMENT", "development")
+        if env == "production":
+            # Reject known defaults AND any low-entropy key — not just exact matches.
+            if v in insecure_defaults or len(v) < 32:
+                raise ValueError(
+                    "SECRET_KEY is weak or a known default (needs >=32 chars in production). "
+                    "Generate one: python -c \"import secrets; print(secrets.token_urlsafe(48))\""
+                )
         return v
 
     @validator("GLOBAL_ADMIN_PASSWORD")
     def global_admin_password_must_be_changed(cls, v, values):
-        insecure_defaults = {"GlobalAdmin@2026", "changethis", "admin", "password"}
-        env = values.get("ENVIRONMENT", "development")
-        if v in insecure_defaults and env == "production":
-            raise ValueError(
-                "GLOBAL_ADMIN_PASSWORD is using an insecure default. "
-                "Set a strong value in .env.prod (min 16 chars, mixed case, numbers, symbols)."
+        import os
+        insecure_defaults = {"GlobalAdmin@2026", "changethis", "admin", "password", "admin123"}
+        env = os.getenv("ENVIRONMENT") or values.get("ENVIRONMENT", "development")
+        if env == "production":
+            # Reject known defaults AND anything that fails a basic complexity floor.
+            import re
+            weak = (
+                v in insecure_defaults
+                or len(v) < 12
+                or not re.search(r"[A-Z]", v)
+                or not re.search(r"[a-z]", v)
+                or not re.search(r"\d", v)
             )
+            if weak:
+                raise ValueError(
+                    "GLOBAL_ADMIN_PASSWORD is a default or too weak. "
+                    "Set a strong value in .env.prod (min 12 chars, upper+lower+digit)."
+                )
         return v
 
     @validator("LICENSE_SECRET")
     def license_secret_must_be_changed(cls, v, values):
-        env = values.get("ENVIRONMENT", "development")
+        import os
+        env = os.getenv("ENVIRONMENT") or values.get("ENVIRONMENT", "development")
         if v == "pob-vendor-license-secret-change-this" and env == "production":
             raise ValueError(
                 "LICENSE_SECRET is using the default value. "

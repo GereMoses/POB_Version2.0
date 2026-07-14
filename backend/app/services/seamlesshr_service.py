@@ -69,6 +69,49 @@ _DEFAULT_OPTIONS: Dict[str, Any] = {
     "time_format":        "iso",                 # iso | hms (HH:MM:SS)
     "field_map":          {},                    # canonical → output key ("" ⇒ omit field)
     "extra_headers":      {},                    # arbitrary static headers
+    # ── Dual-header auth for SeamlessHR (auth_type="dual_header") ────────────────
+    # SeamlessHR authenticates with x-client-id + x-client-secret (not bearer/OAuth).
+    # client-secret reuses the encrypted `api_key`; client-id is stored here.
+    "client_id":            "",
+    "client_id_header":     "x-client-id",
+    "client_secret_header": "x-client-secret",
+    # ── Employee PULL (SeamlessHR = master; personnel become read-only in ApexPOB) ──
+    # Field names match SeamlessHR's GET /v1/employees list endpoint (firstname/lastname,
+    # no underscore; employee_code). Fully overridable per-tenant from the UI.
+    "employee_list_key":    "data",              # response key holding the list ("" ⇒ body is the array)
+    "employee_page_param":  "page",              # pagination page param ("" ⇒ single page)
+    "employee_limit_param": "limit",             # SeamlessHR default page size is only 10
+    "employee_limit":       100,
+    "employee_status_field": "status",           # 'active'|'inactive' → drives is_active
+    "employee_field_map": {                      # SeamlessHR field → ApexPOB personnel field
+        "emp_code":        "employee_code",
+        "first_name":      "firstname",
+        "last_name":       "lastname",
+        "email":           "email",
+        "phone":           "phone",
+        "department":      "department",
+        "position":        "job_role",
+        "employment_type": "contract_type",
+        "hire_date":       "employment_date",
+    },
+    # ── Webhook (real-time employee sync FROM SeamlessHR). The webhook `data` object
+    # uses first_name/last_name (underscore), unlike the list endpoint above. ──────
+    "webhook_secret":       "",                  # HMAC-SHA512 secret configured with SeamlessHR
+    "webhook_field_map": {
+        "emp_code":        "employee_code",
+        "first_name":      "first_name",
+        "last_name":       "last_name",
+        "email":           "email",
+        "phone":           "phone",
+        "department":      "department",
+        "position":        "job_role",
+        "employment_type": "contract_type",
+        "hire_date":       "employment_date",
+    },
+    # ── Leave (SeamlessHR "Get Employees On Leave") → excludes them from muster ────
+    "leave_endpoint":     "/v1/leave/on-leave",  # confirm exact path with SeamlessHR
+    "leave_list_key":     "data",
+    "leave_field_map":    {"emp_code": "employee_code", "leave_end_date": "end_date"},
     # OAuth2 client-credentials (client_secret reuses the encrypted api_key):
     "oauth_token_url":    "",
     "oauth_client_id":    "",
@@ -142,6 +185,12 @@ async def build_auth_headers(cfg: Dict) -> Dict[str, str]:
     name = cfg["auth_header_name"] or "Authorization"
     key  = cfg["api_key"]
     at   = opts.get("auth_type", "bearer")
+    if at == "dual_header":
+        # SeamlessHR: x-client-id + x-client-secret (client-secret = the encrypted api_key)
+        return {
+            opts.get("client_id_header", "x-client-id"): opts.get("client_id") or cfg.get("org_id") or "",
+            opts.get("client_secret_header", "x-client-secret"): key,
+        }
     if at == "api_key":
         return {name: key}
     if at == "basic":
@@ -407,3 +456,248 @@ def _log_sync(db: Session, result: Dict):
     except Exception as e:
         logger.warning(f"Could not write hr_sync_log: {e}")
         db.rollback()
+
+
+# ── Employee pull (SeamlessHR is the master; pulled personnel are read-only here) ──
+
+async def pull_employees(db: Session, triggered_by: str = "manual") -> Dict[str, Any]:
+    """Pull the employee master from SeamlessHR and upsert into `personnel`, marking
+    each record hr_source='SEAMLESSHR' so its master fields become read-only in ApexPOB.
+
+    Field mapping and pagination are fully config-driven (options.employee_field_map /
+    employee_list_key / employee_page_param) — no code change to onboard a new tenant.
+    Operational fields (badge, zone, POB, biometrics) are never touched by the pull.
+    """
+    from ..models.personnel import Personnel
+
+    cfg = get_config(db)
+    if not cfg:
+        return {"error": "SeamlessHR is not configured", "created": 0, "updated": 0, "skipped": 0, "total": 0}
+
+    opts = cfg["options"]
+    fmap = opts.get("employee_field_map") or {}
+    code_field = fmap.get("emp_code", "staff_id")
+    list_key = opts.get("employee_list_key", "data")
+    page_param = opts.get("employee_page_param", "page")
+    batch = int(opts.get("batch_size", 50) or 50)
+    url = cfg["api_base_url"] + cfg.get("employee_endpoint", "/v1/employees")
+
+    headers = await build_auth_headers(cfg)
+    if cfg.get("org_id"):
+        headers[opts.get("org_header_name", "X-Organization-ID")] = cfg["org_id"]
+
+    created = updated = skipped = 0
+    seen = 0
+    now = datetime.utcnow()
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            limit_param = opts.get("employee_limit_param")
+            limit_val = opts.get("employee_limit", 100)
+            status_field = opts.get("employee_status_field")
+            page = 1
+            while True:
+                params = {}
+                if page_param:
+                    params[page_param] = page
+                if limit_param:
+                    params[limit_param] = limit_val
+                resp = await client.get(url, headers=headers, params=params)
+                resp.raise_for_status()
+                body = resp.json()
+                if isinstance(body, list):
+                    rows = body
+                elif isinstance(body, dict):
+                    rows = body.get(list_key) if list_key else body
+                    if not isinstance(rows, list):
+                        rows = body.get("data", []) if isinstance(body.get("data"), list) else []
+                else:
+                    rows = []
+
+                if not rows:
+                    break
+
+                for emp in rows:
+                    if not isinstance(emp, dict):
+                        skipped += 1
+                        continue
+                    code = str(emp.get(code_field) or "").strip()
+                    if not code:
+                        skipped += 1
+                        continue
+                    seen += 1
+                    try:
+                        person = db.query(Personnel).filter(Personnel.emp_code == code).first()
+                        is_new = person is None
+                        if is_new:
+                            person = Personnel(emp_code=code, first_name="", last_name="")
+                            db.add(person)
+                        # Only the mapped MASTER fields — operational state is left alone.
+                        for pfield, sfield in fmap.items():
+                            if pfield == "emp_code" or not sfield:
+                                continue
+                            val = emp.get(sfield)
+                            if val is not None and hasattr(person, pfield):
+                                setattr(person, pfield, val)
+                        person.full_name = f"{person.first_name or ''} {person.last_name or ''}".strip()
+                        # Employment status / exit → drives is_active (offboards leavers).
+                        if status_field:
+                            sval = str(emp.get(status_field) or "").lower()
+                            if sval:
+                                person.is_active = sval not in ("inactive", "exited", "terminated", "false", "0")
+                        if emp.get("exit_date") or emp.get("exit_status") in (True, "true", 1):
+                            person.is_active = False
+                            person.is_onboard = False
+                            person.is_pob = False
+                        person.hr_source = "SEAMLESSHR"
+                        person.hr_synced_at = now
+                        db.flush()
+                        created += 1 if is_new else 0
+                        updated += 0 if is_new else 1
+                    except Exception as row_err:
+                        db.rollback()
+                        skipped += 1
+                        logger.warning("pull_employees: skipped %s (%s)", code, row_err)
+
+                db.commit()
+                if not page_param or len(rows) < batch:
+                    break
+                page += 1
+
+        result = {"created": created, "updated": updated, "skipped": skipped, "total": seen}
+        _log_sync(db, {
+            "sync_date": now.date(), "triggered_by": triggered_by, "status": "success",
+            "records_built": seen, "records_sent": created + updated, "records_failed": skipped,
+            "message": f"Employee pull: {created} created, {updated} updated, {skipped} skipped",
+        })
+        logger.info("pull_employees: %s", result)
+        return result
+    except Exception as e:
+        db.rollback()
+        logger.error("pull_employees error: %s", e)
+        _log_sync(db, {
+            "sync_date": now.date(), "triggered_by": triggered_by, "status": "error",
+            "records_built": seen, "records_sent": created + updated, "records_failed": skipped,
+            "message": f"Employee pull failed: {e}",
+        })
+        return {"error": str(e), "created": created, "updated": updated, "skipped": skipped, "total": seen}
+
+
+# ── Webhook handler (real-time employee sync FROM SeamlessHR) ──────────────────
+
+def handle_webhook_event(db: Session, event: str, data: Dict, opts: Dict) -> str:
+    """Apply a SeamlessHR employee webhook (create/update/deactivate) to personnel.
+
+    Master fields are written and the record is stamped hr_source='SEAMLESSHR' so it
+    becomes read-only in ApexPOB. A deactivate/exit marks the person inactive and
+    removes them from POB. Field mapping is config-driven (options.webhook_field_map).
+    Never raises — a bad event must not 500 the webhook (SeamlessHR would retry-storm).
+    """
+    from ..models.personnel import Personnel
+
+    try:
+        wfmap = opts.get("webhook_field_map") or {}
+        code_field = wfmap.get("emp_code", "employee_code")
+        code = str((data or {}).get(code_field) or "").strip()
+        if not code:
+            return "skipped: no employee_code in payload"
+
+        ev = (event or "").lower()
+        person = db.query(Personnel).filter(Personnel.emp_code == code).first()
+
+        if ev in ("deactivate_employee", "exit_employee", "deactivate", "employee_deactivated"):
+            if person:
+                person.is_active = False
+                person.is_onboard = False
+                person.is_pob = False
+                person.pob_location = None
+                person.hr_source = "SEAMLESSHR"
+                person.hr_synced_at = datetime.utcnow()
+                db.commit()
+                return f"deactivated {code}"
+            return f"deactivate ignored — {code} not found"
+
+        # create / update
+        is_new = person is None
+        if is_new:
+            person = Personnel(emp_code=code, first_name="", last_name="", is_active=True)
+            db.add(person)
+        for pfield, sfield in wfmap.items():
+            if pfield == "emp_code" or not sfield:
+                continue
+            val = data.get(sfield)
+            if val is not None and hasattr(person, pfield):
+                setattr(person, pfield, val)
+        person.full_name = f"{person.first_name or ''} {person.last_name or ''}".strip()
+        person.is_active = True
+        person.hr_source = "SEAMLESSHR"
+        person.hr_synced_at = datetime.utcnow()
+        db.commit()
+        return f"{'created' if is_new else 'updated'} {code}"
+    except Exception as e:
+        db.rollback()
+        logger.error("handle_webhook_event(%s) error: %s", event, e)
+        return f"error: {e}"
+
+
+# ── Leave sync (SeamlessHR "Employees On Leave" → excludes them from muster) ────
+
+async def pull_leave(db: Session, triggered_by: str = "manual") -> Dict[str, Any]:
+    """Refresh who is currently on approved leave from SeamlessHR and flag them
+    (`personnel.on_leave`) so muster "expected" rosters exclude them — a person away
+    on leave is never counted as MISSING in an emergency. Best-effort; never raises.
+    Sets on_leave for everyone returned, clears it for everyone else (in one txn, so a
+    failed fetch leaves state untouched)."""
+    from ..models.personnel import Personnel
+
+    cfg = get_config(db)
+    if not cfg:
+        return {"error": "SeamlessHR is not configured", "on_leave": 0}
+
+    opts = cfg["options"]
+    endpoint = opts.get("leave_endpoint") or "/v1/leave/on-leave"
+    list_key = opts.get("leave_list_key", "data")
+    lfmap = opts.get("leave_field_map") or {}
+    code_field = lfmap.get("emp_code", "employee_code")
+    end_field = lfmap.get("leave_end_date", "end_date")
+    url = cfg["api_base_url"] + endpoint
+
+    headers = await build_auth_headers(cfg)
+    if cfg.get("org_id"):
+        headers[opts.get("org_header_name", "X-Organization-ID")] = cfg["org_id"]
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(url, headers=headers)
+            resp.raise_for_status()
+            body = resp.json()
+        rows = body if isinstance(body, list) else (body.get(list_key) if isinstance(body, dict) else [])
+        if not isinstance(rows, list):
+            rows = []
+
+        # Clear everyone first (fetch already succeeded), then set the returned staff.
+        db.query(Personnel).filter(Personnel.on_leave == True).update(  # noqa: E712
+            {"on_leave": False}, synchronize_session=False)
+        count = 0
+        for r in rows:
+            if not isinstance(r, dict):
+                continue
+            code = str(r.get(code_field) or "").strip()
+            if not code:
+                continue
+            vals = {"on_leave": True}
+            end = r.get(end_field)
+            if end:
+                try:
+                    vals["leave_end_date"] = datetime.fromisoformat(str(end)[:10]).date()
+                except Exception:
+                    pass
+            db.query(Personnel).filter(Personnel.emp_code == code).update(vals, synchronize_session=False)
+            count += 1
+        db.commit()
+        logger.info("pull_leave: %d on leave", count)
+        return {"on_leave": count}
+    except Exception as e:
+        db.rollback()
+        logger.warning("pull_leave error: %s", e)
+        return {"error": str(e), "on_leave": 0}

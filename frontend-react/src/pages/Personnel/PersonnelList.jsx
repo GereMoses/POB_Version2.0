@@ -1595,7 +1595,16 @@ const PersonnelList = () => {
         }
         forceRender
       >
-        <Form form={form} layout="vertical" size="small" onValuesChange={(changed) => { if ('first_name' in changed) setFormFirstName(changed.first_name || ''); }}>
+        <Form form={form} layout="vertical" size="small" disabled={!!editingRecord?.hr_managed} onValuesChange={(changed) => { if ('first_name' in changed) setFormFirstName(changed.first_name || ''); }}>
+
+          {editingRecord?.hr_managed && (
+            <Alert
+              type="info" showIcon
+              style={{ marginBottom: 14, borderRadius: 8 }}
+              message="Managed by SeamlessHR"
+              description="This employee's master details (name, contact, employment, ID) are owned by SeamlessHR and are read-only here. Badge, zone, POB status, safety-critical flag and medical/emergency fields stay editable. Change master data in SeamlessHR — it syncs back."
+            />
+          )}
 
           {/* ── Photo upload ── */}
           <Divider orientation="left"><Space><CameraOutlined style={{ color: '#9333ea' }} />Profile Photo</Space></Divider>
@@ -1668,7 +1677,7 @@ const PersonnelList = () => {
           <Row gutter={12}>
             <Col span={8}>
               <Form.Item name="card_no" label="Badge / Card No" tooltip="RFID card number assigned to this employee">
-                <Input placeholder="Card number (optional)" style={{ fontFamily: 'monospace' }} />
+                <Input placeholder="Card number (optional)" style={{ fontFamily: 'monospace' }} disabled={false} />
               </Form.Item>
             </Col>
             <Col span={8}>
@@ -1733,14 +1742,14 @@ const PersonnelList = () => {
             </Col>
             <Col span={8}>
               <Form.Item name="status" label="Employment Status" initialValue="ACTIVE">
-                <Select>
+                <Select disabled={false}>
                   {STATUS_OPTIONS.map(s => <Option key={s} value={s}>{s.replace('_', ' ')}</Option>)}
                 </Select>
               </Form.Item>
             </Col>
             <Col span={8}>
               <Form.Item name="zone_id" label="Current Zone / Area">
-                <Select placeholder="Select zone" allowClear showSearch optionFilterProp="children">
+                <Select placeholder="Select zone" allowClear showSearch optionFilterProp="children" disabled={false}>
                   {zoneList.map(z => <Option key={z.id} value={z.id}>{z.name}</Option>)}
                 </Select>
               </Form.Item>
@@ -1749,12 +1758,12 @@ const PersonnelList = () => {
           <Row gutter={12}>
             <Col span={6}>
               <Form.Item name="is_onboard" label="Currently On Board" valuePropName="checked" initialValue={false}>
-                <Switch checkedChildren="ON" unCheckedChildren="OFF" />
+                <Switch checkedChildren="ON" unCheckedChildren="OFF" disabled={false} />
               </Form.Item>
             </Col>
             <Col span={6}>
               <Form.Item name="safety_critical" label="Safety Critical" valuePropName="checked" initialValue={false}>
-                <Switch checkedChildren="Yes" unCheckedChildren="No" />
+                <Switch checkedChildren="Yes" unCheckedChildren="No" disabled={false} />
               </Form.Item>
             </Col>
           </Row>
@@ -1796,26 +1805,26 @@ const PersonnelList = () => {
           <Row gutter={12}>
             <Col span={8}>
               <Form.Item name="blood_group" label="Blood Group">
-                <Select placeholder="Select" allowClear>
+                <Select placeholder="Select" allowClear disabled={false}>
                   {BLOOD_GROUPS.map(b => <Option key={b} value={b}>{b}</Option>)}
                 </Select>
               </Form.Item>
             </Col>
             <Col span={8}>
               <Form.Item name="emergency_contact_name" label="Emergency Contact Name">
-                <Input placeholder="Contact full name" />
+                <Input placeholder="Contact full name" disabled={false} />
               </Form.Item>
             </Col>
             <Col span={8}>
               <Form.Item name="emergency_contact_phone" label="Emergency Contact Phone">
-                <Input placeholder="+234..." />
+                <Input placeholder="+234..." disabled={false} />
               </Form.Item>
             </Col>
           </Row>
           <Row gutter={12}>
             <Col span={24}>
               <Form.Item name="medical_conditions" label="Medical Conditions / Allergies">
-                <Input.TextArea rows={2} placeholder="List any medical conditions, allergies, or special requirements..." />
+                <Input.TextArea rows={2} placeholder="List any medical conditions, allergies, or special requirements..." disabled={false} />
               </Form.Item>
             </Col>
           </Row>

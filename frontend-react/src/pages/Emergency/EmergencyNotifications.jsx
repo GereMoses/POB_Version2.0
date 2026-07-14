@@ -18,6 +18,13 @@ const EmergencyNotifications = () => {
   const [zones, setZones] = useState([]);
   const [loading, setLoading] = useState(true);
   const [sendingInProgress, setSendingInProgress] = useState(false);
+  // Which channels have a configured gateway on the server (email/sms/whatsapp)
+  const [channelConfig, setChannelConfig] = useState({ email: false, sms: false, whatsapp: false });
+  // Send-test control
+  const [testChannel, setTestChannel] = useState('email');
+  const [testAddress, setTestAddress] = useState('');
+  const [testInProgress, setTestInProgress] = useState(false);
+  const [testResult, setTestResult] = useState(null);
   
   // Send notification form
   const [notificationForm, setNotificationForm] = useState({
@@ -67,19 +74,45 @@ const EmergencyNotifications = () => {
 
   const fetchData = async () => {
     try {
-      const [templatesRes, notificationsRes, zonesRes] = await Promise.all([
+      const [templatesRes, notificationsRes, zonesRes, configRes] = await Promise.all([
         api.get('/api/emergency/templates/'),
         api.get('/api/emergency/notifications/'),
-        api.get('/api/v1/zones/')
+        api.get('/api/v1/zones/'),
+        api.get('/api/emergency/notify/config').catch(() => null)
       ]);
-      
+
       setTemplates(templatesRes.data.data || []);
       setNotifications(notificationsRes.data.data || []);
       setZones(zonesRes.data.data || []);
+      if (configRes?.data?.data) {
+        setChannelConfig(configRes.data.data);
+      }
     } catch (error) {
       console.error('Error fetching notification data:', error);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleSendTest = async () => {
+    if (testInProgress) return;
+    if (!testAddress.trim()) {
+      alert('Enter an email address or phone number to send the test to.');
+      return;
+    }
+    try {
+      setTestInProgress(true);
+      setTestResult(null);
+      const response = await api.post('/api/emergency/notify/test', {
+        channel: testChannel,
+        address: testAddress.trim()
+      });
+      setTestResult(response.data.data || { error: 'No response' });
+    } catch (error) {
+      const detail = error?.response?.data?.detail || error.message || 'Test failed';
+      setTestResult({ sent: 0, error: detail });
+    } finally {
+      setTestInProgress(false);
     }
   };
 
@@ -358,23 +391,39 @@ const EmergencyNotifications = () => {
                 <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
                   {Object.entries(notificationForm.channels).map(([channel, enabled]) => {
                     const Icon = getChannelIcon(channel);
+                    // Only email/sms/whatsapp have a server-side gateway to report on.
+                    const tracked = Object.prototype.hasOwnProperty.call(channelConfig, channel);
+                    const notConfigured = tracked && !channelConfig[channel];
                     return (
                       <button
                         key={channel}
                         type="button"
                         onClick={() => handleChannelToggle(channel)}
-                        className={`flex items-center p-3 border rounded-lg transition-colors duration-200 ${
+                        title={notConfigured ? `${getChannelName(channel)} gateway is not configured on the server` : ''}
+                        className={`flex items-center justify-between p-3 border rounded-lg transition-colors duration-200 ${
                           enabled
                             ? 'border-blue-500 bg-blue-50 text-blue-700'
                             : 'border-gray-300 hover:border-gray-400 text-gray-700'
                         }`}
                       >
-                        <Icon className="w-5 h-5 mr-2" />
-                        <span className="font-medium">{getChannelName(channel)}</span>
+                        <span className="flex items-center">
+                          <Icon className="w-5 h-5 mr-2" />
+                          <span className="font-medium">{getChannelName(channel)}</span>
+                        </span>
+                        {notConfigured && (
+                          <span className="ml-2 text-[10px] font-semibold uppercase tracking-wide text-amber-600 bg-amber-100 px-1.5 py-0.5 rounded">
+                            Not set up
+                          </span>
+                        )}
                       </button>
                     );
                   })}
                 </div>
+                <p className="mt-2 text-xs text-gray-500">
+                  Channels marked <span className="font-semibold text-amber-600">Not set up</span> have no
+                  gateway configured on the server and will not deliver. Configure SMTP / SMS / WhatsApp
+                  env vars and restart the backend to enable them.
+                </p>
               </div>
 
               {/* Recipient Selection */}
@@ -444,6 +493,53 @@ const EmergencyNotifications = () => {
               >
                 {sendingInProgress ? 'Sending...' : 'Send Emergency Notification'}
               </button>
+
+              {/* ── Send a test to verify a gateway ─────────────────────────── */}
+              <div className="border border-gray-200 rounded-lg p-4 bg-gray-50">
+                <h4 className="text-sm font-semibold text-gray-900 mb-1">Test a channel</h4>
+                <p className="text-xs text-gray-500 mb-3">
+                  Send a single test message to yourself to confirm a gateway is wired up correctly.
+                </p>
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <select
+                    value={testChannel}
+                    onChange={(e) => { setTestChannel(e.target.value); setTestResult(null); }}
+                    className="px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
+                    <option value="email">Email {channelConfig.email ? '' : '(not set up)'}</option>
+                    <option value="sms">SMS {channelConfig.sms ? '' : '(not set up)'}</option>
+                    <option value="whatsapp">WhatsApp {channelConfig.whatsapp ? '' : '(not set up)'}</option>
+                  </select>
+                  <input
+                    type="text"
+                    value={testAddress}
+                    onChange={(e) => setTestAddress(e.target.value)}
+                    placeholder={testChannel === 'email' ? 'you@example.com' : '+2348012345678'}
+                    className="flex-1 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                  <button
+                    onClick={handleSendTest}
+                    disabled={testInProgress}
+                    className="px-4 py-2 bg-gray-800 text-white rounded-md hover:bg-gray-900 disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+                  >
+                    {testInProgress ? 'Sending…' : 'Send test'}
+                  </button>
+                </div>
+                {testResult && (
+                  <div className={`mt-3 flex items-start text-sm rounded-md p-2 ${
+                    testResult.sent ? 'bg-green-50 text-green-800' : 'bg-red-50 text-red-800'
+                  }`}>
+                    {testResult.sent
+                      ? <CheckCircle className="w-4 h-4 mr-2 mt-0.5 flex-shrink-0" />
+                      : <XCircle className="w-4 h-4 mr-2 mt-0.5 flex-shrink-0" />}
+                    <span>
+                      {testResult.sent
+                        ? `Test sent successfully to ${testResult.address}.`
+                        : `Test failed: ${testResult.error || 'unknown error'}`}
+                    </span>
+                  </div>
+                )}
+              </div>
             </div>
           )}
 

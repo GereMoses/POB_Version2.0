@@ -13,7 +13,8 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt .
 
 # Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# --timeout/--retries make the build resilient to slow/flaky PyPI links.
+RUN pip install --no-cache-dir --timeout 120 --retries 10 -r requirements.txt
 
 # Copy application code
 COPY . .

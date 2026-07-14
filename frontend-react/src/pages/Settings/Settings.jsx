@@ -21,6 +21,7 @@ import {
 } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import apiService from '../../services/api';
+import EmailSetup from '../Emergency/EmailSetup';
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
 dayjs.extend(relativeTime);
@@ -2365,6 +2366,7 @@ const HRIntegrationTab = () => {
   const queryClient = useQueryClient();
   const [syncing,     setSyncing]     = useState(false);
   const [testing,     setTesting]     = useState(false);
+  const [pulling,     setPulling]     = useState(false);
   const [saving,      setSaving]      = useState(false);
   const [previewDate, setPreviewDate] = useState('');
   const [previewData, setPreviewData] = useState(null);
@@ -2465,6 +2467,17 @@ const HRIntegrationTab = () => {
       const data = await apiService.get(`/api/v1/hr-integration/preview/${previewDate}`);
       setPreviewData(data);
     } catch (e) { msg.error(e.message); }
+  };
+
+  const handlePullEmployees = async () => {
+    setPulling(true);
+    try {
+      const data = await apiService.post('/api/v1/hr-integration/pull-employees');
+      msg.success(`Employee pull complete — ${data.created} created, ${data.updated} updated${data.skipped ? `, ${data.skipped} skipped` : ''}`);
+      queryClient.invalidateQueries({ queryKey: ['hr-history'] });
+      queryClient.invalidateQueries({ queryKey: ['hr-status'] });
+    } catch (e) { msg.error(e.message || 'Employee pull failed'); }
+    finally { setPulling(false); }
   };
 
   const status  = statusRaw  || {};
@@ -2695,6 +2708,40 @@ const HRIntegrationTab = () => {
               >
                 Sync Yesterday (default)
               </Button>
+            </Card>
+
+            <Card title={<Space><TeamOutlined />Employee Master (SeamlessHR → ApexPOB)</Space>} size="small">
+              <Text type="secondary" style={{ display: 'block', marginBottom: 12, fontSize: 12 }}>
+                Pull the employee master from SeamlessHR into ApexPOB. Pulled staff become
+                <b> read-only here</b> — SeamlessHR remains the system of record for their details.
+              </Text>
+              <Button
+                block type="primary" icon={<SyncOutlined />}
+                loading={pulling} disabled={pulling || !status.configured}
+                onClick={handlePullEmployees}
+              >
+                Pull Employees from SeamlessHR
+              </Button>
+              <Text type="secondary" style={{ display: 'block', marginTop: 8, fontSize: 11 }}>
+                For automatic, real-time updates, register the webhook below with SeamlessHR
+                instead of pulling manually.
+              </Text>
+            </Card>
+
+            <Card title={<Space><ApiOutlined />Real-time Sync (Webhook)</Space>} size="small">
+              <Text type="secondary" style={{ display: 'block', marginBottom: 8, fontSize: 12 }}>
+                Give this URL to SeamlessHR so employee create / update / exit events flow in
+                automatically. Set the matching <code>webhook_secret</code> in Advanced connector mapping.
+              </Text>
+              <Space.Compact style={{ width: '100%' }}>
+                <Input readOnly value={`${window.location.origin}/api/v1/hr-integration/webhook`} />
+                <Button
+                  icon={<CopyOutlined />}
+                  onClick={() => { navigator.clipboard?.writeText(`${window.location.origin}/api/v1/hr-integration/webhook`); msg.success('Webhook URL copied'); }}
+                >
+                  Copy
+                </Button>
+              </Space.Compact>
             </Card>
 
             <Card title="Preview Records" size="small">
@@ -3152,9 +3199,12 @@ const SessionsTab = () => {
         <Space>
           <span style={{ fontSize: 18 }}>{uaIcon(r.user_agent)}</span>
           <Space direction="vertical" size={0}>
-            <Text style={{ fontSize: 12 }}>
-              {r.user_agent ? r.user_agent.slice(0, 60) + (r.user_agent.length > 60 ? '…' : '') : 'Unknown'}
-            </Text>
+            <Space size={6}>
+              <Text style={{ fontSize: 12 }}>
+                {r.user_agent ? r.user_agent.slice(0, 60) + (r.user_agent.length > 60 ? '…' : '') : 'Unknown'}
+              </Text>
+              {r.current && <Tag color="green" style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>This device</Tag>}
+            </Space>
             <Text type="secondary" style={{ fontSize: 11 }}>
               IP: {r.ip_address || '—'}
             </Text>
@@ -3183,12 +3233,14 @@ const SessionsTab = () => {
       render: (_, r) => (
         <Popconfirm
           title="Revoke this session?"
-          description="The user will be logged out of this device."
+          description={r.current
+            ? 'This is the device you are using — you will be logged out immediately.'
+            : 'This device will be logged out on its next request.'}
           onConfirm={() => revokeM.mutate(r.session_id)}
           okText="Revoke" okType="danger"
         >
           <Button size="small" danger icon={<StopOutlined />} loading={revokeM.isPending}>
-            Revoke
+            {r.current ? 'Sign out' : 'Revoke'}
           </Button>
         </Popconfirm>
       ),
@@ -3274,6 +3326,7 @@ const Settings = () => {
     { key: 'users',     label: <Space><UserOutlined />Users</Space>,               children: <UsersTab /> },
     { key: 'roles',     label: <Space><LockOutlined />Roles & Permissions</Space>, children: <RolesTab /> },
     { key: 'company',   label: <Space><BankOutlined />Company</Space>,             children: <CompanyTab /> },
+    { key: 'email',     label: <Space><MailOutlined />Email</Space>,               children: <EmailSetup /> },
     { key: 'security',  label: <Space><ClockCircleOutlined />Security</Space>,     children: <SecurityTab /> },
     { key: 'sessions',  label: <Space><DesktopOutlined />Active Sessions</Space>,  children: <SessionsTab /> },
     { key: 'audit-log', label: <Space><AuditOutlined />Audit Log</Space>,          children: <AuditLogTab /> },

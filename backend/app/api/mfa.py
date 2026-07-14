@@ -234,6 +234,14 @@ async def mfa_verify(
         data={"sub": username},
         expires_delta=timedelta(minutes=timeout_mins),
     )
+
+    # Track session (with jti) so MFA logins appear in Active Sessions and are revocable.
+    try:
+        from ..core.sessions import record_login_session
+        record_login_session(user_id, access_token, request)
+    except Exception:
+        pass
+
     logger.info("MFA login completed for user %s", username)
     return {
         "access_token": access_token,

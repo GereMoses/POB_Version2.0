@@ -677,14 +677,182 @@ def check_missing_escalations(self):
         db.close()
 
 
+@celery_app.task(bind=True, max_retries=3)
+def check_overdue_journeys(self):
+    """Autonomously detect land journeys (JMP) that have missed their check-in call
+    or overshot their ETA, and escalate to the control room — without anyone having
+    to be watching the board. Runs every 3 minutes; each distinct missed window is
+    escalated once (dedup via sys_notifications)."""
+    from app.models.journey import JourneyPlan
+    GRACE = 10  # minutes past due before we escalate
+    db = SessionLocal()
+    try:
+        now = datetime.utcnow()
+
+        def _naive(dt):
+            if dt is None:
+                return None
+            return dt.replace(tzinfo=None) if getattr(dt, "tzinfo", None) else dt
+
+        in_progress = db.query(JourneyPlan).filter(JourneyPlan.status == "IN_PROGRESS").all()
+        fired = 0
+        for j in in_progress:
+            due = _naive(j.next_checkin_due)
+            eta = _naive(j.planned_arrival)
+            trigger = None
+            if due and now > due + timedelta(minutes=GRACE):
+                trigger = due
+            if eta and now > eta + timedelta(minutes=GRACE):
+                trigger = min(trigger, eta) if trigger else eta
+            if not trigger:
+                continue
+
+            dedup_key = f"journey_overdue_{j.id}_{trigger.isoformat()}"
+            # Escalate ONCE per missed window — when the driver checks in, next_checkin_due
+            # advances and a later miss produces a new key.
+            exists = db.execute(
+                text("SELECT 1 FROM sys_notifications WHERE dedup_key = :dk"), {"dk": dedup_key}
+            ).first()
+            if exists:
+                continue
+
+            mins = int((now - trigger).total_seconds() // 60)
+            ref = j.reference or f"JMP-{j.id}"
+            msg = (f"🚗 OVERDUE JOURNEY {ref}: {j.driver_name or 'driver'} "
+                   f"({j.vehicle_reg or 'vehicle'}) {j.origin} → {j.destination} — no check-in for "
+                   f"{mins} min. Contact the driver and follow the journey-management escalation plan.")
+
+            db.execute(text("""
+                INSERT INTO sys_notifications
+                    (dedup_key, notification_type, title, message, priority, expires_at)
+                VALUES (:dk, 'journey_overdue', :title, :msg, 'critical', NOW() + INTERVAL '48 hours')
+                ON CONFLICT (dedup_key) DO NOTHING
+            """), {"dk": dedup_key, "title": f"Overdue Journey {ref}", "msg": msg})
+
+            from app.api.notifications import notify_sync
+            notify_sync({
+                "type": "journey_overdue", "priority": "critical",
+                "title": f"Overdue Journey {ref}", "message": msg,
+                "dedup_key": dedup_key, "journey_id": j.id,
+            })
+
+            # External escalation to the control room / on-call
+            recips_sms = get_emergency_recipients(None, "sms")
+            # Include the driver's own number when we can resolve it
+            if j.driver_personnel_id:
+                drow = db.execute(
+                    text("SELECT phone FROM personnel WHERE id = :pid"),
+                    {"pid": j.driver_personnel_id},
+                ).first()
+                if drow and drow[0]:
+                    recips_sms = list({*(recips_sms or []), drow[0]})
+            if recips_sms:
+                send_sms_notification.delay(message=msg, recipients=recips_sms)
+            recips_email = get_emergency_recipients(None, "email")
+            if recips_email:
+                send_email_notification.delay(
+                    subject=f"Overdue Journey {ref}", message=msg, recipients=recips_email,
+                )
+            fired += 1
+
+        db.commit()
+        logger.info("check_overdue_journeys: %d in progress, %d escalations", len(in_progress), fired)
+    except Exception as exc:
+        logger.error("check_overdue_journeys error: %s", exc)
+        db.rollback()
+        raise self.retry(exc=exc, countdown=60)
+    finally:
+        db.close()
+
+
+@celery_app.task(bind=True, max_retries=3)
+def pob_reconciliation(self):
+    """Cross-check the headline POB across subsystems every 15 min and alert on a
+    material discrepancy — so POB drift between musters is caught proactively rather
+    than discovered during an emergency. Compares operational-zone occupancy against
+    the on-board personnel count."""
+    db = SessionLocal()
+    try:
+        zone_total = db.execute(text(
+            "SELECT COALESCE(SUM(current_occupancy),0) FROM zones "
+            "WHERE zone_type IS DISTINCT FROM 'MUSTER_POINT'"
+        )).scalar() or 0
+        onboard = db.execute(text(
+            "SELECT COUNT(*) FROM personnel WHERE is_onboard = TRUE"
+        )).scalar() or 0
+        zone_total, onboard = int(zone_total), int(onboard)
+        diff = abs(zone_total - onboard)
+        # Tolerate small noise; alert on >5 people or >10% of the on-board population.
+        threshold = max(5, int(0.10 * max(onboard, 1)))
+
+        if diff > threshold:
+            msg = (f"⚠️ POB reconciliation discrepancy: operational-zone occupancy = {zone_total} "
+                   f"vs on-board personnel = {onboard} (Δ{diff}). Likely offline readers, missed "
+                   f"punches or manual overrides — verify before relying on the headline POB.")
+            dedup_key = f"pob_recon_{datetime.utcnow().strftime('%Y%m%d%H%M')}"
+            db.execute(text("""
+                INSERT INTO sys_notifications
+                    (dedup_key, notification_type, title, message, priority, expires_at)
+                VALUES (:dk, 'pob_reconciliation', 'POB Discrepancy', :msg, 'high', NOW() + INTERVAL '24 hours')
+                ON CONFLICT (dedup_key) DO NOTHING
+            """), {"dk": dedup_key, "msg": msg})
+            from app.api.notifications import notify_sync
+            notify_sync({"type": "pob_reconciliation", "priority": "high",
+                         "title": "POB Discrepancy", "message": msg, "dedup_key": dedup_key})
+            logger.warning(msg)
+
+        db.commit()
+        logger.info("pob_reconciliation: zone=%d onboard=%d diff=%d (threshold=%d)",
+                    zone_total, onboard, diff, threshold)
+    except Exception as exc:
+        logger.error("pob_reconciliation error: %s", exc)
+        db.rollback()
+    finally:
+        db.close()
+
+
+@celery_app.task(bind=True, max_retries=2)
+def seamlesshr_reconcile(self):
+    """Nightly reconciliation with SeamlessHR — full employee-master pull + leave
+    refresh — so any webhook events missed during the day are caught, and muster
+    rosters stay leave-accurate. No-op when SeamlessHR isn't configured."""
+    import asyncio
+    from app.services.seamlesshr_service import get_config, pull_employees, pull_leave
+    db = SessionLocal()
+    try:
+        if not get_config(db):
+            logger.info("seamlesshr_reconcile: SeamlessHR not configured — skipping")
+            return
+        emp = asyncio.run(pull_employees(db, triggered_by="scheduled"))
+        lv = asyncio.run(pull_leave(db, triggered_by="scheduled"))
+        logger.info("seamlesshr_reconcile: employees=%s leave=%s", emp, lv)
+    except Exception as e:
+        logger.error("seamlesshr_reconcile error: %s", e)
+        raise self.retry(exc=e, countdown=300)
+    finally:
+        db.close()
+
+
 celery_app.conf.beat_schedule = {
     'check-scheduled-drills': {
         'task': 'app.services.mustering_celery_tasks.check_scheduled_drills',
         'schedule': crontab(minute='*'),
     },
+    'seamlesshr-nightly-reconcile': {
+        'task': 'app.services.mustering_celery_tasks.seamlesshr_reconcile',
+        'schedule': crontab(hour=2, minute=30),  # 02:30 UTC daily
+    },
     'check-missing-escalations': {
         'task': 'app.services.mustering_celery_tasks.check_missing_escalations',
         'schedule': crontab(minute='*/5'),
+    },
+    'check-overdue-journeys': {
+        'task': 'app.services.mustering_celery_tasks.check_overdue_journeys',
+        'schedule': crontab(minute='*/3'),
+    },
+    'pob-reconciliation': {
+        'task': 'app.services.mustering_celery_tasks.pob_reconciliation',
+        'schedule': crontab(minute='*/15'),
     },
     'compliance-digest-daily': {
         'task': 'app.tasks.compliance_email_celery.send_compliance_digest_task',

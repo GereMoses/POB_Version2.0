@@ -11,12 +11,14 @@ import {
   TeamOutlined, AimOutlined, EnvironmentOutlined, MobileOutlined,
   WifiOutlined, DisconnectOutlined, WarningOutlined, AlertOutlined,
   CheckCircleOutlined, ClockCircleOutlined, ReloadOutlined, UserOutlined,
+  MailOutlined,
 } from '@ant-design/icons';
 
 import EmergencyDashboard     from './EmergencyDashboard';
 import EmergencyLockdown      from './EmergencyLockdown';
 import EmergencyFireMode      from './EmergencyFireMode';
 import EmergencyNotifications from './EmergencyNotifications';
+import EmailSetup            from './EmailSetup';
 import EmergencyDevices       from './EmergencyDevices';
 import EmergencyTriggers      from './EmergencyTriggers';
 import EmergencyPlans         from './EmergencyPlans';
@@ -82,6 +84,7 @@ const EMERGENCY_NAV = [
   { id: 'e-lockdown',   label: 'Lockdown',      icon: <LockOutlined />,          Component: EmergencyLockdown,      desc: 'Access control'    },
   { id: 'e-fire',       label: 'Fire Mode',     icon: <FireOutlined />,          Component: EmergencyFireMode,      desc: 'Evacuation'        },
   { id: 'e-notify',     label: 'Notifications', icon: <BellOutlined />,          Component: EmergencyNotifications, desc: 'Mass alerts'       },
+  { id: 'e-email',      label: 'Email Setup',   icon: <MailOutlined />,          Component: EmailSetup,             desc: 'SMTP & domain'     },
   { id: 'e-devices',    label: 'Devices',       icon: <ApiOutlined />,           Component: EmergencyDevices,       desc: 'Sirens & relays'   },
   { id: 'e-triggers',   label: 'Triggers',      icon: <ThunderboltOutlined />,   Component: EmergencyTriggers,      desc: 'Panic & automation'},
   { id: 'e-plans',      label: 'Plans',         icon: <FileTextOutlined />,      Component: EmergencyPlans,         desc: 'Procedures'        },

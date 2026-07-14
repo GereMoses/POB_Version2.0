@@ -51,3 +51,6 @@ matplotlib>=3.7.0   # ARIA report charts → PNG embedded in PDF (headless Agg)
 reportlab==5.0.0
 
 zkaccess-c3==0.0.15
+
+# DKIM signing for UI-configured email domains (Settings → Email)
+dkimpy==1.1.5

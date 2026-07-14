@@ -127,6 +127,8 @@ api_router.include_router(bc_integration_router, prefix="/bc-integration", tags=
 # Transport Manifest & Reconciliation
 from .transport_manifest import router as transport_manifest_router
 api_router.include_router(transport_manifest_router, tags=["Transport Manifest"])
+from .journey_management import router as journey_management_router
+api_router.include_router(journey_management_router, tags=["Journey Management"])
 
 # Performance Monitoring
 from .performance_monitoring import router as performance_router
@@ -151,6 +153,7 @@ direct_router = APIRouter()
 # Required direct routers (always present — import errors are fatal)
 from .attendance import router as attendance_router
 from .settings import router as settings_router
+from .email_settings import router as email_settings_router
 from .access_control import router as access_control_router
 from .visitor import router as visitor_router
 from .device_management import router as device_management_router_direct
@@ -158,6 +161,7 @@ from .mustering import router as mustering_router_direct
 
 direct_router.include_router(attendance_router, tags=["Attendance"])
 direct_router.include_router(settings_router, tags=["Settings"])
+direct_router.include_router(email_settings_router, tags=["Email Settings"])
 direct_router.include_router(access_control_router, tags=["Access Control"])
 direct_router.include_router(visitor_router, tags=["Visitor Management"])
 direct_router.include_router(device_management_router_direct, tags=["Device Management Direct"])

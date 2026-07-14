@@ -128,9 +128,28 @@ services:
       - SMTP_PASSWORD=${SMTP_PASSWORD:-}
       - EMAIL_FROM=${EMAIL_FROM:-}
       - SMTP_USE_TLS=${SMTP_USE_TLS:-true}
-      # SMS/WhatsApp gateway (optional — leave empty until you have a provider)
-      - SMS_API_URL=${SMS_API_URL:-}
+      # SMS + WhatsApp (optional). Provider picked by SMS_PROVIDER:
+      #   termii (NG — one account does SMS + WhatsApp), twilio, africastalking, generic.
+      - SMS_PROVIDER=${SMS_PROVIDER:-}
       - SMS_API_KEY=${SMS_API_KEY:-}
+      - SMS_SENDER_ID=${SMS_SENDER_ID:-}
+      - SMS_CHANNEL=${SMS_CHANNEL:-generic}
+      - SMS_DEFAULT_COUNTRY_CODE=${SMS_DEFAULT_COUNTRY_CODE:-234}
+      - TERMII_BASE_URL=${TERMII_BASE_URL:-https://api.ng.termii.com}
+      # WhatsApp: defaults to SMS_PROVIDER when that is termii; override if separate.
+      - WHATSAPP_PROVIDER=${WHATSAPP_PROVIDER:-}
+      - WHATSAPP_SENDER_ID=${WHATSAPP_SENDER_ID:-}
+      # Generic HTTP gateway (only if SMS_PROVIDER=generic):
+      - SMS_API_URL=${SMS_API_URL:-}
+      - WHATSAPP_API_URL=${WHATSAPP_API_URL:-}
+      - WHATSAPP_API_KEY=${WHATSAPP_API_KEY:-}
+      # Twilio (only if SMS_PROVIDER=twilio):
+      - TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID:-}
+      - TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN:-}
+      - SMS_FROM_NUMBER=${SMS_FROM_NUMBER:-}
+      - WHATSAPP_FROM=${WHATSAPP_FROM:-}
+      # Africa's Talking (only if SMS_PROVIDER=africastalking):
+      - AT_USERNAME=${AT_USERNAME:-}
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4", "--timeout-graceful-shutdown", "30", "--access-log"]
     depends_on:
       postgres:
@@ -174,8 +193,23 @@ services:
       - SMTP_PASSWORD=${SMTP_PASSWORD:-}
       - EMAIL_FROM=${EMAIL_FROM:-}
       - SMTP_USE_TLS=${SMTP_USE_TLS:-true}
-      - SMS_API_URL=${SMS_API_URL:-}
+      # SMS + WhatsApp (same vars as backend — see backend service for docs)
+      - SMS_PROVIDER=${SMS_PROVIDER:-}
       - SMS_API_KEY=${SMS_API_KEY:-}
+      - SMS_SENDER_ID=${SMS_SENDER_ID:-}
+      - SMS_CHANNEL=${SMS_CHANNEL:-generic}
+      - SMS_DEFAULT_COUNTRY_CODE=${SMS_DEFAULT_COUNTRY_CODE:-234}
+      - TERMII_BASE_URL=${TERMII_BASE_URL:-https://api.ng.termii.com}
+      - WHATSAPP_PROVIDER=${WHATSAPP_PROVIDER:-}
+      - WHATSAPP_SENDER_ID=${WHATSAPP_SENDER_ID:-}
+      - SMS_API_URL=${SMS_API_URL:-}
+      - WHATSAPP_API_URL=${WHATSAPP_API_URL:-}
+      - WHATSAPP_API_KEY=${WHATSAPP_API_KEY:-}
+      - TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID:-}
+      - TWILIO_AUTH_TOKEN=${TWILIO_AUTH_TOKEN:-}
+      - SMS_FROM_NUMBER=${SMS_FROM_NUMBER:-}
+      - WHATSAPP_FROM=${WHATSAPP_FROM:-}
+      - AT_USERNAME=${AT_USERNAME:-}
     depends_on:
       postgres:
         condition: service_healthy

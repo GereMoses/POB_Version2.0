@@ -1,17 +1,19 @@
 import React, { useState, useCallback } from 'react';
 import {
   Table, Button, Select, DatePicker, Drawer, Descriptions,
-  Form, Input, AutoComplete, Modal, Alert, App, Tabs, Dropdown, Card, Space,
+  Form, Input, InputNumber, AutoComplete, Modal, Alert, App, Tabs, Dropdown, Card, Space, Tooltip, Tag, Checkbox,
 } from 'antd';
 import {
   PlusOutlined, CheckCircleOutlined, CloseCircleOutlined, SyncOutlined,
   ArrowUpOutlined, ArrowDownOutlined, ExclamationCircleOutlined,
   AuditOutlined, ReloadOutlined, DeleteOutlined, MoreOutlined,
-  SearchOutlined, WarningOutlined, SafetyCertificateOutlined,
+  SearchOutlined, WarningOutlined, SafetyCertificateOutlined, QrcodeOutlined,
+  TeamOutlined, InboxOutlined, CarOutlined, BellOutlined, DownloadOutlined,
 } from '@ant-design/icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import dayjs from 'dayjs';
 import apiService from '../../services/api';
+import LandJourneys from './LandJourneys';
 
 const TRANSPORT_TYPES = [
   { value: 3, label: 'Helicopter' },
@@ -75,6 +77,25 @@ const StatCard = ({ label, value, color, icon }) => (
   </div>
 );
 
+// Fitness-to-travel indicator (medical + safety training/cert validity)
+const COMPLIANCE_CFG = {
+  ok:      { color: '#16a34a', bg: '#f0fdf4', border: '#bbf7d0', label: 'Fit' },
+  warning: { color: '#d97706', bg: '#fffbeb', border: '#fde68a', label: 'Check' },
+  blocked: { color: '#dc2626', bg: '#fef2f2', border: '#fecaca', label: 'Unfit' },
+};
+const ComplianceTag = ({ c }) => {
+  if (!c) return null;
+  const cfg = COMPLIANCE_CFG[c.status] || COMPLIANCE_CFG.warning;
+  return (
+    <Tooltip title={c.issues?.length ? c.issues.join(' · ') : 'All travel records valid'}>
+      <span style={{ padding: '0 7px', borderRadius: 999, fontSize: 10, fontWeight: 700, whiteSpace: 'nowrap',
+        color: cfg.color, background: cfg.bg, border: `1px solid ${cfg.border}` }}>
+        {cfg.label}
+      </span>
+    </Tooltip>
+  );
+};
+
 // ─── Flight list ──────────────────────────────────────────────────────────────
 
 function FlightList({ onSelectFlight }) {
@@ -94,21 +115,31 @@ function FlightList({ onSelectFlight }) {
     }),
   });
 
+  const { data: analytics } = useQuery({
+    queryKey: ['transport-analytics'],
+    queryFn: () => apiService.get('/api/v1/transport/analytics'),
+    refetchInterval: 60_000,
+  });
+
   const createFlight = useMutation({
     mutationFn: (values) => apiService.post('/api/v1/transport/flights', {
       transport_identifier: values.transport_identifier,
       transport_type: values.transport_type,
       transport_operator: values.transport_operator,
       transport_capacity: values.transport_capacity || 12,
+      transport_max_payload_kg: values.transport_max_payload_kg || undefined,
       schedule_type: values.schedule_type || 'CHARTER',
       departure_location: values.departure_location,
       arrival_location: values.arrival_location,
       departure_time: values.departure_time.toISOString(),
       arrival_time: values.arrival_time ? values.arrival_time.toISOString() : undefined,
       notes: values.notes,
+      repeat_frequency: values.repeat_frequency || undefined,
+      repeat_count: values.repeat_frequency ? (values.repeat_count || 1) : 1,
     }),
-    onSuccess: () => {
-      message.success('Journey created');
+    onSuccess: (res) => {
+      const n = res?.occurrences_created || 1;
+      message.success(n > 1 ? `${n} journeys created` : 'Journey created');
       qc.invalidateQueries({ queryKey: ['transport-flights'] });
       flightForm.resetFields();
       setShowCreate(false);
@@ -222,6 +253,9 @@ function FlightList({ onSelectFlight }) {
         <StatCard label="Scheduled" value={flights.filter(f => f.status === 'SCHEDULED').length} color="#2563eb" icon={<AuditOutlined />} />
         <StatCard label="In Transit" value={flights.filter(f => f.status === 'IN_TRANSIT').length} color="#d97706" icon={<SyncOutlined />} />
         <StatCard label="Completed" value={flights.filter(f => f.status === 'COMPLETED').length} color="#16a34a" icon={<CheckCircleOutlined />} />
+        <StatCard label="Flights Today" value={analytics?.flights_today ?? 0} color="#0ea5e9" />
+        <StatCard label="PAX Moved Today" value={analytics?.pax_moved_today ?? 0} color="#7c3aed" />
+        <StatCard label="On-time" value={analytics?.on_time_pct != null ? `${analytics.on_time_pct}%` : '—'} color="#16a34a" />
       </div>
 
       <div style={{ background: '#fff', borderRadius: 8, boxShadow: '0 1px 4px rgba(0,0,0,0.06)', overflow: 'hidden' }}>
@@ -264,6 +298,10 @@ function FlightList({ onSelectFlight }) {
             <Form.Item name="transport_capacity" label="Capacity" initialValue={12}>
               <Input type="number" min={1} />
             </Form.Item>
+            <Form.Item name="transport_max_payload_kg" label="Max payload (kg)"
+              tooltip="Weight-and-balance limit — boarding is blocked above this (with override)">
+              <InputNumber min={0} style={{ width: '100%' }} placeholder="optional" />
+            </Form.Item>
             <Form.Item name="departure_location" label="From" rules={[{ required: true }]}>
               <AutoComplete options={locOpts} placeholder="Select or type a location"
                 filterOption={(i, o) => (o?.value ?? '').toLowerCase().includes(i.toLowerCase())} />
@@ -279,13 +317,29 @@ function FlightList({ onSelectFlight }) {
               <DatePicker showTime style={{ width: '100%' }} />
             </Form.Item>
           </div>
-          <Form.Item name="schedule_type" label="Schedule Type" initialValue="CHARTER" style={{ marginTop: 4 }}>
-            <Select options={[
-              { value: 'REGULAR', label: 'Regular' },
-              { value: 'CHARTER', label: 'Charter' },
-              { value: 'STANDBY', label: 'Standby' },
-            ]} />
-          </Form.Item>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '0 16px' }}>
+            <Form.Item name="schedule_type" label="Schedule Type" initialValue="CHARTER">
+              <Select options={[
+                { value: 'REGULAR', label: 'Regular' },
+                { value: 'CHARTER', label: 'Charter' },
+                { value: 'STANDBY', label: 'Standby' },
+              ]} />
+            </Form.Item>
+            <Form.Item name="repeat_frequency" label="Repeat"
+              tooltip="Generate a recurring series (e.g. weekly crew changes)">
+              <Select allowClear placeholder="One-off" options={[
+                { value: 'DAILY', label: 'Daily' },
+                { value: 'WEEKLY', label: 'Weekly' },
+              ]} />
+            </Form.Item>
+            <Form.Item noStyle shouldUpdate={(p, c) => p.repeat_frequency !== c.repeat_frequency}>
+              {({ getFieldValue }) => getFieldValue('repeat_frequency') ? (
+                <Form.Item name="repeat_count" label="Occurrences" initialValue={4}>
+                  <InputNumber min={1} max={60} style={{ width: '100%' }} />
+                </Form.Item>
+              ) : null}
+            </Form.Item>
+          </div>
           <Form.Item name="notes" label="Notes">
             <Input.TextArea rows={2} />
           </Form.Item>
@@ -300,10 +354,17 @@ function FlightList({ onSelectFlight }) {
 function ManifestDrawer({ flight, onClose }) {
   const { message, modal } = App.useApp();
   const [addForm] = Form.useForm();
+  const [crewForm] = Form.useForm();
+  const [cargoForm] = Form.useForm();
+  const [notifyForm] = Form.useForm();
   const [showAdd, setShowAdd] = useState(false);
+  const [showCrew, setShowCrew] = useState(false);
+  const [showCargo, setShowCargo] = useState(false);
+  const [showNotify, setShowNotify] = useState(false);
   const [paxOptions, setPaxOptions] = useState([]);
   const [reconcileResult, setReconcileResult] = useState(null);
   const [reconciling, setReconciling] = useState(false);
+  const [badgeCode, setBadgeCode] = useState('');
   const qc = useQueryClient();
 
   const { data, isLoading } = useQuery({
@@ -332,10 +393,15 @@ function ManifestDrawer({ flight, onClose }) {
       emp_code: values.emp_code,
       company: values.company,
       id_number: values.id_number,
+      body_weight: values.body_weight,
+      baggage_weight: values.baggage_weight,
       remarks: values.remarks,
     }),
-    onSuccess: () => {
-      message.success('Passenger added');
+    onSuccess: (res) => {
+      const c = res?.compliance;
+      if (c?.status === 'blocked') message.error(`Added — NOT fit to travel: ${c.issues.join('; ')}`, 6);
+      else if (c?.status === 'warning') message.warning(`Added — ${c.issues.join('; ')}`, 5);
+      else message.success('Passenger added');
       qc.invalidateQueries({ queryKey: ['manifest', flight.id] });
       qc.invalidateQueries({ queryKey: ['transport-flights'] });
       addForm.resetFields();
@@ -344,16 +410,97 @@ function ManifestDrawer({ flight, onClose }) {
     onError: (e) => message.error(e.message || 'Failed to add passenger'),
   });
 
+  const checkinBadge = useMutation({
+    mutationFn: (emp_code) => apiService.post(`/api/v1/transport/flights/${flight.id}/checkin`, { emp_code }),
+    onSuccess: (res) => {
+      message.success(`${res?.passenger_name || res?.emp_code || 'Passenger'} checked in`);
+      setBadgeCode('');
+      qc.invalidateQueries({ queryKey: ['manifest', flight.id] });
+      qc.invalidateQueries({ queryKey: ['transport-flights'] });
+      qc.invalidateQueries({ queryKey: ['pob-summary'] });
+    },
+    onError: (e) => message.error(e?.response?.data?.detail || e.message || 'Check-in failed'),
+  });
+
   const updateEntry = useMutation({
-    mutationFn: ({ entryId, status }) =>
-      apiService.patch(`/api/v1/transport/flights/${flight.id}/manifest/${entryId}`, { status }),
+    mutationFn: ({ entryId, status, override_capacity }) =>
+      apiService.patch(`/api/v1/transport/flights/${flight.id}/manifest/${entryId}`, { status, override_capacity }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['manifest', flight.id] });
       qc.invalidateQueries({ queryKey: ['transport-flights'] });
       qc.invalidateQueries({ queryKey: ['pob-summary'] });
     },
-    onError: (e) => message.error(e.message || 'Failed to update'),
+    onError: (e, vars) => {
+      const alreadyOverridden = vars?.override_capacity && vars?.override_compliance && vars?.override_weight;
+      // Any safety hard-block (capacity / fitness-to-travel / weight-and-balance)
+      // comes back as 409 — surface the reason and require an explicit override.
+      if (e?.status === 409 && vars?.status === 'CONFIRMED' && !alreadyOverridden) {
+        modal.confirm({
+          title: 'Boarding blocked',
+          icon: <WarningOutlined style={{ color: '#dc2626' }} />,
+          content: e.message,
+          okType: 'danger', okText: 'Override & confirm',
+          onOk: () => updateEntry.mutate({
+            ...vars, override_capacity: true, override_compliance: true, override_weight: true,
+          }),
+        });
+      } else {
+        message.error(e.message || 'Failed to update');
+      }
+    },
   });
+
+  const setCrew = useMutation({
+    mutationFn: (crew) => apiService.put(`/api/v1/transport/flights/${flight.id}/crew`, { crew }),
+    onSuccess: () => {
+      message.success('Crew updated');
+      qc.invalidateQueries({ queryKey: ['manifest', flight.id] });
+      setShowCrew(false);
+    },
+    onError: (e) => message.error(e.message || 'Failed to update crew'),
+  });
+
+  const setCargo = useMutation({
+    mutationFn: (items) => apiService.put(`/api/v1/transport/flights/${flight.id}/cargo`, { items }),
+    onSuccess: () => {
+      message.success('Cargo updated');
+      qc.invalidateQueries({ queryKey: ['manifest', flight.id] });
+      setShowCargo(false);
+    },
+    onError: (e) => message.error(e.message || 'Failed to update cargo'),
+  });
+
+  const notifyPax = useMutation({
+    mutationFn: (v) => apiService.post(`/api/v1/transport/flights/${flight.id}/notify`, v),
+    onSuccess: (res) => {
+      const r = res?.result || {};
+      const em = r.email?.sent, sm = r.sms?.sent;
+      const parts = [];
+      if (r.email) parts.push(r.email.error ? `Email: ${r.email.error}` : `Email sent to ${em}`);
+      if (r.sms) parts.push(r.sms.error ? `SMS: ${r.sms.error}` : `SMS sent to ${sm}`);
+      (em || sm) ? message.success(parts.join(' · ')) : message.warning(parts.join(' · ') || 'Nothing sent');
+      setShowNotify(false);
+    },
+    onError: (e) => message.error(e.message || 'Failed to notify'),
+  });
+
+  const downloadManifest = async () => {
+    try {
+      const token = localStorage.getItem('token') || localStorage.getItem('authToken');
+      const res = await fetch(`/api/v1/transport/flights/${flight.id}/manifest.xlsx`,
+        { headers: { Authorization: `Bearer ${token}` } });
+      if (!res.ok) throw new Error('Export failed');
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `manifest_${flight?.transport?.identifier || flight.id}.xlsx`;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      message.error('Export failed');
+    }
+  };
 
   const deleteEntry = useMutation({
     mutationFn: (entryId) =>
@@ -397,6 +544,7 @@ function ManifestDrawer({ flight, onClose }) {
   });
 
   const entries = data?.entries ?? [];
+  const summary = data?.summary ?? {};
   const inbound  = entries.filter(e => e.direction === 'INBOUND');
   const outbound = entries.filter(e => e.direction === 'OUTBOUND');
   const confirmedInbound  = inbound.filter(e => e.status === 'CONFIRMED').length;
@@ -404,12 +552,16 @@ function ManifestDrawer({ flight, onClose }) {
   const outstanding = entries.filter(e => e.status === 'MANIFESTED').length;
   const noShows    = entries.filter(e => e.status === 'NO_SHOW').length;
 
+  // Server enforces the safety gates (fitness-to-travel, capacity, weight & balance)
+  // and returns 409 with the reason; the updateEntry 409 handler drives the override.
+  const confirmPax = (row) => updateEntry.mutate({ entryId: row.id, status: 'CONFIRMED' });
+
   const makeEntryMenuItems = (row) => [
     row.status !== 'CONFIRMED' && {
       key: 'confirm',
       icon: <CheckCircleOutlined style={{ color: '#16a34a' }} />,
       label: 'Confirm',
-      onClick: () => updateEntry.mutate({ entryId: row.id, status: 'CONFIRMED' }),
+      onClick: () => confirmPax(row),
     },
     row.status !== 'NO_SHOW' && {
       key: 'noshow',
@@ -439,7 +591,10 @@ function ManifestDrawer({ flight, onClose }) {
       dataIndex: 'passenger_name',
       render: (name, row) => (
         <div>
-          <div style={{ fontWeight: 600 }}>{name}</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ fontWeight: 600 }}>{name}</span>
+            <ComplianceTag c={row.compliance} />
+          </div>
           {row.emp_code && (
             <div style={{ fontSize: 11, color: '#64748b' }}>
               {row.emp_code}{row.company ? ` · ${row.company}` : ''}
@@ -447,6 +602,20 @@ function ManifestDrawer({ flight, onClose }) {
           )}
         </div>
       ),
+    },
+    {
+      title: 'Weight',
+      width: 92,
+      align: 'right',
+      render: (_, r) => {
+        if (r.body_weight == null && r.baggage_weight == null) return <span style={{ color: '#cbd5e1' }}>—</span>;
+        return (
+          <span style={{ fontSize: 12 }}>
+            {r.body_weight || 0}
+            <span style={{ color: '#94a3b8' }}> +{r.baggage_weight || 0}kg</span>
+          </span>
+        );
+      },
     },
     {
       title: 'Status',
@@ -491,6 +660,12 @@ function ManifestDrawer({ flight, onClose }) {
       onClose={onClose}
       extra={
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <Button size="small" icon={<BellOutlined />} onClick={() => setShowNotify(true)}>
+            Notify
+          </Button>
+          <Button size="small" icon={<DownloadOutlined />} onClick={downloadManifest}>
+            Export
+          </Button>
           <Button
             size="small"
             icon={<SafetyCertificateOutlined />}
@@ -514,14 +689,77 @@ function ManifestDrawer({ flight, onClose }) {
     >
       {flight && (
         <>
-          <Descriptions size="small" column={2} style={{ marginBottom: 16 }}>
+          <Descriptions size="small" column={2} style={{ marginBottom: 12 }}>
             <Descriptions.Item label="Route">
               {flight.departure_location} → {flight.arrival_location}
             </Descriptions.Item>
             <Descriptions.Item label="Departure">
               {flight.departure_time ? dayjs(flight.departure_time).format('DD MMM YYYY HH:mm') : '—'}
             </Descriptions.Item>
+            <Descriptions.Item label="Seats">
+              <span style={{ fontWeight: 600 }}>{summary.seats_taken ?? 0}</span>
+              <span style={{ color: '#94a3b8' }}> / {summary.capacity ?? '—'}</span>
+              {summary.overbooked && <Tag color="red" style={{ marginLeft: 8 }}>Overbooked</Tag>}
+              {!summary.overbooked && summary.seats_available != null && (
+                <span style={{ color: '#16a34a', marginLeft: 8, fontSize: 12 }}>{summary.seats_available} free</span>
+              )}
+            </Descriptions.Item>
+            <Descriptions.Item label="Weight & Balance">
+              <Tooltip title={`Pax ${summary.body_weight_kg ?? 0} + baggage ${summary.baggage_weight_kg ?? 0} + cargo ${summary.cargo_weight_kg ?? 0} kg`}>
+                <span style={{ fontWeight: 600, color: summary.over_payload ? '#dc2626' : '#7c3aed' }}>{summary.total_weight_kg ?? 0} kg</span>
+              </Tooltip>
+              {summary.max_payload_kg ? <span style={{ color: '#94a3b8' }}> / {summary.max_payload_kg} kg</span> : null}
+              {summary.over_payload && <Tag color="red" style={{ marginLeft: 8 }}>Over limit</Tag>}
+            </Descriptions.Item>
+            {summary.actual_departure_time && (
+              <Descriptions.Item label="Actual Departure">
+                {dayjs(summary.actual_departure_time).format('DD MMM HH:mm')}
+                {summary.departure_delay_min != null && summary.departure_delay_min !== 0 && (
+                  <Tag color={summary.departure_delay_min > 0 ? 'red' : 'green'} style={{ marginLeft: 8 }}>
+                    {summary.departure_delay_min > 0
+                      ? `+${summary.departure_delay_min}m late`
+                      : `${Math.abs(summary.departure_delay_min)}m early`}
+                  </Tag>
+                )}
+              </Descriptions.Item>
+            )}
           </Descriptions>
+
+          {/* Badge / QR check-in at the helideck / gangway */}
+          <Space.Compact style={{ marginBottom: 16, width: '100%', maxWidth: 380 }}>
+            <Input
+              value={badgeCode}
+              onChange={(e) => setBadgeCode(e.target.value)}
+              onPressEnter={() => badgeCode.trim() && checkinBadge.mutate(badgeCode.trim())}
+              prefix={<QrcodeOutlined style={{ color: '#94a3b8' }} />}
+              placeholder="Scan badge / enter emp code to check in"
+              allowClear
+            />
+            <Button type="primary" icon={<CheckCircleOutlined />} loading={checkinBadge.isPending}
+              onClick={() => badgeCode.trim() && checkinBadge.mutate(badgeCode.trim())}>
+              Check in
+            </Button>
+          </Space.Compact>
+
+          {/* Crew & cargo */}
+          <div style={{ display: 'flex', gap: 10, marginBottom: 16, flexWrap: 'wrap' }}>
+            <Button size="small" icon={<TeamOutlined />}
+              onClick={() => { crewForm.setFieldsValue({ crew: summary.crew || [] }); setShowCrew(true); }}>
+              Crew ({summary.crew_count ?? 0})
+            </Button>
+            <Button size="small" icon={<InboxOutlined />}
+              onClick={() => { cargoForm.setFieldsValue({ items: summary.cargo || [] }); setShowCargo(true); }}>
+              Cargo ({summary.cargo_count ?? 0}{summary.cargo_weight_kg ? ` · ${summary.cargo_weight_kg}kg` : ''})
+            </Button>
+            {summary.has_dangerous_goods && (
+              <Tag color="red" icon={<WarningOutlined />} style={{ margin: 0, alignSelf: 'center' }}>Dangerous goods</Tag>
+            )}
+            {summary.crew?.length > 0 && (
+              <span style={{ alignSelf: 'center', fontSize: 12, color: '#64748b' }}>
+                {summary.crew.map(c => `${c.name}${c.role ? ` (${c.role})` : ''}`).join(', ')}
+              </span>
+            )}
+          </div>
 
           <div style={{ display: 'flex', gap: 10, marginBottom: 16 }}>
             <StatCard label="Arrivals Confirmed" value={confirmedInbound} color="#16a34a" icon={<ArrowDownOutlined />} />
@@ -612,10 +850,102 @@ function ManifestDrawer({ flight, onClose }) {
             <Form.Item name="id_number" label="Passport / ID No.">
               <Input />
             </Form.Item>
+            <Form.Item name="body_weight" label="Body Weight (kg)">
+              <InputNumber min={0} max={400} style={{ width: '100%' }} placeholder="e.g. 85" />
+            </Form.Item>
+            <Form.Item name="baggage_weight" label="Baggage (kg)">
+              <InputNumber min={0} max={200} style={{ width: '100%' }} placeholder="e.g. 15" />
+            </Form.Item>
           </div>
           <Form.Item name="remarks" label="Remarks" style={{ marginTop: 4 }}>
             <Input />
           </Form.Item>
+        </Form>
+      </Modal>
+
+      {/* Crew modal */}
+      <Modal title="Flight Crew" open={showCrew} onCancel={() => setShowCrew(false)}
+        onOk={() => crewForm.submit()} confirmLoading={setCrew.isPending} width={560}>
+        <Form form={crewForm} onFinish={(v) => setCrew.mutate((v.crew || []).filter(c => c && c.name))}>
+          <Form.List name="crew">
+            {(fields, { add, remove }) => (
+              <>
+                {fields.map(({ key, name, ...rest }) => (
+                  <Space key={key} align="baseline" style={{ display: 'flex', marginBottom: 8 }}>
+                    <Form.Item {...rest} name={[name, 'name']} rules={[{ required: true, message: 'Name' }]} style={{ marginBottom: 0 }}>
+                      <Input placeholder="Name" style={{ width: 180 }} />
+                    </Form.Item>
+                    <Form.Item {...rest} name={[name, 'role']} initialValue="PILOT" style={{ marginBottom: 0 }}>
+                      <Select style={{ width: 130 }} options={['CAPTAIN', 'PILOT', 'CO_PILOT', 'DRIVER', 'CREW'].map(r => ({ value: r, label: r }))} />
+                    </Form.Item>
+                    <Form.Item {...rest} name={[name, 'license_no']} style={{ marginBottom: 0 }}>
+                      <Input placeholder="License no." style={{ width: 120 }} />
+                    </Form.Item>
+                    <DeleteOutlined onClick={() => remove(name)} style={{ color: '#dc2626' }} />
+                  </Space>
+                ))}
+                <Button type="dashed" onClick={() => add({ role: 'PILOT' })} block icon={<PlusOutlined />}>
+                  Add crew member
+                </Button>
+              </>
+            )}
+          </Form.List>
+        </Form>
+      </Modal>
+
+      {/* Cargo modal */}
+      <Modal title="Cargo Manifest" open={showCargo} onCancel={() => setShowCargo(false)}
+        onOk={() => cargoForm.submit()} confirmLoading={setCargo.isPending} width={660}>
+        <Form form={cargoForm} onFinish={(v) => setCargo.mutate((v.items || []).filter(i => i && i.description))}>
+          <Form.List name="items">
+            {(fields, { add, remove }) => (
+              <>
+                {fields.map(({ key, name, ...rest }) => (
+                  <Space key={key} align="baseline" style={{ display: 'flex', marginBottom: 8 }}>
+                    <Form.Item {...rest} name={[name, 'description']} rules={[{ required: true, message: 'Description' }]} style={{ marginBottom: 0 }}>
+                      <Input placeholder="Description" style={{ width: 190 }} />
+                    </Form.Item>
+                    <Form.Item {...rest} name={[name, 'weight_kg']} style={{ marginBottom: 0 }}>
+                      <InputNumber placeholder="kg" min={0} style={{ width: 80 }} />
+                    </Form.Item>
+                    <Form.Item {...rest} name={[name, 'dangerous_goods']} valuePropName="checked" style={{ marginBottom: 0 }}>
+                      <Checkbox>DG</Checkbox>
+                    </Form.Item>
+                    <Form.Item {...rest} name={[name, 'un_number']} style={{ marginBottom: 0 }}>
+                      <Input placeholder="UN no." style={{ width: 90 }} />
+                    </Form.Item>
+                    <DeleteOutlined onClick={() => remove(name)} style={{ color: '#dc2626' }} />
+                  </Space>
+                ))}
+                <Button type="dashed" onClick={() => add({ weight_kg: 0, dangerous_goods: false })} block icon={<PlusOutlined />}>
+                  Add cargo item
+                </Button>
+              </>
+            )}
+          </Form.List>
+        </Form>
+      </Modal>
+
+      {/* Notify passengers modal */}
+      <Modal title="Notify passengers" open={showNotify} onCancel={() => setShowNotify(false)}
+        onOk={() => notifyForm.submit()} confirmLoading={notifyPax.isPending} okText="Send">
+        <p style={{ color: '#64748b', fontSize: 13, marginTop: 0 }}>
+          Emails/texts the passengers on this manifest who have contact details on file
+          (uses your configured Email / SMS gateways).
+        </p>
+        <Form form={notifyForm} layout="vertical"
+          initialValues={{ email: true, sms: false }}
+          onFinish={(v) => notifyPax.mutate(v)}>
+          <Form.Item name="subject" label="Subject (optional)">
+            <Input placeholder="Auto: Transport <id>: route" />
+          </Form.Item>
+          <Form.Item name="message" label="Message (optional)">
+            <Input.TextArea rows={3} placeholder="Auto: booking + departure details" />
+          </Form.Item>
+          <Space size="large">
+            <Form.Item name="email" valuePropName="checked" noStyle><Checkbox>Email</Checkbox></Form.Item>
+            <Form.Item name="sms" valuePropName="checked" noStyle><Checkbox>SMS</Checkbox></Form.Item>
+          </Space>
         </Form>
       </Modal>
 
@@ -823,6 +1153,11 @@ export default function TransportManifest() {
               key: 'flights',
               label: <Space size={5}><AuditOutlined />Flights</Space>,
               children: <FlightList onSelectFlight={setSelectedFlight} />,
+            },
+            {
+              key: 'journeys',
+              label: <Space size={5}><CarOutlined />Land Journeys</Space>,
+              children: <LandJourneys />,
             },
             {
               key: 'pob',

@@ -323,11 +323,25 @@ async def send_emergency_notification(
     Send emergency notification
     """
     try:
+        # Derive scope + target zones from the UI's recipient picker instead of
+        # always blasting everyone. "all" → global; "zones" → the selected access-
+        # control zones (people are matched by Personnel.current_zone_id).
+        recipients = request.recipients or {}
+        rtype = (recipients.get("type") or "all").lower()
+        target_zone_ids = None
+        if rtype == "zones" and recipients.get("zones"):
+            scope_val = EmergencyScope.ZONE.value
+            target_zone_ids = [int(z) for z in recipients["zones"]]
+        else:
+            # all / departments / users → global for now (dept/user targeting TBD)
+            scope_val = EmergencyScope.GLOBAL.value
+
         # Create emergency event for notification
         emergency_event = EmergencyEvent(
             event_type=request.event_type or EmergencyEventType.LOCKDOWN.value,
             status=EmergencyStatus.ACTIVE.value,
-            scope=EmergencyScope.GLOBAL.value,
+            scope=scope_val,
+            zone_ids=target_zone_ids,
             initiated_by=current_user.id,
             initiated_type=EmergencyInitiatedType.MANUAL_UI.value,
             trigger_source="Web UI - Notification",
@@ -339,7 +353,7 @@ async def send_emergency_notification(
                 "timestamp": datetime.now().isoformat()
             }]
         )
-        
+
         db.add(emergency_event)
         db.flush()
         
@@ -350,22 +364,38 @@ async def send_emergency_notification(
                 channel_map = {"sms": 0, "email": 1, "whatsapp": 2, "push": 3, "pa": 4, "siren": 5}
                 if channel_name.lower() in channel_map:
                     channels.append(channel_map[channel_name.lower()])
-        
+
         sent_count = await emergency_service.send_emergency_notifications(
             emergency_event.id, channels, db
         )
-        
+
         db.commit()
-        
+
+        # Tell the operator WHY nothing went out (unconfigured gateway) rather than
+        # silently reporting "sent to 0 recipients".
+        cfg = _notification_channel_config()
+        requested = {c for c, on in request.channels.items() if on}
+        unconfigured = sorted(
+            c for c in requested if c in cfg and not cfg[c]
+        )
+        message = f"Emergency notification sent to {sent_count} recipients"
+        if sent_count == 0 and unconfigured:
+            message += (f". Note: {', '.join(unconfigured)} "
+                        f"{'is' if len(unconfigured) == 1 else 'are'} not configured on the server.")
+        elif sent_count == 0:
+            message += ". No recipients had a contact address for the selected channels."
+
         return {
             "success": True,
             "data": {
                 "emergency_event_id": emergency_event.id,
                 "notifications_sent": sent_count,
-                "message": f"Emergency notification sent to {sent_count} recipients"
+                "channel_config": cfg,
+                "unconfigured_channels": unconfigured,
+                "message": message,
             }
         }
-        
+
     except Exception as e:
         db.rollback()
         logger.error(f"Error sending emergency notification: {str(e)}")
@@ -373,6 +403,80 @@ async def send_emergency_notification(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(e)
         )
+
+
+def _notification_channel_config() -> Dict[str, bool]:
+    """Which delivery channels have a configured gateway on the server right now."""
+    from app.services.notify_email import smtp_configured
+    from app.services.notify_sms import sms_configured
+    from app.services.notify_whatsapp import whatsapp_configured
+    return {
+        "email": smtp_configured(),
+        "sms": sms_configured(),
+        "whatsapp": whatsapp_configured(),
+    }
+
+
+class NotificationTestRequest(BaseModel):
+    channel: str = Field(..., description="email, sms, or whatsapp")
+    address: str = Field(..., description="Destination email address or phone number")
+
+
+@router.get("/notify/config")
+async def get_notification_config(
+    current_user: AuthUser = Depends(get_current_user),
+):
+    """Report which notification channels are configured, so the UI can show
+    'not configured' badges instead of failing silently."""
+    return {"success": True, "data": _notification_channel_config()}
+
+
+@router.post("/notify/test")
+async def send_notification_test(
+    request: NotificationTestRequest,
+    current_user: AuthUser = Depends(get_current_user),
+):
+    """Send a single test message on one channel to one address so an operator can
+    verify each gateway end-to-end. Returns the raw sender result (sent/failed/error)."""
+    channel = (request.channel or "").lower()
+    address = (request.address or "").strip()
+    if not address:
+        raise HTTPException(status_code=400, detail="A destination address is required")
+
+    body = "POB test alert — if you received this, this channel is working."
+    subject = "POB notification test"
+
+    try:
+        if channel == "email":
+            from app.services.notify_email import send_email
+            result = await asyncio.to_thread(
+                send_email, address, subject, f"<p>{body}</p>", body
+            )
+        elif channel == "sms":
+            from app.services.notify_sms import send_sms
+            result = await asyncio.to_thread(send_sms, address, body)
+        elif channel == "whatsapp":
+            from app.services.notify_whatsapp import send_whatsapp
+            result = await asyncio.to_thread(send_whatsapp, address, body)
+        else:
+            raise HTTPException(status_code=400, detail=f"Unknown channel '{request.channel}'")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Notification test error ({channel} → {address}): {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    ok = bool(result.get("sent"))
+    return {
+        "success": ok,
+        "data": {
+            "channel": channel,
+            "address": address,
+            "sent": result.get("sent", 0),
+            "failed": result.get("failed", []),
+            "error": result.get("error"),
+        },
+    }
 
 @router.get("/notifications/")
 async def list_emergency_notifications(

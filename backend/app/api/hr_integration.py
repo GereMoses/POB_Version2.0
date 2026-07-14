@@ -15,7 +15,7 @@ import logging
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -24,7 +24,7 @@ from ..core.database import get_db
 from ..core.dependencies import get_current_user
 from ..services.seamlesshr_service import (
     get_config, push_attendance, test_connection,
-    _build_attendance_records,
+    _build_attendance_records, pull_employees, pull_leave, handle_webhook_event,
 )
 
 logger = logging.getLogger(__name__)
@@ -210,6 +210,58 @@ async def manual_sync(
     result = await push_attendance(db, sync_date=sync_date, triggered_by=current_user.email,
                                    force=body.force, allow_today=body.allow_today)
     return result
+
+
+@router.post("/pull-employees")
+async def pull_employees_endpoint(
+    db: Session = Depends(get_db),
+    current_user=Depends(_require_admin),
+):
+    """Pull the employee master from SeamlessHR into ApexPOB personnel. Pulled records
+    are marked as SeamlessHR-managed and become read-only here (SeamlessHR is the
+    system of record). Field mapping is config-driven (Settings → HR Integration)."""
+    result = await pull_employees(db, triggered_by=getattr(current_user, "email", "manual"))
+    if result.get("error"):
+        raise HTTPException(status_code=502, detail=result["error"])
+    # Also refresh leave so muster rosters exclude anyone on approved leave (best-effort).
+    leave = await pull_leave(db, triggered_by=getattr(current_user, "email", "manual"))
+    return {"success": True, **result, "on_leave": leave.get("on_leave", 0)}
+
+
+@router.post("/webhook")
+async def seamlesshr_webhook(request: Request, db: Session = Depends(get_db)):
+    """Receive real-time employee events from SeamlessHR (create/update/deactivate).
+
+    SeamlessHR calls this URL directly — it is NOT admin-authenticated; instead the
+    request is verified via the `x-seamlesshr-signature` header (HMAC-SHA512 of the
+    raw body with the configured webhook secret). On success the employee master is
+    upserted (read-only in ApexPOB) or the leaver is offboarded.
+    """
+    import hmac
+    import hashlib
+    import json
+
+    raw = await request.body()
+    cfg = get_config(db)
+    opts = cfg["options"] if cfg else {}
+    # HMAC secret: dedicated webhook_secret if set, else fall back to the API secret.
+    secret = (opts.get("webhook_secret") or (cfg["api_key"] if cfg else "")) or ""
+
+    if secret:
+        provided = request.headers.get("x-seamlesshr-signature", "") or ""
+        expected = hmac.new(secret.encode(), raw, hashlib.sha512).hexdigest()
+        if not hmac.compare_digest(expected, provided):
+            raise HTTPException(status_code=401, detail="Invalid webhook signature")
+
+    try:
+        payload = json.loads(raw or b"{}")
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    event = payload.get("event")
+    data = payload.get("data") or {}
+    result = handle_webhook_event(db, event, data, opts)
+    return {"success": True, "event": event, "result": result}
 
 
 # ── Sync history ──────────────────────────────────────────────────────────────

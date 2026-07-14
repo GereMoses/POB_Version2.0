@@ -80,6 +80,12 @@ def _person_to_dict(p: Personnel) -> Dict[str, Any]:
         "medical_conditions": p.medical_conditions,
         "biotime_employee_id": p.biotime_employee_id,
         "biometric_quality_score": p.biometric_quality_score or 0.0,
+        # HR system-of-record: when 'SEAMLESSHR', master fields are read-only here.
+        "hr_source": getattr(p, "hr_source", None),
+        "hr_synced_at": _iso(getattr(p, "hr_synced_at", None)),
+        "hr_managed": getattr(p, "hr_source", None) == "SEAMLESSHR",
+        "on_leave": bool(getattr(p, "on_leave", False)),
+        "leave_end_date": _iso(getattr(p, "leave_end_date", None)),
         "last_seen": _iso(p.last_seen),
         "created_at": _iso(p.created_at),
         "updated_at": _iso(p.updated_at),
@@ -641,6 +647,32 @@ async def update_personnel(
         "passport_number": "passport_number",
     }
 
+    # SeamlessHR is the system of record for employee MASTER data. If this person was
+    # synced from SeamlessHR, its master fields are read-only in ApexPOB — reject any
+    # attempt to change them (operational fields below stay editable). Defence-in-depth:
+    # the UI also disables these fields.
+    HR_MASTERED_FIELDS = {
+        "emp_code", "first_name", "last_name", "email", "phone", "company",
+        "department", "department_id", "role", "position", "employment_type",
+        "personnel_type", "hire_date", "nationality", "id_number", "passport_number",
+    }
+    if getattr(person, "hr_source", None) == "SEAMLESSHR":
+        blocked = []
+        for f in HR_MASTERED_FIELDS:
+            if f in data:
+                db_field = field_map.get(f, f)
+                if getattr(person, db_field, None) != data[f]:
+                    blocked.append(f)
+        if blocked:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "This employee is managed by SeamlessHR (system of record). "
+                    f"These fields are read-only here: {', '.join(sorted(blocked))}. "
+                    "Update them in SeamlessHR; they sync back to ApexPOB."
+                ),
+            )
+
     # Snapshot the old value of each field about to change, for the audit trail (#1).
     _to_j = lambda v: v if isinstance(v, (str, int, float, bool, type(None))) else str(v)
     changed = {}
@@ -695,7 +727,16 @@ async def delete_personnel(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Personnel not found"
         )
-    
+
+    # SeamlessHR owns the employee lifecycle — don't allow deleting a mastered record
+    # in ApexPOB (offboard in SeamlessHR; the change syncs back).
+    if getattr(personnel, "hr_source", None) == "SEAMLESSHR":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This employee is managed by SeamlessHR and cannot be deleted in ApexPOB. "
+                   "Offboard them in SeamlessHR.",
+        )
+
     try:
         from sqlalchemy import text
         p = {"personnel_id": personnel_id}
