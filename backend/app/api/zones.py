@@ -598,6 +598,17 @@ def _delete_single_zone(db: Session, zone_id: int) -> None:
     db.execute(text("UPDATE access_logs SET zone_id = NULL WHERE zone_id = :z"), {"z": zone_id})
     db.execute(text("UPDATE pay_zone_allowance SET area_id = NULL WHERE area_id = :z"), {"z": zone_id})
     db.execute(text("UPDATE mustering_event SET zone_id = NULL WHERE zone_id = :z"), {"z": zone_id})
+    # Muster/assembly-point references on events (NO ACTION FKs — must clear or the
+    # delete fails with a foreign-key violation). muster_zone_id is the single
+    # assembly point; muster_zone_ids is the multi-select jsonb array.
+    db.execute(text("UPDATE mustering_event SET muster_zone_id = NULL WHERE muster_zone_id = :z"), {"z": zone_id})
+    db.execute(text(
+        "UPDATE mustering_event SET muster_zone_ids = ("
+        "  SELECT COALESCE(jsonb_agg(e), '[]'::jsonb) FROM jsonb_array_elements(muster_zone_ids) e"
+        "  WHERE e <> to_jsonb(:z::int)"
+        ") WHERE muster_zone_ids IS NOT NULL AND muster_zone_ids @> to_jsonb(:z::int)"
+    ), {"z": zone_id})
+    db.execute(text("UPDATE access_readers SET zone_id = NULL WHERE zone_id = :z"), {"z": zone_id})
     db.execute(text("UPDATE emergency_template SET auto_mustering_zone_id = NULL WHERE auto_mustering_zone_id = :z"), {"z": zone_id})
     db.execute(text("UPDATE emergency_plan SET zone_id = NULL WHERE zone_id = :z"), {"z": zone_id})
     db.execute(text("UPDATE vis_type SET mustering_zone_id = NULL WHERE mustering_zone_id = :z"), {"z": zone_id})
