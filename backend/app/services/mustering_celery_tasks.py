@@ -833,6 +833,29 @@ def seamlesshr_reconcile(self):
         db.close()
 
 
+@celery_app.task(max_retries=3)
+def daily_auto_checkout():
+    """Daily: if enabled in Settings → Database, check out anyone whose last punch
+    was an entry more than N days ago (a forgotten check-in). No-op when disabled.
+    Shares the exact logic used by the manual button in the Database tab."""
+    from app.services import database_admin_service as dbadmin
+    db = SessionLocal()
+    try:
+        cfg = dbadmin.get_settings(db)
+        if not cfg.get("auto_checkout_enabled"):
+            logger.info("daily_auto_checkout: disabled — skipping")
+            return {"skipped": True}
+        res = dbadmin.auto_checkout_stale(db, cfg.get("auto_checkout_days", 1))
+        logger.info("daily_auto_checkout: %s", res)
+        return res
+    except Exception as e:
+        logger.error("daily_auto_checkout error: %s", e)
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
 celery_app.conf.beat_schedule = {
     'check-scheduled-drills': {
         'task': 'app.services.mustering_celery_tasks.check_scheduled_drills',
@@ -858,6 +881,10 @@ celery_app.conf.beat_schedule = {
         'task': 'app.tasks.compliance_email_celery.send_compliance_digest_task',
         'schedule': crontab(hour=6, minute=0),  # 06:00 UTC daily
         'args': (),
+    },
+    'daily-auto-checkout': {
+        'task': 'app.services.mustering_celery_tasks.daily_auto_checkout',
+        'schedule': crontab(hour=3, minute=0),  # 03:00 UTC daily
     },
 }
 

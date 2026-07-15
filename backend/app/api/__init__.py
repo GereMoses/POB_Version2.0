@@ -116,6 +116,11 @@ api_router.include_router(subscription_router, prefix="/subscription", tags=["Su
 from .backup import router as backup_router
 api_router.include_router(backup_router, prefix="/backup", tags=["Backup Management"])
 
+# Database administration — overview, occupancy reset/auto-checkout, maintenance,
+# retention, integrity (Global Admin only)
+from .database_admin import router as database_admin_router
+api_router.include_router(database_admin_router, prefix="/database", tags=["Database Admin"])
+
 # HR Integration — SeamlessHR connector
 from .hr_integration import router as hr_integration_router
 api_router.include_router(hr_integration_router, prefix="/hr-integration", tags=["HR Integration"])

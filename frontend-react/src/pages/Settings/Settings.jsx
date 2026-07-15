@@ -23,6 +23,7 @@ import {
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import apiService from '../../services/api';
 import EmailSetup from '../Emergency/EmailSetup';
+import DatabaseTab from './DatabaseTab';
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
 dayjs.extend(relativeTime);
@@ -3415,6 +3416,7 @@ const Settings = () => {
     { key: 'security',  label: <Space><ClockCircleOutlined />Security</Space>,     children: <SecurityTab /> },
     { key: 'sessions',  label: <Space><DesktopOutlined />Active Sessions</Space>,  children: <SessionsTab /> },
     { key: 'audit-log', label: <Space><AuditOutlined />Audit Log</Space>,          children: <AuditLogTab /> },
+    { key: 'database',       label: <Space><DatabaseOutlined />Database</Space>,           children: <DatabaseTab /> },
     { key: 'backup',         label: <Space><DatabaseOutlined />Database Backup</Space>,    children: <BackupTab /> },
     { key: 'hr-integration', label: <Space><ApiOutlined />HR Integration</Space>,          children: <HRIntegrationTab /> },
     { key: 'bc-integration', label: <Space><LinkOutlined />Business Central</Space>,       children: <BCIntegrationTab /> },
