@@ -367,6 +367,21 @@ services:
       - pob_internal
     restart: unless-stopped
 
+  # ── Cloudflare Tunnel — remote web access with NO inbound ports ──────────────
+  # The connector dials OUT to Cloudflare's edge (needs egress → pob_external) and
+  # exposes the app at the hostname configured in the Zero Trust dashboard, routed
+  # to the local nginx. Public-hostname + TLS settings live in the dashboard; the
+  # connector token lives in .env.prod (CLOUDFLARE_TUNNEL_TOKEN) — never committed.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: pob_cloudflared
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      - nginx
+    networks:
+      - pob_external
+    restart: unless-stopped
+
 # ── Named Volumes ─────────────────────────────────────────────────────────────
 volumes:
   postgres_data:
