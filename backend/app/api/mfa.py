@@ -43,14 +43,29 @@ def _set_totp_secret(db: Session, user_id: int, secret: str | None) -> None:
 
 
 def _ensure_totp_column(db: Session) -> None:
-    """Create totp_secret column if it doesn't exist."""
+    """Add the totp columns to auth_user if missing.
+
+    CRITICAL: only run ALTER TABLE when a column is actually absent. `ALTER TABLE
+    ... ADD COLUMN IF NOT EXISTS` still acquires an ACCESS EXCLUSIVE lock on the
+    table even when the column already exists — so calling it on every MFA request
+    serialises ALL auth_user access behind that lock. If it ever queues behind an
+    open transaction, every login hangs. The cheap information_schema check below
+    takes only an ACCESS SHARE lock, so once the columns exist this is a no-op with
+    no locking. (Column creation is really a migration concern; this is a safety net.)
+    """
     try:
-        db.execute(text(
-            "ALTER TABLE auth_user ADD COLUMN IF NOT EXISTS totp_secret TEXT"
-        ))
-        db.execute(text(
-            "ALTER TABLE auth_user ADD COLUMN IF NOT EXISTS totp_enabled BOOLEAN DEFAULT FALSE"
-        ))
+        existing = {r[0] for r in db.execute(text(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'auth_user' AND column_name IN ('totp_secret', 'totp_enabled')"
+        )).fetchall()}
+        db.commit()  # release the read transaction promptly (avoid idle-in-txn)
+        if {'totp_secret', 'totp_enabled'} <= existing:
+            return  # both present — nothing to do, no exclusive lock taken
+        db.execute(text("SET LOCAL lock_timeout = '3s'"))
+        if 'totp_secret' not in existing:
+            db.execute(text("ALTER TABLE auth_user ADD COLUMN IF NOT EXISTS totp_secret TEXT"))
+        if 'totp_enabled' not in existing:
+            db.execute(text("ALTER TABLE auth_user ADD COLUMN IF NOT EXISTS totp_enabled BOOLEAN DEFAULT FALSE"))
         db.commit()
     except Exception:
         db.rollback()
